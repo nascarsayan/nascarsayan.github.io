@@ -1,0 +1,23 @@
+/*
+ * Motion layer. Elements with [data-reveal] rise in the first time they enter
+ * the viewport; [data-reveal-stagger] staggers its direct children. Hidden
+ * states apply only once JS has marked <html class="js">, so content is never
+ * lost without it. Reduced motion: everything appears at once.
+ */
+:root {
+  --ease-spring: cubic-bezier(0.2, 0.8, 0.2, 1.2);
+  --ease-soft: cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+@keyframes m-rise { from { opacity: 0; transform: translateY(14px); } to { opacity: 1; transform: none; } }
+@keyframes m-pop { 0% { opacity: 0; transform: scale(0.7); } 60% { opacity: 1; transform: scale(1.06); } 100% { opacity: 1; transform: scale(1); } }
+@keyframes m-fade { from { opacity: 0; } to { opacity: 1; } }
+
+html.js [data-reveal]:not(.is-in),
+html.js [data-reveal-stagger]:not(.is-in) > * { opacity: 0; }
+html.js [data-reveal].is-in { animation: m-rise 600ms var(--ease-soft) var(--d, 0ms) both; }
+html.js [data-reveal-stagger].is-in > * { animation: m-rise 600ms var(--ease-soft) both; animation-delay: calc(var(--i, 0) * 80ms + var(--d, 0ms)); }
+
+@media (prefers-reduced-motion: reduce) {
+  html.js [data-reveal]:not(.is-in), html.js [data-reveal-stagger]:not(.is-in) > * { opacity: 1; }
+  html.js [data-reveal].is-in, html.js [data-reveal-stagger].is-in > * { animation: none; }
+}

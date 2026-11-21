@@ -1,0 +1,89 @@
+---
+import '@/styles/global.css';
+import '@/styles/motion.css';
+import Header from '@/components/header/Header.astro';
+import Footer from '@/components/footer/Footer.astro';
+import { SITE } from '@/config/site';
+
+/** toc: the page has a contents rail; the header shows its toggle (left of the name). */
+interface Props { title?: string; description?: string; htmlClass?: string; toc?: boolean }
+const { title, description = SITE.description, htmlClass, toc = false } = Astro.props;
+const fullTitle = title ? `${title} • ${SITE.title}` : SITE.title;
+---
+
+<!doctype html>
+<html lang="en" class={htmlClass} data-color-mode="light">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{fullTitle}</title>
+    <meta name="description" content={description} />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta property="og:title" content={fullTitle} />
+    <meta property="og:description" content={description} />
+    <!-- Theme: auto (follows the browser/OS, live), light or dark. Auto is the
+         default; an explicit choice is kept in localStorage ('theme') and honoured
+         on every visit until the reader picks auto again (ThemeToggle).
+         html[data-theme] is the choice, html[data-color-mode] what is shown. -->
+    <script is:inline>
+      (function () {
+        var root = document.documentElement;
+        localStorage.removeItem('color-mode'); // older builds' keys
+        sessionStorage.removeItem('color-mode');
+        var mq = window.matchMedia('(prefers-color-scheme: dark)');
+        var pref = localStorage.getItem('theme');
+        if (pref !== 'light' && pref !== 'dark') pref = 'auto';
+        root.classList.add('js');
+        root.dataset.theme = pref;
+        root.dataset.colorMode = pref === 'auto' ? (mq.matches ? 'dark' : 'light') : pref;
+        mq.addEventListener('change', function (e) {
+          if (root.dataset.theme === 'auto') root.dataset.colorMode = e.matches ? 'dark' : 'light';
+        });
+        root.dataset.sound = 'off'; // sound starts muted on every load
+        localStorage.removeItem('sound-enabled'); // older builds persisted it
+        // Contents start as a dash rail unless the reader opened them before.
+        if (localStorage.getItem('toc') !== 'open') root.dataset.toc = 'collapsed';
+      })();
+    </script>
+    <slot name="head" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+    <div class="page">
+      <Header toc={toc} />
+      <slot name="hero" />
+      <main id="main" class="main">
+        <slot />
+      </main>
+      <Footer />
+    </div>
+    <script>
+      import { initReveal } from '@/scripts/reveal';
+      import { initSoundClicks } from '@/scripts/sound';
+      import { initTerms } from '@/scripts/terms';
+      initReveal();
+      initSoundClicks();
+      initTerms();
+      // Links off this site open in a new tab (links added later, e.g. term cards, set their own target).
+      for (const a of document.querySelectorAll<HTMLAnchorElement>('a[href]')) {
+        if (a.host && a.host !== location.host && !a.target) { a.target = '_blank'; a.rel = 'noopener'; }
+      }
+    </script>
+  </body>
+</html>
+
+<style>
+  .page { display: flex; flex-direction: column; min-height: 100vh; }
+  .main { flex: 1; }
+  .skip-link {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    z-index: var(--z-skip);
+    padding: 8px 16px;
+    background: var(--color-background);
+    border-radius: 4px;
+    transform: translateY(-200%);
+  }
+  .skip-link:focus { transform: none; }
+</style>

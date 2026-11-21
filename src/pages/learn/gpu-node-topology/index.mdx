@@ -1,0 +1,190 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Reading GPU node topology: PCIe, NUMA and GPU links"
+short: "Node topology"
+description: "How to find out, on a live node, which CPU cores, NIC and PCIe switch belong to which GPU, and how the GPUs link to each other. Read-only commands for AMD (lspci, sysfs, amd-smi topology, KFD) and NVIDIA (nvidia-smi topo -m, fabric state), with the full map of an illustrative 8-GPU MI355X node."
+updated: "2026-11-10"
+track: fundamentals
+order: 5
+requires: [gpu-memory-and-interconnects]
+eyebrow: "Learn · GPU fundamentals"
+---
+import Callout from '@/components/content/Callout.astro';
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import NodeMap from './_NodeMap.astro';
+import paths from './_paths.diagram';
+import { slices, g5, g5Split, n5Split, g5Switch, g5Candidates } from './_node';
+
+A GPU server is not a flat box of 8 GPUs. Each GPU sits on a specific PCIe switch, under a specific CPU root complex, in a specific NUMA node, next to a specific NIC. Software that ignores this sends data the long way round. This page shows how to read the layout on a live node with read-only commands, using one 8-GPU MI355X node as the worked example. The concepts (PCIe, XGMI, NVLink, GPUDirect) are in [memory and interconnects](/learn/gpu-memory-and-interconnects/).
+
+## The idea first
+
+**A building analogy.** The server is two buildings (the two **CPU sockets**) joined by a bridge (the socket-to-socket link). Each building is one **NUMA node**: a group of CPU cores with the RAM closest to them. Each building has four corridors (**PCIe switches**), and on each corridor sit one GPU and one NIC. Walking down your own corridor is quick. Going to another corridor means passing through the building's central hall (the CPU's I/O fabric); going to the other building means crossing the bridge as well.
+
+| Piece | The question it answers |
+| --- | --- |
+| NUMA node | Which CPU cores and which RAM should feed this GPU? |
+| PCIe root complex and switch | Which devices can talk without going through the CPU? |
+| NIC on the same switch | Which network port should this GPU's traffic use? |
+| GPU-to-GPU links | Do GPUs talk directly, through a switch chip, or only through the CPU? |
+| Link speed and width | Did every link come up at full speed? (A x16 link that trained as x8 halves bandwidth without any error.) |
+
+**Where the analogy breaks.** The GPUs also have a private tunnel network of their own: on MI355X all 8 GPUs are wired directly to each other over XGMI, so GPU-to-GPU traffic never uses the corridors at all. And the numbers on the doors follow different schemes: GPU 0 is `card1` and `ens1np0`, but `renderD128` and `rdma0` (below).
+
+## An 8-GPU MI355X node, mapped
+
+An illustrative example node, `gpu-node-1` (an 8-GPU OAM server: 2 CPU sockets, 8 × MI355X, 8 × 400 GbE RDMA NICs; all values below are made up but realistic). Each socket is one NUMA node, so GPUs 0–3 share NUMA node 0 and GPUs 4–7 share NUMA node 1. Pick a GPU and a NIC to see how far apart they are:
+
+<NodeMap />
+
+<table>
+  <thead><tr><th>amd-smi GPU</th><th>PCI address</th><th>NUMA node</th><th>Local CPU cores</th><th>PCIe root</th><th>NIC (same switch)</th><th>Net device</th><th>DRA device</th></tr></thead>
+  <tbody>{slices.map((s) => <tr><td>{s.gpu}</td><td><code>{s.bdf}</code></td><td>{s.numa}</td><td>{s.cores}</td><td><code>{s.root}</code></td><td><code>{s.mlx}</code></td><td><code>{s.netdev}</code></td><td><code style="white-space:nowrap">{s.dra}</code></td></tr>)}</tbody>
+</table>
+
+Things to notice:
+
+- **Numbering schemes differ.** GPU index and `rdmaN` count from 0, `ensNnp0` and `cardN` from 1, render nodes from 128. On this example they happen to line up in the same order; on many real servers they do not (GPU 0 can sit next to the fifth NIC). Never assume "GPU 3 uses NIC 3". Look it up, or let the scheduler do it from attributes.
+- **The bus number tells the socket.** Here buses `00`–`7f` hang off CPU 0 and `80`–`ff` off CPU 1. Larger servers may use a second PCI domain (`0001:`) for the second socket instead.
+- **One slice per root complex.** Each GPU and its NIC share one root complex and one PCIe Gen5 switch. Every GPU-NIC pair is `PIX` distance in NVIDIA terms: the best case.
+- The DRA device name encodes the card and render minor: `gpu-6-133` is `card6` and `renderD133`.
+
+## Worked example: find GPU 5's NIC from scratch
+
+Suppose network traffic from the Pod on GPU 5 is slow and you want to check it uses the right NIC and CPU cores. The outputs below are illustrative example output for `gpu-node-1`; the common-prefix comparison is computed from them.
+
+<Walkthrough title="GPU 5: from index to NIC, cores and ResourceSlice" caption="All commands are read-only and safe on a node with live workloads.">
+  <WStep title="1 · Index → PCI address">
+<pre><code>{("\u0024 amd-smi list        # GPU 5 entry, trimmed\nGPU: 5\n    BDF: " + (g5.bdf) + "\n    KFD_ID: 53412\n    NODE_ID: 7")}</code></pre>
+    The **BDF** (bus:device.function, with the PCI domain in front) is the one name every tool agrees on. Indexes, card numbers and KFD node IDs all differ between tools; start from the BDF.
+  </WStep>
+  <WStep title="2 · PCI address → position in the PCIe tree">
+<pre><code>{("\u0024 readlink -f /sys/bus/pci/devices/" + (g5.bdf) + "\n/sys/devices/")}<mark>{g5Split.shared}</mark>{("/" + (g5Split.rest))}</code></pre>
+    sysfs lays out each device under its parents. Read left to right: root complex <code>{g5.root}</code>, the root port, then <code>{g5Switch}</code> (the switch's upstream port), then the GPU itself. (Simplified: real paths also show a switch downstream port, and often bridges inside the GPU module, before the GPU.) The highlighted part is what step 3 finds in common with the NIC.
+  </WStep>
+  <WStep title="3 · Compare with every NIC: who shares the switch?">
+<pre><code>{("\u0024 readlink -f /sys/class/infiniband/" + (g5.mlx) + "/device\n/sys/devices/")}<mark>{n5Split.shared}</mark>{("/" + (n5Split.rest))}</code></pre>
+    <table>
+      <thead><tr><th>NIC</th><th>Path components shared with GPU 5</th><th>Distance</th></tr></thead>
+      <tbody>{g5Candidates.map((c) => <tr><td><code>{c.mlx}</code></td><td>{c.shared}</td><td>{c.shared >= 3 ? <strong>{c.dist}</strong> : c.dist}</td></tr>)}</tbody>
+    </table>
+    Of the 8 NICs only <code>{g5.mlx}</code> shares GPU 5's root, root port and switch upstream port <code>{g5Switch}</code>. Below that port the two sit on different downstream ports of that one switch: GPU-to-NIC traffic turns around inside the switch and never reaches the CPU.
+  </WStep>
+  <WStep title="4 · NIC → network interface and link state">
+<pre><code>{("\u0024 ls /sys/class/infiniband/" + (g5.mlx) + "/device/net\n" + (g5.netdev) + "\n\u0024 cat /sys/class/infiniband/" + (g5.mlx) + "/ports/1/{link_layer,state,rate}\nEthernet\n4: ACTIVE\n400 Gb/sec (4X NDR)")}</code></pre>
+    The RDMA device <code>{g5.mlx}</code> is the network interface <code>{g5.netdev}</code>: the name a Multus network attachment uses. It runs RoCE (RDMA over Ethernet), is up, at 400 Gb/s.
+  </WStep>
+  <WStep title="5 · NUMA node → CPU cores">
+<pre><code>{("\u0024 cat /sys/bus/pci/devices/" + (g5.bdf) + "/numa_node\n" + (g5.numa) + "\n\u0024 lscpu | grep 'NUMA node" + (g5.numa) + "'\nNUMA node" + (g5.numa) + " CPU(s):      " + (g5.cores.replace('–', '-').replace(', ', ',').replace('–', '-')))}</code></pre>
+    The process feeding GPU 5 should run on these cores, and its pinned host buffers should live in NUMA node {g5.numa}'s RAM. `amd-smi static -g 5` reports the same affinity in its `NUMA` section.
+  </WStep>
+  <WStep title="6 · What Kubernetes sees">
+<pre><code>{("\u0024 kubectl get resourceslice -o yaml     # node `gpu-node-1`, trimmed\n    name: " + (g5.dra) + "              # card6, renderD133\n    attributes:\n      numaNode: {int: " + (g5.numa) + "}\n      partitionProfile: {string: spx_nps1}\n      resource.kubernetes.io/pciBusID: {string: \"" + (g5.bdf) + "\"}\n      resource.kubernetes.io/pcieRoot: {string: " + (g5.root) + "}")}</code></pre>
+    The AMD DRA driver publishes the same facts as device attributes. `pcieRoot` is a standard Kubernetes attribute name, so a claim can ask for a GPU and a NIC with matching roots, if the NIC is also published through DRA. When Pods get NICs through Multus instead, the pairing is by configuration, not by the scheduler. See [GPU Pod networking](/learn/gpu-pod-networking/).
+  </WStep>
+</Walkthrough>
+
+The cost of getting it wrong, as packets:
+
+<Diagram spec={paths} title="GPU 5 sending through three different NICs" caption="Part of an MI355X node. Only the first route stays inside one PCIe switch.">
+  <Step title="Its own NIC: same switch" path="g5 => sw5 => n5">GPU 5 → switch → `rdma5`. The CPU is not involved; this is the path GPUDirect RDMA wants.</Step>
+  <Step title="Same socket, another slice" path="g5 => sw5 => cpu1 => sw4 => n4">To `rdma4`: up to root `pci0000:a0`, through CPU 1's I/O fabric, down root `pci0000:80`. Two extra PCIe hops, and the traffic competes with everything else on that CPU.</Step>
+  <Step title="The other socket" path="g5 => sw5 => cpu1 => cpu0 => sw0 => n0">To `rdma0`: across the socket-to-socket link as well. The worst case (`SYS` in NVIDIA's terms); NCCL's default GPUDirect policy would not use this pair.</Step>
+</Diagram>
+
+## AMD: other views
+
+### PCIe tree
+
+`lspci -tv` draws the same tree as the sysfs paths. GPU 5's slice as illustrative output, trimmed and simplified (switch downstream ports folded into `...`):
+
+```text
+ +-[0000:a0]-+-00.0  AMD Root Complex
+ |           +-01.1-[a8-af]----00.0  PCIe Gen5 switch (upstream port a8:00.0)
+ |                               +-...-[a9]----00.0  AMD/ATI Instinct MI355X
+ |                               \-...-[aa]----00.0  Mellanox ConnectX-7
+```
+
+The bridge at `a8:00.0` is the switch's upstream port. The GPU and NIC are its children.
+
+### Link speed
+
+```text
+$ cat /sys/bus/pci/devices/0000:11:00.0/{current_link_speed,current_link_width}
+32.0 GT/s PCIe
+16
+```
+
+Compare `current_link_*` with `max_link_*`. On a healthy node like this example, all GPUs and NICs run at 32 GT/s x16 (PCIe Gen5). `ibv_devices`, `ibv_devinfo` and `rdma link` show the NICs through the RDMA tools.
+
+### amd-smi
+
+- `amd-smi list` maps GPU index to PCI address (`BDF`), UUID and KFD IDs.
+- `amd-smi static -g N` has a `NUMA` section (node and CPU affinity) and a `BUS` section (PCIe generation, width, slot type `OAM`).
+- `amd-smi topology` prints matrices between every GPU pair: `ACCESS`, `WEIGHT`, `HOPS`, `LINK TYPE`, `NUMA BW`, `CACHE COHERENCY`, `ATOMICS`, `DMA`, `BI-DIRECTIONAL`. In the example output every off-diagonal cell is `XGMI`, 1 hop, weight 15, `72000-72000`, coherent: a full mesh. A healthy 8-GPU MI355X node always looks like this; a `PCIE` cell or a missing GPU means a link failed. The output is shown in [memory and interconnects](/learn/gpu-memory-and-interconnects/).
+
+### The kernel's view: KFD topology
+
+The ROCm runtime builds its picture from `/sys/class/kfd/kfd/topology/nodes/`. Each CPU NUMA node and each GPU is a "node"; on the example node nodes 0–1 are CPUs and 2–9 are GPUs. Each GPU node has `io_links` (illustrative output for GPU 2):
+
+```text
+nodes/4/io_links/0: type 2  node_from 4 node_to 0  weight 20 max_bandwidth 64000
+nodes/4/io_links/1: type 11 node_from 4 node_to 2  weight 15 min_bandwidth 72000 max_bandwidth 72000
+...                 (six more type 11 links, to nodes 3 and 5-9)
+```
+
+Link type 2 is PCIe (to CPU node 0, its NUMA node, 64,000 MB/s) and type 11 is XGMI (to each other GPU, 72,000 MB/s). The `properties` file of the same node carries `hive_id`, which is identical on all eight GPUs. The type numbers come from the kernel's CRAT definitions; the output agrees with `amd-smi topology`.
+
+## NVIDIA: reading it yourself
+
+The NVIDIA side below comes from NVIDIA documentation.
+
+**`nvidia-smi topo -m`** prints a matrix of GPUs, NICs and CPU affinity. Each cell is a distance code. The tool prints its own legend; NVIDIA's NCCL documentation defines the PCIe levels the same way:
+
+| Code | Meaning |
+| --- | --- |
+| `X` | self |
+| `NV#` | connected by NVLink, `#` links bonded |
+| `PIX` | through at most one PCIe switch |
+| `PXB` | through several PCIe switches, without the CPU |
+| `PHB` | through a CPU PCIe host bridge, same NUMA node |
+| `NODE` | between host bridges inside one NUMA node (from the tool's legend; not checked in NCCL docs) |
+| `SYS` | across the CPU-to-CPU interconnect between NUMA nodes |
+
+On an NVSwitch system, GPU-to-GPU cells show `NV#`, and a well-built server shows `PIX` between each GPU and its paired NIC. The same codes are what `NCCL_P2P_LEVEL` and `NCCL_NET_GDR_LEVEL` take as thresholds.
+
+Other read-only views:
+
+- `nvidia-smi nvlink` subcommands show per-link state and counters (`nvidia-smi nvlink -h` lists them).
+- `nvidia-smi -q` has a **Fabric** section: `State` of the GPU's handshake with Fabric Manager (`Completed`, `In Progress`, `Not Started`), `Status`, and on multi-node NVLink systems a **Clique ID** (GPUs that can reach each other over NVLink share one) and a **Cluster UUID**. On NVL72, every GPU in the rack's NVLink domain should show the same cluster UUID. A GPU whose fabric state is not `Completed` has no usable NVLink.
+- The NVIDIA DRA driver publishes PCIe attributes per GPU and, for NVL72, NVLink domain information (see [rack-scale GPUs](/learn/rack-scale-gpus/)); details are covered there.
+
+## Side by side
+
+| Question | AMD command | NVIDIA command |
+| --- | --- | --- |
+| List GPUs and PCI addresses | `amd-smi list` | `nvidia-smi -L`, `nvidia-smi -q` |
+| GPU-to-GPU links | `amd-smi topology` | `nvidia-smi topo -m`, `nvidia-smi nvlink` |
+| NUMA and CPU affinity | `amd-smi static` (NUMA), sysfs `numa_node` | `nvidia-smi topo -m` (CPU affinity columns) |
+| Fabric health | XGMI rows in `amd-smi topology`, `amd-smi metric` | `nvidia-smi -q` Fabric section, Fabric Manager logs |
+| PCIe tree and speed | `lspci -tv`, sysfs `current_link_*` | same |
+| RDMA NICs | `ibv_devinfo`, `rdma link` | same |
+
+<Callout tone="note" title="All read-only">Every command on this page only reads. They are safe to run on a node with live workloads. The `amd-smi set` and `amd-smi reset` families, and `nvidia-smi -r` or `-pm`, are not.</Callout>
+
+## How this shows up in operations
+
+- **Debugging slow GPU-to-network transfers:** check the Pod's GPU and NIC are in the same slice (same `pcieRoot` and NUMA node). A Pod given the "wrong" NIC sends every byte across the CPU interconnect.
+- **After hardware work:** compare `current_link_width` and `amd-smi topology` with the table above. A reseated GPU that trained at x8, or a hive with a missing XGMI link, still "works", just slower.
+- **Naming in alerts:** metrics and logs may name a GPU by index, PCI address, card number, render minor, KFD node or UUID. Keep a map like the one above per node type.
+
+## Further reading
+
+- [amd-smi CLI reference](https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html) · [rocminfo](https://rocm.docs.amd.com/projects/rocminfo/en/latest/)
+- [AMD GPU Operator DRA driver](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/dra/dra-driver.html)
+- [nvidia-smi documentation](https://docs.nvidia.com/deploy/nvidia-smi/index.html) · [NCCL_P2P_LEVEL](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#nccl-p2p-level)
+- [GPUDirect RDMA: supported systems](https://docs.nvidia.com/cuda/gpudirect-rdma/index.html#supported-systems)
+- [Kubernetes DRA: standard device attributes](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/)

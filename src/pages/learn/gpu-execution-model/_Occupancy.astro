@@ -1,0 +1,131 @@
+---
+/**
+ * Occupancy calculator. AMD rules: LLVM AMDGPU docs (VGPRs = align(v, 4) + a,
+ * allocated in blocks of 8, 512 per lane per SIMD; LDS granule 1,280 B on
+ * gfx950, 512 B on gfx942). NVIDIA rules: the algorithm in CUDA
+ * cuda_occupancy.h (registers per warp rounded up to 256, per sub-partition;
+ * shared memory + 1 KB reserved, rounded up to 128 B). Cross-checked against
+ * hipcc remarks and cuda_occupancy.h for the cases noted on the page.
+ */
+const gpus = {
+  mi355x: { label: 'AMD MI355X (gfx950)', vendor: 'amd', lds: 160 * 1024, ldsGran: 1280, simds: 4, slots: 8, wave: 64 },
+  mi300x: { label: 'AMD MI300X (gfx942)', vendor: 'amd', lds: 64 * 1024, ldsGran: 512, simds: 4, slots: 8, wave: 64 },
+  h100: { label: 'NVIDIA H100 SXM (sm_90)', vendor: 'nv', smem: 233472, smemBlock: 232448, reserved: 1024, simds: 4, slots: 16, wave: 32, regs: 65536, blocks: 32 },
+};
+---
+
+<figure class="oc" data-occ={JSON.stringify(gpus)}>
+  <figcaption class="oc-title">Occupancy calculator</figcaption>
+  <div class="oc-in">
+    <label>GPU <select data-k="gpu">{Object.entries(gpus).map(([k, g]) => <option value={k}>{g.label}</option>)}</select></label>
+    <label>Threads per block <select data-k="threads">{[64, 128, 256, 512, 1024].map((t) => <option value={t} selected={t === 256}>{t}</option>)}</select></label>
+    <label><span data-o="vlabel">Registers per thread</span> <input data-k="v" type="range" min="8" max="256" step="8" value="96" /> <output data-o="v"></output></label>
+    <label data-o="arow">Accumulation registers (AGPRs) <input data-k="a" type="range" min="0" max="256" step="8" value="32" /> <output data-o="a"></output></label>
+    <label>LDS / shared memory per block <input data-k="lds" type="range" min="0" max="160" step="4" value="48" /> <output data-o="lds"></output></label>
+  </div>
+  <div class="oc-out">
+    <div><span class="k" data-o="unitk">Blocks per CU</span><span class="v" data-o="blocks"></span></div>
+    <div><span class="k" data-o="wavek">Waves per SIMD</span><span class="v" data-o="waves"></span></div>
+    <div><span class="k">Occupancy</span><span class="v" data-o="occ"></span></div>
+    <div><span class="k">Limited by</span><span class="v" data-o="lim"></span></div>
+  </div>
+  <table class="oc-tab">
+    <thead><tr><th>Limit</th><th>Calculation</th><th>Blocks</th></tr></thead>
+    <tbody data-o="rows"></tbody>
+  </table>
+  <div class="oc-slots" data-o="slots" aria-hidden="true"></div>
+  <p class="oc-src" data-o="src"></p>
+</figure>
+
+<style>
+  .oc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .oc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .oc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .oc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .oc-in label.is-off { opacity: 0.4; }
+  .oc-in select, .oc-in input { accent-color: var(--color-primary); }
+  .oc-in output { min-width: 56px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .oc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .oc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .oc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .oc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .oc-tab { margin-top: 12px; font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+  .oc-tab :global(tr.is-min td) { font-weight: 700; color: var(--color-primary); }
+  .oc-slots { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+  .oc-slots :global(.row) { display: flex; align-items: center; gap: 3px; font-size: 0.6875rem; color: var(--color-muted); }
+  .oc-slots :global(.row > span:first-child) { min-width: 96px; }
+  .oc-slots :global(i) { width: 22px; height: 16px; border-radius: 3px; background: var(--color-gray-100); }
+  .oc-slots :global(i.b0) { background: #3b82f6; }
+  .oc-slots :global(i.b1) { background: #10b981; }
+  .oc-slots :global(i.b2) { background: #f59e0b; }
+  .oc-slots :global(i.b3) { background: #a855f7; }
+  .oc-src { margin-top: 8px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const up = (v: number, g: number) => Math.ceil(v / g) * g;
+  const kb = (b: number) => `${(b / 1024).toFixed(b % 1024 ? 2 : 0)} KB`;
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-occ]')) {
+    const gpus = JSON.parse(fig.dataset.occ!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const out = (k: string) => $<HTMLElement>(`[data-o=${k}]`);
+    const num = (k: string) => Number($<HTMLInputElement>(`[data-k=${k}]`).value);
+    const update = () => {
+      const g = gpus[$<HTMLSelectElement>('[data-k=gpu]').value];
+      const amd = g.vendor === 'amd';
+      const threads = num('threads'), v = Math.min(num('v'), amd ? 256 : 255), a = amd ? num('a') : 0;
+      const ldsMaxKB = Math.floor((amd ? g.lds : g.smemBlock) / 1024);
+      const ldsIn = $<HTMLInputElement>('[data-k=lds]');
+      ldsIn.max = String(ldsMaxKB);
+      const lds = Math.min(num('lds'), ldsMaxKB) * 1024;
+      const w = Math.ceil(threads / g.wave);
+      out('v').textContent = String(v);
+      out('a').textContent = String(a);
+      out('lds').textContent = kb(lds);
+      out('vlabel').textContent = amd ? 'VGPRs per thread' : 'Registers per thread';
+      out('arow').classList.toggle('is-off', !amd);
+      $<HTMLInputElement>('[data-k=a]').disabled = !amd;
+      out('unitk').textContent = amd ? 'Workgroups per CU' : 'Blocks per SM';
+      out('wavek').textContent = amd ? 'Waves per SIMD (average)' : 'Warps per SM';
+      const rows: [string, string, number][] = [];
+      if (amd) {
+        const total = up(up(v, 4) + a, 8);
+        const wps = Math.min(g.slots, Math.floor(512 / total));
+        rows.push(['Registers', `align(${v}, 4) + ${a} → ${total} per lane; 512 ÷ ${total} → ${wps} waves/SIMD × 4 SIMDs ÷ ${w} waves per block`, Math.floor((4 * wps) / w)]);
+        const alloc = up(lds, g.ldsGran);
+        rows.push(['LDS', lds ? `${lds} B → ${alloc / g.ldsGran} granules of ${g.ldsGran} B = ${alloc} B; ${g.lds} ÷ ${alloc}` : 'none used', lds ? Math.floor(g.lds / alloc) : Infinity]);
+        rows.push(['Wave slots', `${g.slots * g.simds} per CU ÷ ${w} waves per block`, Math.floor((g.slots * g.simds) / w)]);
+      } else {
+        const perWarp = up(v * 32, 256);
+        const wSub = Math.floor(g.regs / 4 / perWarp);
+        rows.push(['Registers', `${v} × 32 → ${perWarp} per warp; ${g.regs / 4} per sub-partition ÷ ${perWarp} → ${wSub} warps × 4 ÷ ${w} warps per block`, Math.floor((wSub * 4) / w)]);
+        const alloc = up(lds + g.reserved, 128);
+        rows.push(['Shared memory', `${lds} B + 1,024 reserved → ${alloc} B; ${g.smem} ÷ ${alloc}`, Math.floor(g.smem / alloc)]);
+        rows.push(['Warp slots', `64 per SM ÷ ${w} warps per block`, Math.floor(64 / w)]);
+        rows.push(['Block slots', '32 per SM', g.blocks]);
+      }
+      const blocks = Math.max(0, Math.min(...rows.map((r) => r[2])));
+      const resident = blocks * w;
+      const maxW = g.slots * g.simds;
+      out('rows').innerHTML = rows
+        .map((r) => `<tr class="${r[2] === blocks ? 'is-min' : ''}"><td>${r[0]}</td><td>${r[1]}</td><td>${Number.isFinite(r[2]) ? r[2] : '–'}</td></tr>`)
+        .join('');
+      out('blocks').textContent = String(blocks);
+      out('waves').textContent = amd ? `${(resident / 4).toFixed(resident % 4 ? 1 : 0)} of 8` : `${resident} of 64`;
+      out('occ').textContent = `${Math.round((resident / maxW) * 100)} %`;
+      out('lim').textContent = blocks === 0 ? 'does not fit' : rows.filter((r) => r[2] === blocks).map((r) => r[0]).join(', ');
+      // Slot picture: blocks dealt round-robin, one wave per SIMD at a time.
+      const fill: number[][] = [...Array(g.simds)].map(() => []);
+      let k = 0;
+      for (let b = 0; b < blocks; b++) for (let x = 0; x < w; x++) fill[k++ % g.simds].push(b);
+      out('slots').innerHTML = fill
+        .map((col, s) => `<div class="row"><span>${amd ? `SIMD ${s}` : `sub-partition ${s}`}</span>${[...Array(g.slots)].map((_, j) => `<i class="${j < col.length ? `b${col[j] % 4}` : ''}" title="${j < col.length ? `block ${col[j]}` : 'free slot'}"></i>`).join('')}</div>`)
+        .join('');
+      out('src').textContent = amd
+        ? 'Each coloured square is a resident wave (colour = its workgroup). Assumes waves spread evenly over the 4 SIMDs. SGPRs and any per-CU workgroup cap are not modelled; the compiler remark "Occupancy [waves/SIMD]" includes everything.'
+        : 'Each coloured square is a resident warp (colour = its block). Same algorithm as cuda_occupancy.h, assuming the largest shared-memory carve-out (228 KB). Nsight Compute shows the exact value for a real kernel.';
+    };
+    fig.querySelectorAll('select, input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

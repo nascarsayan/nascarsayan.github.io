@@ -1,0 +1,101 @@
+---
+/**
+ * Batch size → arithmetic intensity of one gpt-oss-120b GEMM, against the
+ * MI355X ridge. Shapes from the published config; peaks are spec-sheet values
+ * (approximate); same byte model as _example.ts.
+ */
+const gemms = {
+  qkv: { label: 'QKV projection (BF16)', K: 2880, N: 5120, w: 2, peak: 2.5e15, moe: false },
+  o: { label: 'Output projection (BF16)', K: 4096, N: 2880, w: 2, peak: 2.5e15, moe: false },
+  gu: { label: 'Expert gate/up (MXFP4, 128 experts, top-4)', K: 2880, N: 5760, w: 4.25 / 8, peak: 5.0e15, moe: true },
+  lm: { label: 'LM head (BF16, vocab 201,088)', K: 2880, N: 201088, w: 2, peak: 2.5e15, moe: false },
+};
+---
+
+<figure class="dcc" data-dcc={JSON.stringify(gemms)}>
+  <figcaption class="dcc-title">Decode GEMM: how batch size moves intensity</figcaption>
+  <div class="dcc-in">
+    <label>Layer <select data-k="g">{Object.entries(gemms).map(([k, g]) => <option value={k}>{g.label}</option>)}</select></label>
+    <label>Rows (sequences in the batch, or prompt tokens) <input data-k="b" type="range" min="0" max="13" step="1" value="6" /> <output data-o="b"></output></label>
+  </div>
+  <div class="dcc-out">
+    <div><span class="k">Rows per weight read</span><span class="v" data-o="rows"></span></div>
+    <div><span class="k">FLOPs</span><span class="v" data-o="fl"></span></div>
+    <div><span class="k">Bytes from HBM</span><span class="v" data-o="by"></span></div>
+    <div><span class="k">Intensity</span><span class="v" data-o="i"></span></div>
+    <div><span class="k">Time ≥</span><span class="v" data-o="t"></span></div>
+  </div>
+  <div class="dcc-scale" aria-hidden="true">
+    <span class="dcc-ridge" data-o="ridge"></span>
+    <span class="dcc-dot" data-o="dot"></span>
+  </div>
+  <div class="dcc-axis" aria-hidden="true"><span>1</span><span>10</span><span>100</span><span>1,000</span><span>10,000 FLOP/B</span></div>
+  <p class="dcc-note" data-o="note"></p>
+  <p class="dcc-src">Bytes = weights once + input and output rows (BF16). MoE: tokens spread over 128 experts, 4 each, uniform routing assumed; only experts that get a token are read; expert math at the FP8 peak (w4a8 assumed). Peaks: MI355X spec, 8 TB/s, 2.5 PFLOP/s BF16, 5.0 PFLOP/s FP8 (approximate).</p>
+</figure>
+
+<style>
+  .dcc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .dcc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .dcc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .dcc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .dcc-in select, .dcc-in input { accent-color: var(--color-primary); }
+  .dcc-in output { min-width: 50px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .dcc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .dcc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .dcc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .dcc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .dcc-scale { position: relative; height: 18px; margin-top: 16px; border-radius: 999px; background: linear-gradient(90deg, #fde68a, #fde68a var(--r, 60%), #bbf7d0 var(--r, 60%)); }
+  .dcc-ridge { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--color-gray-800); }
+  .dcc-ridge::after { content: 'ridge'; position: absolute; top: -18px; left: -14px; font-size: 0.6875rem; color: var(--color-gray-700); }
+  .dcc-dot { position: absolute; top: 1px; width: 16px; height: 16px; margin-left: -8px; border-radius: 999px; background: var(--color-primary); border: 2px solid white; transition: left 150ms; }
+  .dcc-axis { display: flex; justify-content: space-between; margin-top: 2px; font-size: 0.6875rem; color: var(--color-muted); }
+  .dcc-note { margin-top: 8px; font-size: 0.875rem; }
+  .dcc-src { margin-top: 2px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const BS = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192];
+  const BW = 8e12;
+  const si = (x: number, u: string) => {
+    for (const [v, p] of [[1e12, 'T'], [1e9, 'G'], [1e6, 'M'], [1e3, 'k']] as const) if (x >= v) return `${(x / v).toFixed(1)} ${p}${u}`;
+    return `${x.toFixed(0)} ${u}`;
+  };
+  const tm = (s: number) => (s >= 1e-3 ? `${(s * 1e3).toFixed(2)} ms` : `${(s * 1e6).toFixed(1)} µs`);
+  const pos = (i: number) => Math.min(100, Math.max(0, (Math.log10(Math.max(i, 1)) / 4) * 100));
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-dcc]')) {
+    const gemms = JSON.parse(fig.dataset.dcc!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const out = (k: string) => $<HTMLElement>(`[data-o=${k}]`);
+    const update = () => {
+      const g = gemms[$<HTMLSelectElement>('[data-k=g]').value];
+      const b = BS[Number($<HTMLInputElement>('[data-k=b]').value)];
+      let flops: number, bytes: number, rows: string;
+      if (g.moe) {
+        const pairs = b * 4, hit = 128 * (1 - Math.pow(124 / 128, b));
+        flops = 2 * pairs * g.K * g.N;
+        bytes = hit * g.K * g.N * g.w + pairs * (g.K + g.N) * 2;
+        rows = `~${(pairs / hit).toFixed(1)} per expert (${Math.round(hit)} of 128 hit)`;
+      } else {
+        flops = 2 * b * g.K * g.N;
+        bytes = g.K * g.N * g.w + b * (g.K + g.N) * 2;
+        rows = String(b);
+      }
+      const I = flops / bytes, ridge = g.peak / BW, t = Math.max(bytes / BW, flops / g.peak);
+      out('b').textContent = String(b);
+      out('rows').textContent = rows;
+      out('fl').textContent = si(flops, 'FLOP');
+      out('by').textContent = si(bytes, 'B');
+      out('i').textContent = `${I >= 10 ? Math.round(I).toLocaleString('en-US') : I.toFixed(1)} FLOP/B`;
+      out('t').textContent = tm(t);
+      fig.style.setProperty('--r', `${pos(ridge)}%`);
+      out('ridge').style.left = `${pos(ridge)}%`;
+      out('dot').style.left = `${pos(I)}%`;
+      out('note').textContent = I < ridge
+        ? `Memory-bound: ${I.toFixed(1)} FLOP/B is below the ~${Math.round(ridge)} FLOP/B ridge. The matrix cores wait for weights; the time is set by reading ${si(bytes, 'B')} at 8 TB/s. Doubling the rows nearly doubles the work for almost the same time.`
+        : `Compute-bound: ${Math.round(I)} FLOP/B is above the ~${Math.round(ridge)} FLOP/B ridge. Each weight byte is reused enough that the matrix cores set the speed: this is prefill territory.`;
+    };
+    fig.querySelectorAll('select, input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

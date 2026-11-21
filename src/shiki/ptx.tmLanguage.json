@@ -1,0 +1,50 @@
+{
+ "name": "ptx",
+ "scopeName": "source.ptx",
+ "fileTypes": [
+  "ptx"
+ ],
+ "patterns": [
+  {
+   "name": "comment.line.double-slash.ptx",
+   "match": "//.*$"
+  },
+  {
+   "name": "comment.block.ptx",
+   "begin": "/\\*",
+   "end": "\\*/"
+  },
+  {
+   "name": "entity.name.label.ptx",
+   "match": "^\\s*[$A-Za-z_][\\w$]*:"
+  },
+  {
+   "name": "keyword.control.predicate.ptx",
+   "match": "@!?%[\\w]+"
+  },
+  {
+   "name": "storage.type.directive.ptx",
+   "match": "^\\s*\\.(?:version|target|address_size|visible|entry|func|reg|param|global|shared|local|const|align|maxntid|reqntid|pragma|loc|file|section)\\b"
+  },
+  {
+   "name": "keyword.other.opcode.ptx",
+   "match": "(?<=^|\\s|;|\\})(?!%)[a-z][a-z0-9_]*(?:\\.[a-z0-9_]+)+(?=\\s)|(?<=^\\s{0,12})(?:ret|exit|bra|bar|trap)\\b"
+  },
+  {
+   "name": "keyword.other.opcode.ptx",
+   "match": "^\\s*[a-z][a-z0-9_]*(?=\\s)"
+  },
+  {
+   "name": "variable.other.register.ptx",
+   "match": "%[A-Za-z_][\\w.]*"
+  },
+  {
+   "name": "constant.numeric.ptx",
+   "match": "\\b(?:0[xX][0-9a-fA-F]+|\\d+(?:\\.\\d+)?)\\b"
+  },
+  {
+   "name": "punctuation.ptx",
+   "match": "[{}\\[\\];,]"
+  }
+ ]
+}

@@ -1,0 +1,148 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPU fundamentals (overview)"
+short: "GPU fundamentals"
+description: "The physical and software picture of a datacenter GPU in one view: what is in the package, how bytes move, how it boots, the software layers and partitioning. AMD MI355X and NVIDIA GB300 side by side, plus the name map you will keep coming back to."
+updated: "2026-11-10"
+track: fundamentals
+hub: true
+order: 9
+requires: [what-is-a-gpu, gpu-number-formats, gpu-boot-and-firmware, gpu-memory-and-interconnects, gpu-node-topology, gpu-software-stack, gpu-partitioning]
+eyebrow: "Learn · Overview"
+---
+import LearnGraph from '@/components/learn/LearnGraph.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import * as j from './_journey';
+import { slices } from '../gpu-node-topology/_node';
+export const g0 = slices[0];
+
+<LearnGraph hub="gpu-fundamentals" />
+
+This track is for a Linux and Kubernetes engineer who has never had to care what is inside a GPU. Read the pages in the order below; each builds on the one before. Every page puts AMD (MI355X) next to NVIDIA (Blackwell Ultra in HGX/DGX B300 and GB300 NVL72), and uses illustrative read-only output from an example 8-GPU MI355X server.
+
+## The idea first
+
+Think of one GPU as a **factory with its own warehouse**, sitting in a business park (the server). The track answers, in order, the questions you would ask about such a factory:
+
+| Question | Everyday version | Page |
+| --- | --- | --- |
+| What is inside? | thousands of identical workstations next to a very fast warehouse | [What a GPU is](/learn/what-is-a-gpu/) |
+| How is the material packed? | smaller boxes ship faster but hold less detail | [Number formats](/learn/gpu-number-formats/) |
+| How does it start up? | the factory's own staff (firmware) open it before the head office (Linux driver) arrives | [Boot and firmware](/learn/gpu-boot-and-firmware/) |
+| How does material arrive? | conveyor belts inside, roads between buildings, the motorway to other parks; each ten times slower | [Memory and interconnects](/learn/gpu-memory-and-interconnects/) |
+| Which road is nearest? | every factory has its own loading dock and its own on-ramp; use that one | [Node topology](/learn/gpu-node-topology/) |
+| Who gives the orders? | the head office (host) owns the building rules; each tenant (container) brings its own tools | [Software stack](/learn/gpu-software-stack/) |
+| Can tenants share it? | split the factory into sealed halves or eighths | [Partitioning](/learn/gpu-partitioning/) |
+
+Where the picture breaks: a real factory runs many different jobs; a GPU runs the same instruction on many numbers at once, and is happiest when the job is one giant matrix multiply.
+
+## One prefill GPU, through the whole track
+
+<Walkthrough title={("GPU " + (g0.gpu) + " (" + (g0.bdf) + ") of an 8-GPU MI355X server, serving gpt-oss-120b")} caption="Example identifiers from the illustrative node `gpu-node-1`; times computed from approximate peak link speeds (real transfers are slower). Each step links to the page that explains it.">
+  <WStep title="1 · The chip">
+    <Kpis items={[
+      { label: 'CUs', value: '256', detail: '8 XCDs × 32' },
+      { label: 'HBM', value: ("" + (j.hbmGB) + " GB"), detail: '8 TB/s', tone: 'primary' },
+      { label: 'Weights', value: ("~" + (j.weightsGB) + " GB"), detail: ("" + (j.pct) + "% of HBM") },
+      { label: 'Held by the Pod', value: ("~" + (j.heldGB) + " GB"), detail: 'the rest is KV cache reserve', tone: 'note' },
+    ]} />
+    <p>The model fits on one MI355X with room to spare; vLLM reserves most of the rest for KV cache. <a href="/learn/what-is-a-gpu/">What a GPU is</a>.</p>
+  </WStep>
+  <WStep title="2 · The numbers">
+    <p>Each token of the prompt leaves keys and values in every layer: 2 × 36 layers × 8 KV heads × 64 × 2 bytes = <strong>{(j.kvPerTokenB / 1024).toFixed(0)} KiB</strong> per token in BF16. A {j.promptTokens.toLocaleString('en-US')}-token prompt: <strong>{j.fmt(j.kvMB, 0)} MB</strong>. In FP8 it would be half. <a href="/learn/gpu-number-formats/">Number formats</a>.</p>
+  </WStep>
+  <WStep title="3 · The boot">
+    <p>At power-on the PSP boots from the card's IFWI; at driver load <code>amdgpu</code> probes <code>{g0.bdf}</code>, loads microcode, joins the 8-GPU XGMI hive and creates <code>/dev/dri/renderD128</code> (plus the node-wide <code>/dev/kfd</code>). <a href="/learn/gpu-boot-and-firmware/">Boot and firmware</a>.</p>
+  </WStep>
+  <WStep title="4 · The links">
+    <table>
+      <thead><tr><th>Move</th><th>Link</th><th>Time at peak</th></tr></thead>
+      <tbody>
+        <tr><td>Load {j.weightsGB} GB of weights at startup</td><td>PCIe Gen5 x16, 64 GB/s</td><td>{j.fmt(j.t.loadS, 2)} s (once)</td></tr>
+        <tr><td>Read all weights once</td><td>HBM, 8 TB/s</td><td>{j.fmt(j.t.readMs, 1)} ms</td></tr>
+        <tr><td>Read one prompt's KV ({j.fmt(j.kvMB, 0)} MB)</td><td>HBM</td><td>{j.fmt(j.t.kvHbmUs, 0)} µs</td></tr>
+        <tr><td>Ship that KV to another server</td><td>one 400 Gb/s NIC, 50 GB/s</td><td>{j.fmt(j.t.kvNicMs, 1)} ms</td></tr>
+      </tbody>
+    </table>
+    <p>The network hop is 160× slower than HBM: disaggregated serving pays it once per request. <a href="/learn/gpu-memory-and-interconnects/">Memory and interconnects</a>.</p>
+  </WStep>
+  <WStep title="5 · The layout">
+    <p>GPU {g0.gpu} sits on NUMA node {g0.numa} (CPU cores {g0.cores}) under root <code>{g0.root}</code>, and shares a PCIe switch with NIC <code>{g0.mlx}</code> = <code>{g0.netdev}</code>. Do not assume NIC N belongs to GPU N: each name follows its own numbering. The KV bytes go GPU → switch → NIC without touching host RAM. <a href="/learn/gpu-node-topology/">Node topology</a>.</p>
+  </WStep>
+  <WStep title="6 · The software">
+    <p>Host: <code>amdgpu</code> driver 6.14.0 and firmware bundle 1.2.3 (example versions), shared by all 8 Pods. Image: ROCm build of vLLM, PyTorch, hipBLASLt, RCCL. A kernel launch is a packet written into a ring buffer plus a doorbell write; the driver does not see it. <a href="/learn/gpu-software-stack/">Software stack</a>.</p>
+  </WStep>
+  <WStep title="7 · The split">
+    <p>The card runs SPX + NPS1: one logical GPU with all 256 CUs and 288 GB. Kubernetes sees it as ResourceSlice device <code>{g0.dra}</code> with <code>partitionProfile: spx_nps1</code>, one of 8 on the node. In CPX it would be 8 devices of 32 CUs each, and gpt-oss-120b's ~{j.weightsGB} GB of weights would no longer fit in one of them. <a href="/learn/gpu-partitioning/">Partitioning</a>.</p>
+  </WStep>
+</Walkthrough>
+
+## The picture in seven steps
+
+1. **The chip.** A GPU package is several dies: on MI355X, 8 compute dies (XCDs, 256 CUs) stacked on 2 I/O dies, with 8 HBM3E stacks (288 GB, 8 TB/s) beside them; on Blackwell Ultra, 2 large dies with up to 160 SMs and the same 288 GB and 8 TB/s. It draws up to 1,400 W, throttles when hot, and sits in a server as a PCIe "device" next to the "host" CPUs. → [What a GPU is](/learn/what-is-a-gpu/)
+2. **The numbers.** Matrix engines run faster on narrower numbers: FP8 doubles BF16 throughput, and 4-bit formats with per-block scales (OCP MXFP4, NVIDIA NVFP4) double it again while halving memory. The format is a model-quality choice as much as a hardware one. → [Number formats](/learn/gpu-number-formats/)
+3. **The boot.** Firmware on the card (AMD IFWI with PSP and SMU; NVIDIA VBIOS with GSP) starts before Linux; the kernel driver then loads microcode, joins the GPU-to-GPU fabric, and creates device files. A kernel launch is a packet in a memory queue plus a doorbell write: the driver never sees it. → [Boot and firmware](/learn/gpu-boot-and-firmware/)
+4. **The links.** Bytes cross HBM (8 TB/s), then scale-up links between GPUs (XGMI full mesh of 8 on AMD, about 0.5 TB/s each way per GPU; NVLink through NVSwitch, 0.9 TB/s each way, up to 72 GPUs in NVL72), then PCIe (64 GB/s), then RDMA NICs (50–100 GB/s). Each step is roughly ten times slower and is its own fault domain: an AMD hive reset takes all 8 GPUs. → [Memory and interconnects](/learn/gpu-memory-and-interconnects/)
+5. **The layout.** Each GPU on an 8-GPU MI355X server shares a PCIe switch, a NUMA node and one 400G NIC. Index numbers do not line up (GPU 0 pairs with <code>{g0.netdev}</code>, not a NIC numbered 0), so read the map with `lspci`, sysfs and `amd-smi topology`, or `nvidia-smi topo -m`. → [Node topology](/learn/gpu-node-topology/)
+6. **The software.** Firmware, kernel driver and device files are on the host and shared; runtime, libraries and frameworks ship in the image. Versions must match across the boundary (ROCm compatibility matrix; CUDA minor and forward compatibility). Anything below the line means draining the node. → [Software stack](/learn/gpu-software-stack/)
+7. **The split.** One card can become several logical GPUs: AMD SPX to CPX along XCD lines and NPS1/NPS2 along IOD lines; NVIDIA MIG in sevenths and eighths. Large models use whole GPUs (SPX/NPS1); repartitioning is node maintenance and changes what "one GPU" means everywhere. → [Partitioning](/learn/gpu-partitioning/)
+
+## One MI355X server in numbers
+
+An illustrative example server; versions are example versions.
+
+| Item | Value |
+| --- | --- |
+| Server | 8-GPU OAM server, Ubuntu 24.04, kernel `6.8.0-example` |
+| CPUs | 2 × AMD EPYC (64 cores each), 2 NUMA nodes, 2 TiB RAM |
+| GPUs | 8 × AMD Instinct MI355X (gfx950), 256 CUs and 288 GB HBM3E each, SPX/NPS1 |
+| GPU links | one XGMI hive, full mesh, 72 GB/s each way per link |
+| NICs | 8 × 400 Gb/s RoCE NICs, one per GPU on the same PCIe switch |
+| Driver and firmware | `amdgpu` 6.14.0 (DKMS), PLDM firmware bundle 1.2.3 |
+| Host ROCm | 7.0.0 (host tools only; Pods bring their own) |
+| Kubernetes view | 8 devices in a `gpu.amd.com` ResourceSlice, `partitionProfile: spx_nps1` |
+
+## AMD ↔ NVIDIA name map
+
+| Idea | AMD | NVIDIA |
+| --- | --- | --- |
+| Compute die | XCD (8 per MI355X) | die (2 per Blackwell) |
+| I/O and cache die | IOD (2 per MI355X) | (on the same die) |
+| Compute block | Compute Unit (CU) | Streaming Multiprocessor (SM) |
+| Lockstep thread group | wavefront (64) | warp (32) |
+| Matrix engine | Matrix core | Tensor Core |
+| On-card security / management processor | PSP, SMU | GSP |
+| Board firmware | IFWI in a PLDM bundle | VBIOS in a firmware bundle |
+| GPU-to-GPU link | XGMI / Infinity Fabric | NVLink (+ NVSwitch) |
+| Group of linked GPUs | hive | NVLink domain |
+| Fabric control software | (none; driver) | Fabric Manager, NVLSM, IMEX |
+| Kernel driver | `amdgpu` (+ KFD) | `nvidia` (+ `nvidia-uvm`, `nvidia-peermem`) |
+| Compute device file | `/dev/kfd` + `/dev/dri/renderD*` | `/dev/nvidiactl` + `/dev/nvidiaN` |
+| User-space runtime | ROCr + HIP | `libcuda` (host) + CUDA runtime |
+| Programming model | HIP | CUDA |
+| Software platform | ROCm | CUDA toolkit |
+| Version rules | ROCm compatibility matrix | CUDA minor / forward compatibility |
+| Collective library | RCCL | NCCL |
+| Node CLI | `amd-smi` (older: `rocm-smi`) | `nvidia-smi` |
+| Topology view | `amd-smi topology` | `nvidia-smi topo -m` |
+| Health and metrics daemon | device-metrics-exporter (amd-smi library) | DCGM + dcgm-exporter |
+| Hardware validation | RVS, AGFHC | DCGM diagnostics (`dcgmi diag`), field diag |
+| Partitioning | compute (SPX…CPX) + memory (NPS) modes | MIG (+ MPS, time-slicing) |
+| Retired memory | bad pages (`amd-smi bad-pages`) | row remapping |
+| Fault report | RAS / ECC events in the kernel log | Xid errors in the kernel log |
+| Kubernetes operator | AMD GPU Operator (`DeviceConfig`) | NVIDIA GPU Operator (`ClusterPolicy`) |
+| DRA driver name | `gpu.amd.com` | `gpu.nvidia.com` |
+
+## Where to go next
+
+- How Kubernetes hands these GPUs to Pods: [GPUs in Kubernetes](/learn/gpus-in-kubernetes/).
+- How GPUs fail and how to watch them: [How GPUs fail](/learn/gpu-failures/), [GPU metrics](/learn/gpu-metrics/).
+- How programs use the hardware: [threads and wavefronts](/learn/gpu-execution-model/), [memory and roofline](/learn/gpu-memory-hierarchy/).
+- What runs on them: [LLM inference basics](/learn/llm-inference-basics/).
+
+## Further reading
+
+- [AMD CDNA 4 architecture white paper](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf) · [AMD Instinct documentation](https://instinct.docs.amd.com/) · [ROCm](https://rocm.docs.amd.com/en/latest/)
+- [Inside NVIDIA Blackwell Ultra](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/) · [CUDA](https://docs.nvidia.com/cuda/) · [nvidia-smi](https://docs.nvidia.com/deploy/nvidia-smi/) · [DCGM](https://docs.nvidia.com/datacenter/dcgm/latest/)

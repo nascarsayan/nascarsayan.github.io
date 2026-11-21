@@ -1,0 +1,31 @@
+---
+/** A PromQL result as a table with bars: label, value, a bar scaled to `max`. */
+interface Props { rows: { label: string; value: number }[]; unit?: string; max?: number; digits?: number }
+const { rows, unit = '', max, digits } = Astro.props;
+const top = max ?? Math.max(...rows.map((r) => r.value), 1);
+const fmt = (v: number) => (digits !== undefined ? v.toFixed(digits) : v.toLocaleString('en-US'));
+---
+
+<table class="pr">
+  <thead><tr><th>series</th><th>value</th><th aria-hidden="true"></th></tr></thead>
+  <tbody>
+    {rows.map((r) => (
+      <tr>
+        <td><code>{r.label}</code></td>
+        <td class="v">{fmt(r.value)}{unit && ` ${unit}`}</td>
+        <td class="b"><span style={`width:${Math.min(100, (100 * r.value) / top)}%`}></span></td>
+      </tr>
+    ))}
+  </tbody>
+</table>
+
+<style>
+  table.pr.pr { display: table; width: 100%; max-width: 720px; table-layout: auto; margin: 8px 0; font-size: 0.875rem; border-collapse: collapse; }
+  .pr th { text-align: left; font-size: 0.75rem; color: var(--color-muted); font-weight: 600; }
+  .pr td, .pr th { padding: 3px 8px; border-bottom: 1px solid var(--color-gray-100); }
+  .pr .v { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; font-weight: 600; }
+  .pr td:first-child { white-space: nowrap; }
+  .pr td:first-child code { white-space: nowrap; }
+  .pr .b { width: 50%; min-width: 200px; }
+  .pr .b span { display: block; height: 10px; min-width: 2px; border-radius: 999px; background: var(--color-primary); }
+</style>

@@ -1,0 +1,19 @@
+---
+/**
+ * Page title block: a title and an optional lede, compact (no band or artwork).
+ * Used by the home page and every simple page, so headers look the same.
+ */
+---
+
+<header class="hero">
+  <div class="copy max-width-wrapper">
+    <h1><slot name="title" /></h1>
+    {Astro.slots.has('lede') && <p><slot name="lede" /></p>}
+  </div>
+</header>
+
+<style>
+  .hero { padding: 40px 0 8px; }
+  h1 { font-size: 2.25rem; font-weight: var(--font-weight-medium); line-height: 1.3; }
+  p { margin-top: 4px; max-width: 600px; font-size: 1.125rem; color: var(--color-gray-800); }
+</style>

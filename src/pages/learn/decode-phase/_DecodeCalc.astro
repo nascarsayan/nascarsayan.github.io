@@ -1,0 +1,93 @@
+---
+/**
+ * Decode bandwidth-ceiling calculator: bytes read per step → step time → tokens/s.
+ * Same model as _example.ts. MI355X figures are spec-sheet (approximate).
+ */
+const models = {
+  'gpt-oss-120b': { shared: 0.96e9 * 2 + 0.58e9 * 2, expert: (24.9e6 * 4.25) / 8, layers: 36, experts: 128, topk: 4, kvFull: 18 * 2048, kvSlide: 18 * 2048, win: 128, flops: 9e9, att: 4 * 64 * 64, attFull: 18, attSlide: 18, weightsGB: 65, note: 'attention + unembedding 16-bit (3.1 GB, read once per step), experts MXFP4 (4 of 128 per token per layer, random routing), KV 36 KiB/token + 4.5 MiB window' },
+  'llama-3.3-70b': { shared: 141e9, expert: 0, layers: 0, experts: 1, topk: 0, kvFull: 80 * 4096, kvSlide: 0, win: 0, flops: 140e9, att: 4 * 64 * 128, attFull: 80, attSlide: 0, weightsGB: 141, note: 'dense: all 141 GB of 16-bit weights read every step; KV 320 KiB/token' },
+};
+---
+
+<figure class="dcc" data-dcc={JSON.stringify(models)}>
+  <figcaption class="dcc-title">Decode speed ceiling on one MI355X</figcaption>
+  <div class="dcc-in">
+    <label>Model <select data-k="model">{Object.keys(models).map((m) => <option value={m}>{m}</option>)}</select></label>
+    <label>Users in the batch <input data-k="b" type="range" min="0" max="8" step="1" value="0" /> <output data-o="b"></output></label>
+    <label>Context per user <input data-k="ctx" type="range" min="0" max="7" step="1" value="2" /> <output data-o="ctx"></output></label>
+    <label>Bandwidth reached <input data-k="eff" type="range" min="40" max="100" step="5" value="100" /> <output data-o="eff"></output></label>
+  </div>
+  <div class="dcc-out">
+    <div><span class="k">Bytes read per step</span><span class="v" data-o="bytes"></span></div>
+    <div><span class="k">Step time (≈ ITL)</span><span class="v" data-o="time"></span></div>
+    <div><span class="k">Per user</span><span class="v" data-o="user"></span></div>
+    <div><span class="k">Whole server</span><span class="v" data-o="total"></span></div>
+    <div><span class="k">FLOPs per byte (ridge ~625)</span><span class="v" data-o="ai"></span></div>
+    <div><span class="k">Matrix units busy</span><span class="v" data-o="busy"></span></div>
+  </div>
+  <div class="dcc-bar" aria-hidden="true"><span class="w" data-o="bw"></span><span class="e" data-o="be"></span><span class="kv" data-o="bkv"></span></div>
+  <p class="dcc-note" data-o="msg"></p>
+  <p class="dcc-src" data-o="src"></p>
+</figure>
+
+<style>
+  .dcc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .dcc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .dcc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .dcc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .dcc-in select, .dcc-in input { accent-color: var(--color-primary); }
+  .dcc-in output { min-width: 60px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .dcc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .dcc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .dcc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .dcc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .dcc-bar { display: flex; height: 18px; margin-top: 14px; border-radius: 999px; overflow: hidden; background: var(--color-gray-100); }
+  .dcc-bar .w { background: #8b5cf6; }
+  .dcc-bar .e { background: #f97316; }
+  .dcc-bar .kv { background: #3b82f6; }
+  .dcc-note { margin-top: 6px; font-size: 0.875rem; }
+  .dcc-src { margin-top: 2px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const B = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+  const CTX = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+  const BW = 8e12, PEAK = 5e15, HBM = 288e9;
+  const gb = (b: number) => `${(b / 1e9).toFixed(1)} GB`;
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-dcc]')) {
+    const models = JSON.parse(fig.dataset.dcc!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const out = (k: string) => $<HTMLElement>(`[data-o=${k}]`);
+    const update = () => {
+      const name = $<HTMLSelectElement>('[data-k=model]').value, m = models[name];
+      const b = B[Number($<HTMLInputElement>('[data-k=b]').value)];
+      const ctx = CTX[Number($<HTMLInputElement>('[data-k=ctx]').value)];
+      const eff = Number($<HTMLInputElement>('[data-k=eff]').value) / 100;
+      const touched = m.topk ? m.experts * (1 - (1 - m.topk / m.experts) ** b) : 0;
+      const ex = touched * m.layers * m.expert;
+      const kvSeq = m.kvFull * ctx + m.kvSlide * Math.min(ctx, m.win);
+      const kv = kvSeq * b;
+      const bytes = m.shared + ex + kv;
+      const t = bytes / (BW * eff);
+      const flops = b * (m.flops + m.att * (m.attFull * ctx + m.attSlide * Math.min(ctx, m.win)));
+      out('b').textContent = String(b);
+      out('ctx').textContent = `${ctx / 1024}k tokens`;
+      out('eff').textContent = `${Math.round(eff * 100)}% of 8 TB/s`;
+      out('bytes').textContent = gb(bytes);
+      out('time').textContent = `${(t * 1000).toFixed(2)} ms`;
+      out('user').textContent = `${Math.round(1 / t).toLocaleString('en-US')} tok/s`;
+      out('total').textContent = `${Math.round(b / t).toLocaleString('en-US')} tok/s`;
+      out('ai').textContent = (flops / bytes).toFixed(1);
+      out('busy').textContent = `${((flops / t / PEAK) * 100).toFixed(2)}%`;
+      out('bw').style.width = `${(m.shared / bytes) * 100}%`;
+      out('be').style.width = `${(ex / bytes) * 100}%`;
+      out('bkv').style.width = `${(kv / bytes) * 100}%`;
+      const free = HBM * 0.9 - m.weightsGB * 1e9;
+      const fit = kv <= free ? `KV for ${b} user${b > 1 ? 's' : ''} (${gb(kv)}) fits next to the weights.` : `KV for ${b} user${b > 1 ? 's' : ''} (${gb(kv)}) does not fit: only ~${gb(free)} is left after weights. A real server would queue or preempt.`;
+      out('msg').textContent = `Bar: shared weights (violet)${m.topk ? `, experts (orange, ${touched.toFixed(0)} of 128 per layer)` : ''}, KV (blue). ${fit}`;
+      out('src').textContent = `${name}: ${m.note}. A ceiling, not a measurement: real servers lose time to kernel launches, sampling and scheduling. MI355X 288 GB / 8 TB/s / 5 PFLOP/s FP8 are spec-sheet, approximate.`;
+    };
+    fig.querySelectorAll('select, input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

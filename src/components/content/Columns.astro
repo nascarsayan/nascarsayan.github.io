@@ -1,0 +1,9 @@
+---
+/** Side-by-side <Column>s; stacks on narrow screens. */
+---
+
+<div class="columns" data-reveal-stagger><slot /></div>
+
+<style>
+  .columns { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 24px; margin: 24px 0; }
+</style>

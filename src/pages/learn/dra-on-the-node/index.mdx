@@ -1,0 +1,234 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "DRA on the node: registration, prepare, checkpoints and restarts"
+short: "DRA on the node"
+description: "What the kubelet and the AMD GPU DRA driver do on a GPU node: plugin registration, the NodePrepareResources and NodeUnprepareResources gRPC calls, the two checkpoint files, what a driver or kubelet restart does to ResourceSlices and Pods, and how the DaemonSet is built. Sample files from one node."
+updated: "2026-11-10"
+track: kubernetes
+order: 4
+requires: [dra-objects, cdi-device-injection]
+eyebrow: "Learn · GPUs in Kubernetes"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Yaml from '../k8s-gpu-allocation/_Yaml.astro';
+import seq from './_seq.diagram';
+import story from './_story.diagram';
+import RestartCalc from './_RestartCalc.astro';
+import * as d from './_don';
+import * as c from '../k8s-gpu-allocation/_sample';
+
+The scheduler only *records* an allocation in a ResourceClaim. On the node, the kubelet and the vendor's **kubelet plugin** turn that record into device files in a container. This page follows that path on `gpu-node-1`, with the AMD DRA driver v1.0.1 and kubelet 1.35 (illustrative example output).
+
+## The idea
+
+Think of the kubelet as a hotel **front desk** and the DRA driver as the **GPU specialist** on call. The specialist leaves a phone number in the desk's directory (a socket in `plugins_registry`). When a guest (a Pod) arrives with a booking (an allocated claim), the desk calls the specialist: "prepare room `gpu-5-132` for claim `c1a10001`". The specialist sets it up and hands back a key card (the CDI names). Both keep a ledger of who is in which room, so either can be restarted without forgetting.
+
+| Piece | Question it answers |
+| --- | --- |
+| Registration socket | How does the kubelet find the driver at all? |
+| ResourceSlice | What GPUs exist on this node? (published by the driver) |
+| `NodePrepareResources` | Make *this* claim's device usable; what should the container get? |
+| Two checkpoints | After a restart, which claims are already prepared? |
+| 30 s wiping delay | How long does the kubelet trust a driver that went away? |
+
+Where the analogy breaks: once the container is running, the specialist is not needed. The device files stay even if the driver dies. The driver matters only when a container is created or a claim is released.
+
+<Kpis items={[
+  { label: 'Devices published', value: c.gpus.length, detail: 'one ResourceSlice for the node' },
+  { label: 'Claims prepared now', value: d.used.length, detail: d.used.join(', ') },
+  { label: 'Driver Pod start', value: '~1 s', detail: 'example kubelet log' },
+  { label: 'Prepare timeout', value: '45 s', detail: 'kubelet default per call' },
+  { label: 'Wiping delay', value: '30 s', detail: 'kubelet 1.35 defaultWipingDelay', tone: 'warn' },
+]} />
+
+## Worked example: the kubelet prepares claim c1a10001
+
+The same prefill Pod as on [GPU allocation](/learn/k8s-gpu-allocation/) and [CDI](/learn/cdi-device-injection/). Files and log lines are illustrative example output in the driver's format; the two gRPC messages are rebuilt from the checkpoints (same fields as `api.proto`), since the wire messages are not logged.
+
+<Walkthrough title="From driver start to a prepared GPU" caption="gpu-node-1, AMD DRA driver v1.0.1, kubelet 1.35. Driver start 1 Nov; Pod start 3 Nov 10:12 (node clock). Example output.">
+  <WStep title="1 · 1 Nov 08:00: the driver finds 8 GPUs">
+    <Yaml lang="text" code={d.discoveryLog} />
+
+    The init container waited for `amdgpu`; then `gpu-kubeletplugin` read sysfs. Each GPU is named <code>gpu-&lt;card&gt;-&lt;render&gt;</code> and is a whole GPU (SPX compute, NPS1 memory).
+  </WStep>
+  <WStep title="2 · It opens two sockets">
+    <Yaml lang="shell" code={d.sockets} />
+
+    `dra.sock` is the service. `gpu.amd.com-reg.sock` in `plugins_registry` is the "phone number": the kubelet's plugin watcher (the same mechanism CSI uses) sees it appear. Socket times = last driver start.
+  </WStep>
+  <WStep title="3 · The kubelet calls GetInfo and registers the plugin">
+    <Yaml code={d.getInfo} />
+
+    The reply names the driver, the endpoint and the gRPC services, as <code>&lt;package&gt;.&lt;service&gt;</code>. The kubelet picks one it supports. From now on any claim with driver `gpu.amd.com` on this node goes to `dra.sock`.
+  </WStep>
+  <WStep title="4 · The driver publishes the ResourceSlice">
+    <Yaml code={d.sliceDevice} />
+
+    Written through the API server with the driver's ServiceAccount `amd-gpu-operator-dra-driver`. The scheduler reads this; it picked **{c.device}** (PCI {d.device.pci}, NUMA {d.device.numa}) for the claim.
+  </WStep>
+  <WStep title="5 · 3 Nov: the Pod is bound; the kubelet writes its ledger first">
+    <Yaml code={d.kubeletState} />
+
+    The kubelet checks the claim is allocated and reserved for this Pod, then records it **before** calling the driver, so a crash in between does not lose track of it.
+  </WStep>
+  <WStep title="6 · NodePrepareResources: request">
+    <Yaml code={d.request} />
+
+    Only the claim's identity travels; the driver fetches the claim and reads `status.allocation` for its own driver name. Calls are batched per Pod and, through the `kubeletplugin` helper, serialized: two prepares never run at once. Timeout 45 s.
+  </WStep>
+  <WStep title="7 · The driver writes the CDI file and its own ledger, then answers">
+    <Yaml code={c.driverCheckpoint} title="/var/lib/kubelet/plugins/gpu.amd.com/checkpoint.json (trimmed)" />
+    <Yaml code={d.response} />
+
+    The CDI file is <code>{c.cdiFile.split('/').pop()}</code> ([what is in it](/learn/cdi-device-injection/)). Prepare is **idempotent**: asked again (say after a kubelet restart), the driver finds the UID in `checkpoint.json` and returns the same answer.
+  </WStep>
+  <WStep title="8 · The kubelet stores the CDI names and creates the container">
+    <Yaml code={d.kubeletStateAfter} />
+
+    The kubelet passes the two names to containerd in `CreateContainer` for every container that lists the claim. The container started at 10:12:00 (node clock); the model took {c.loadText} more to load.
+  </WStep>
+  <WStep title="9 · Health check: four records agree">
+    <table><thead><tr><th>Record</th><th>Where</th><th>Claims for {c.node}</th></tr></thead><tbody>{d.fourWay.map((r) => <tr><td>{r.where}</td><td><code>{r.how}</code></td><td>{r.n}</td></tr>)}</tbody></table>
+
+    All four list the same {d.used.length} claims ({d.used.join(', ')}); the other {d.free.length} GPUs are free. A mismatch means a leak (a CDI file or checkpoint entry with no claim) or a lost prepare. Commands are under [Look for yourself](#look-for-yourself).
+  </WStep>
+</Walkthrough>
+
+The whole conversation, including unprepare, as one sequence:
+
+<Diagram spec={seq} title="Registration, Pod start and Pod stop" autoSteps />
+
+**Prepare fails** (driver down, timeout, error): the Pod stays in `ContainerCreating` with an event, and the kubelet retries. Nothing is rescheduled: the claim is already allocated to this node. The helper documentation also asks the driver to be the last line of defence and refuse a device already prepared for another claim.
+
+**Unprepare** runs when the **last** Pod on the node that uses a claim has stopped. The driver deletes the CDI file and the `checkpoint.json` entry; the kubelet drops its record, and the resourceclaim controller frees the allocation in the API. A kubelet reconcile loop (every 60 s) retries unprepare for claims whose Pods are gone. Until unprepare succeeds the Pod is **not** reported terminated, so the GPU cannot be given to someone else.
+
+Both checkpoint files carry a checksum, so a hand-edited or truncated file fails the check.
+
+## The driver Pod
+
+The AMD GPU operator renders the DRA driver as DaemonSet `kube-amd-gpu/default-dra-driver`. The parts that matter (example, trimmed):
+
+```yaml
+spec:
+  updateStrategy:
+    rollingUpdate: {maxSurge: 0, maxUnavailable: 1}   # old Pod stops before new starts
+  template:
+    spec:
+      priorityClassName: system-node-critical
+      nodeSelector: {example.com/gpu-vendor: AMD}
+      tolerations: [{operator: Exists}]               # runs even on tainted nodes
+      initContainers:
+      - name: driver-init                              # wait for the amdgpu module
+        command: [sh, -c, 'while [ ! -d /sys/class/kfd ] || [ ! -d /sys/module/amdgpu/drivers/ ]; do echo "amdgpu driver is not loaded "; sleep 2; done']
+      containers:
+      - name: plugin
+        image: registry.local/rocm/k8s-gpu-dra-driver:v1.0.1
+        command: [gpu-kubeletplugin]
+        env:
+        - {name: CDI_ROOT, value: /var/run/cdi}
+        - {name: KUBELET_REGISTRAR_DIRECTORY_PATH, value: /var/lib/kubelet/plugins_registry}
+        - {name: KUBELET_PLUGINS_DIRECTORY_PATH, value: /var/lib/kubelet/plugins}
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        securityContext: {privileged: true}
+        volumeMounts:          # all hostPath
+        - {name: plugins-registry, mountPath: /var/lib/kubelet/plugins_registry}
+        - {name: plugins,          mountPath: /var/lib/kubelet/plugins}
+        - {name: cdi,              mountPath: /var/run/cdi}
+        - {name: dev,              mountPath: /dev}
+        - {name: sys,              mountPath: /sys}
+```
+
+Read it as a list of facts:
+
+- **It needs the host driver first.** The init container loops until `/sys/class/kfd` and `/sys/module/amdgpu/drivers/` exist. A node with a broken `amdgpu` install shows the driver Pod stuck in `Init:0/1` and no ResourceSlice.
+- **It runs everywhere it is selected.** `operator: Exists` tolerates every taint, so tainting a GPU node (for example with a not-ready taint) does not stop the DRA driver. That is deliberate: Pods that are already running must still be unprepared when they end.
+- **It is privileged** and mounts `/dev` and `/sys` from the host, because it reads GPU topology from sysfs.
+- **No liveness probe.** The driver has a gRPC health server, but its `--healthcheck-port` defaults to `-1` (off) and the DaemonSet sets no probe. A driver that hangs without exiting is not restarted. Kubernetes recommends a liveness probe on the driver's health socket.
+
+## When the driver restarts
+
+A stepped story on `gpu-node-1`. Pick how long the new driver Pod takes to register; the kubelet's 30 s **wiping delay** (`defaultWipingDelay` in `pkg/kubelet/cm/dra/manager.go`, release-1.35) decides which ending you get.
+
+<Explorer id="drv-restart"
+  options={[{ key: 'speed', label: 'New driver registers', default: 'fast', values: [{ value: 'fast', label: 'within 30 s' }, { value: 'slow', label: 'after 30 s' }] }]}
+  variants={[{ match: { speed: 'fast' }, id: 'rs-fast' }, { match: { speed: 'slow' }, id: 'rs-slow' }]}>
+  <Variant id="rs-fast">
+    <Diagram spec={story} title="Restart inside the window">
+      <Step path="newpod -> kubelet -> drv" title="0 · Healthy">A new GPU Pod is bound here; the kubelet prepares its claim through `dra.sock`.</Step>
+      <Step focus="drv, kubelet" state={{ drv: { tone: 'muted', detail: 'SIGTERM: sockets removed' }, kubelet: { tone: 'warn', detail: 'deregistered; 30 s timer runs' } }} title="1 · Old driver Pod stops">`maxSurge: 0`: the old Pod is terminated before the new one is created. Its sockets go; the kubelet deregisters `gpu.amd.com` and starts the wipe timer.</Step>
+      <Step path="newpod -> kubelet -x> drv" state={{ drv: { tone: 'risk', detail: 'no plugin registered' }, kubelet: { tone: 'warn', detail: 'timer running' }, newpod: { tone: 'warn', detail: 'ContainerCreating' } }} title="2 · Gap: prepares fail">A Pod that starts now cannot be prepared and waits in `ContainerCreating`. Pods ending now stay `Terminating` (no unprepare).</Step>
+      <Step focus="run" state={{ drv: { tone: 'risk', detail: 'no plugin registered' }, kubelet: { tone: 'warn', detail: 'timer running' }, newpod: { tone: 'warn', detail: 'ContainerCreating' } }} title="3 · Running Pods carry on">`…-p4x7k` keeps `card5` and `renderD132`: they were added at container create. The driver is not in the data path.</Step>
+      <Step path="newpod -> kubelet -> drv" state={{ drv: { tone: 'teal', detail: 'new Pod, re-registered' }, kubelet: { tone: 'good', detail: 'timer cancelled' }, newpod: { tone: 'good', detail: 'Running' } }} title="4 · Back in time">The new driver reads `checkpoint.json`, re-registers, and the kubelet cancels the wipe and retries the prepare. Nothing changed in the API.</Step>
+    </Diagram>
+  </Variant>
+  <Variant id="rs-slow">
+    <Diagram spec={story} title="Restart past the window">
+      <Step path="newpod -> kubelet -> drv" title="0 · Healthy">A new GPU Pod is bound here; the kubelet prepares its claim through `dra.sock`.</Step>
+      <Step path="newpod -> kubelet -x> drv" state={{ drv: { tone: 'risk', detail: 'crash loop / slow pull' }, kubelet: { tone: 'warn', detail: 'timer running' }, newpod: { tone: 'warn', detail: 'ContainerCreating' } }} title="1 · Gap, longer than 30 s">Image pull from a slow registry, a crash loop, or `amdgpu` not loaded (init container loops). Prepares keep failing.</Step>
+      <Step path="kubelet => slice" state={{ drv: { tone: 'risk', detail: 'still gone' }, slice: { tone: 'risk', detail: 'deleted' }, 'kubelet -> slice': { tone: 'risk' }, newpod: { tone: 'warn', detail: 'ContainerCreating' } }} title="2 · t = 30 s: slice wipe">The kubelet deletes all ResourceSlices for this node and driver (`DeleteCollection`, field selector on node name and driver).</Step>
+      <Step path="sched -> slice:404" state={{ drv: { tone: 'risk', detail: 'still gone' }, slice: { tone: 'risk', detail: 'deleted' }, sched: { tone: 'warn', detail: 'sees 0 GPUs here' }, newpod: { tone: 'warn', detail: 'ContainerCreating' } }} title="3 · The scheduler stops sending GPU Pods">New GPU Pods go to other nodes or stay Pending. Running Pods are still untouched.</Step>
+      <Step path="drv => slice" state={{ drv: { tone: 'teal', detail: 'new Pod, re-registered' }, slice: { tone: 'good', detail: 'republished, 8 devices' }, kubelet: { tone: 'good' } }} title="4 · Driver back: republish">The new driver registers and republishes its slice; the node's GPUs are schedulable again.</Step>
+      <Step path="newpod -> kubelet -> drv" state={{ drv: { tone: 'teal', detail: 'new Pod, re-registered' }, newpod: { tone: 'good', detail: 'Running' } }} title="5 · Pending prepares succeed">The kubelet's retried prepare goes through; the waiting Pod starts.</Step>
+    </Diagram>
+  </Variant>
+</Explorer>
+
+<RestartCalc />
+
+Images come from `registry.local` with `IfNotPresent`, so a plain restart is usually well under 30 s (in the example, the last driver Pod went from creation to running in about 1 s).
+
+**A kubelet restart** is worse for visibility: at start-up kubelet 1.35 deletes **all** ResourceSlices of its node, for every driver, then waits for drivers to re-register and republish. The node's GPUs vanish from the API for a few seconds.
+
+<Callout tone="warn" title="Upgrades: checkpoint and naming must be compatible">
+The new driver must understand the old `checkpoint.json` and name devices the same way (`gpu-<card>-<render>`). If not, it cannot unprepare claims prepared by the old version, CDI files leak, and a restarted container may fail with an unresolvable CDI device. The AMD repo carries a checkpoint upgrade test (`ckpt_upgrade_test.go`), but cross-version behaviour on your nodes is yours to verify before a rollout.
+</Callout>
+
+### Why no overlap
+
+Kubelet 1.33+ supports **seamless upgrades**: two instances of a driver run side by side with socket names made unique by the Pod UID, and the kubelet may use either. A driver opts in with the helper's `RollingUpdate(podUID)` option and a DaemonSet that allows surge. The AMD driver v1.0.1 does not pass that option, so it uses fixed socket names, and `maxSurge: 0` keeps two Pods from fighting over them. The cost is the gap above, on one node at a time (`maxUnavailable: 1`).
+
+## Draining and maintenance
+
+- **Stop the DRA driver last.** If it goes before the GPU Pods, they cannot be unprepared and hang in `Terminating`. Kubernetes' guidance is to check that no allocated or reserved claims remain on the node before stopping the driver.
+- `kubectl drain` skips DaemonSet Pods (with `--ignore-daemonsets`), so the driver stays. Custom drain scripts that delete everything in `kube-amd-gpu` get this wrong.
+- **Readiness gate.** A node-level readiness check can verify that the kubelet has `gpu.amd.com` registered and that complete ResourceSlice pools list as many distinct PCI addresses as the GPU model expects (8 for MI355X), and taint the node `NoSchedule` until they do.
+
+## Metrics
+
+| Metric | From | What it shows |
+| --- | --- | --- |
+| `dra_operations_duration_seconds{operation_name="PrepareResources"}` | kubelet | time per prepare, from the kubelet's side |
+| `dra_operations_duration_seconds{operation_name="UnprepareResources"}` | kubelet | time per unprepare |
+| `dra_grpc_operations_duration_seconds{method_name=~".*NodePrepareResources"}` | driver (helper library) | time inside the driver |
+
+## NVIDIA
+
+NVIDIA's DRA driver (`gpu.nvidia.com`) uses the same kubelet protocol and helper library. Differences: its CDI specs also mount host driver libraries and run hooks, it publishes MIG devices as `mig.nvidia.com`, and its **ComputeDomain** kubelet plugin prepares IMEX channels for NVLink across trays. See [GPU operators](/learn/gpu-operators/).
+
+## Look for yourself
+
+```shell
+# on the GPU node (read-only)
+ls -la /var/lib/kubelet/plugins_registry /var/lib/kubelet/plugins/gpu.amd.com /var/run/cdi
+python3 -m json.tool /var/lib/kubelet/plugins/gpu.amd.com/checkpoint.json | head -40
+journalctl -u kubelet --since -1h | grep -iE 'resourceclaim|NodePrepare|dra'
+# from the management node
+kubectl -n kube-amd-gpu get ds default-dra-driver -o wide
+kubectl -n kube-amd-gpu logs <dra-driver-pod> -c plugin | head -20
+kubectl get resourceslices --field-selector spec.nodeName=<node>
+```
+
+## Further reading
+
+- [How DRA works](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/how-dra-works/) — Kubernetes docs
+- [Good practices for DRA cluster admins: driver upgrades, liveness, draining, metrics](https://kubernetes.io/docs/concepts/cluster-administration/dra/) — Kubernetes docs
+- [kubeletplugin helper package](https://pkg.go.dev/k8s.io/dynamic-resource-allocation/kubeletplugin) · [DRA gRPC API (v1)](https://github.com/kubernetes/kubernetes/blob/release-1.35/staging/src/k8s.io/kubelet/pkg/apis/dra/v1/api.proto)
+- [AMD GPU DRA driver](https://github.com/ROCm/k8s-gpu-dra-driver) · [troubleshooting](https://github.com/ROCm/k8s-gpu-dra-driver/blob/v1.0.1/docs/troubleshooting.md)

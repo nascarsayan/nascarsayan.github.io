@@ -1,0 +1,51 @@
+---
+/** Sound toggle in the header: turns the site's soft UI sounds on or off (muted on every page load). */
+import IconButton from './IconButton.astro';
+---
+
+<IconButton label="Toggle sounds" id="sound-toggle" class="sound-toggle">
+  <svg width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" overflow="visible">
+    <g class="speaker">
+      <path d="M12 4.6c-.1-.3-.5-.4-.7-.2L5.9 8.5a.5.5 0 0 1-.3.1H1.5a.5.5 0 0 0-.5.5v5.8c0 .3.2.5.5.5h4.1c.1 0 .2 0 .3.1l5.4 4.1c.2.2.6.1.7-.2.4-1.1 1-3.6 1-7.4s-.6-6.3-1-7.4Z" />
+    </g>
+    <path class="wave wave-1" d="M17.5 8.5a5 5 0 0 1 0 7" />
+    <path class="wave wave-2" d="M20 4.9a10 10 0 0 1 0 14.1" />
+    <line class="mute" x1="17" y1="9" x2="23" y2="15" />
+    <line class="mute" x1="23" y1="9" x2="17" y2="15" />
+  </svg>
+</IconButton>
+
+<style>
+  .speaker { transform-origin: 6px 12px; transform-box: view-box; }
+  .wave, .mute { transition: opacity 250ms, transform 400ms var(--spring-easing); }
+  .wave-2 { transition-delay: 100ms; }
+  .mute { opacity: 0; transform: scale(0.4); transform-origin: 20px 12px; transform-box: view-box; }
+
+  :global(html[data-sound='off']) .wave { opacity: 0; transform: translateX(-4px); transition-delay: 0ms; }
+  :global(html[data-sound='off']) .mute { opacity: 1; transform: scale(1); transition-delay: 150ms; }
+
+  .speaker.wiggle { animation: speakerWiggle 400ms ease-in-out; }
+  @keyframes speakerWiggle {
+    25% { transform: rotate(15deg); }
+    50% { transform: rotate(-13deg); }
+    75% { transform: rotate(12deg); }
+  }
+</style>
+
+<script>
+  import { isSoundEnabled, setSoundEnabled, playSound } from '@/scripts/sound';
+  const btn = document.getElementById('sound-toggle')!;
+  const speaker = btn.querySelector('.speaker') as SVGGElement;
+  btn.addEventListener('click', () => {
+    const next = !isSoundEnabled();
+    setSoundEnabled(next);
+    playSound(next ? 'soundOn' : 'soundOff', true);
+    btn.setAttribute('aria-pressed', String(next));
+    if (next) {
+      speaker.classList.remove('wiggle');
+      void speaker.getBoundingClientRect();
+      speaker.classList.add('wiggle');
+    }
+  });
+</script>

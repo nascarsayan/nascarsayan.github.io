@@ -1,0 +1,19 @@
+{
+  "name": "personal-site",
+  "type": "module",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "node scripts/lint-diagram-css.mjs && node scripts/build-tala.mjs && astro dev",
+    "build": "node scripts/lint-diagram-css.mjs && node scripts/build-tala.mjs && astro build && node scripts/lint-rendered.mjs dist",
+    "preview": "astro preview",
+    "astro": "astro"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "8.1.2",
+    "@fontsource-variable/albert-sans": "5.3.0",
+    "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "astro": "7.4.5",
+    "katex": "0.19.1"
+  }
+}

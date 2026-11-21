@@ -1,0 +1,33 @@
+/* <Explorer> controls (src/components/content/Explorer.astro). */
+.sx-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 8px 0 24px;
+  padding: 16px 20px;
+  font-family: var(--font-family);
+  font-size: 0.875rem;
+  background: var(--color-cloud-100);
+  border-radius: var(--radius);
+}
+.sx-row { display: grid; grid-template-columns: 110px 1fr; gap: 12px; align-items: center; }
+.sx-row[hidden] { display: none; }
+.sx-label { font-weight: var(--font-weight-medium); color: var(--color-gray-700); }
+.sx-seg { display: flex; flex-wrap: wrap; gap: 6px; }
+.sx-seg button, .sx-copy {
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--color-gray-300);
+  background: var(--color-background);
+  color: var(--color-text);
+}
+/* Transitions only after the first render, so the initial state does not animate in. */
+.sx-controls[data-ready] :is(.sx-seg button, .sx-copy) { transition: background 150ms, border-color 150ms, color 150ms; }
+.sx-seg button:hover, .sx-copy:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.sx-seg button[aria-pressed='true'] { background: var(--color-primary); border-color: var(--color-primary); color: var(--color-background); }
+.sx-copy { justify-self: start; width: fit-content; }
+.sx-msg { margin-left: 8px; color: var(--color-success); }
+.sx-row:last-child { grid-template-columns: 110px auto 1fr; }
+html[data-color-mode="dark"] .sx-controls { background: var(--color-card-bg); }
+.sx-variant[hidden] { display: none; }
+@media (max-width: 640px) { .sx-row { grid-template-columns: 1fr; } }

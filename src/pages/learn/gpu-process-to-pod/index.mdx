@@ -1,0 +1,191 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "From a GPU process to its Pod (and back)"
+short: "GPU process ↔ Pod"
+description: "Read-only recipes to join the GPU world (indexes, PIDs, BDFs, render nodes) to the Kubernetes world (Pods, ResourceClaims, DRA devices), walked through step by step with illustrative PIDs, cgroup paths and claims from an example MI355X node: which Pod owns GPU 4, which GPU a Pod holds, which physical card a DRA device is, and a one-screen map script."
+updated: "2026-11-10"
+track: operations
+order: 7
+requires: [amd-gpu-tools, dra-on-the-node]
+eyebrow: "Learn · Operating GPU nodes"
+---
+import Callout from '@/components/content/Callout.astro';
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Out from '../amd-gpu-tools/_Out.astro';
+import join from './_join.diagram';
+import * as t from './_trace';
+
+GPU tools speak in GPU indexes, PIDs and PCI addresses. Kubernetes speaks in Pods, ResourceClaims and DRA device names. In an incident you need to cross between them fast:
+
+- "GPU 4 is throwing errors: whose Pod is that?"
+- "This Pod is slow: which card is it on?"
+- "The vendor wants a serial number for device <code>{t.device}</code>."
+
+Every recipe below is read-only. The outputs are illustrative example output for an 8× MI355X node called `gpu-node-1`: realistic, but made up.
+
+## The idea
+
+Think of a hotel. The front desk (Kubernetes) knows guests by name and keeps a **register** of who has which room: that is the ResourceClaim. The housekeeping staff (the GPU tools) know rooms by number and see who is inside right now: that is `amd-smi process`. Every guest carries a **key card** with their name on it: that is the process's cgroup path, which contains the Pod UID.
+
+So the join is two lookups that meet in the middle:
+
+- *Room → guest*: who is in the room (PIDs), then read their key card (cgroup → Pod).
+- *Guest → room*: look up the register (Pod → claim → device), then translate the register's room code into the number on the door (device → BDF → GPU index and slot).
+
+Where the analogy breaks: a hotel never has two numbering systems for the same room. A GPU has five (index, BDF, card/render node, DRA device name, physical slot), and none of them is the slot number DC Ops sees on the board. Also, someone can be in a room without being in the register: a privileged Pod or a host process that opened the device directly. When the register and housekeeping disagree, believe the register for "is it allocated" and housekeeping for "is it in use".
+
+<Diagram spec={join} title="The join loop, with GPU 4's example values">
+  <Step title="GPU → Pod" path="gpu => pid => cg => pod">Room to guest: amd-smi gives the host PIDs, the PID's cgroup path holds the Pod UID, and the UID names the Pod.</Step>
+  <Step title="Pod → GPU" path="pod => claim => dev => bdf => gpu">Guest to room: the Pod names its ResourceClaim, the claim names the DRA device, the ResourceSlice gives that device's PCI address, and amd-smi maps the address to an index.</Step>
+  <Step title="GPU → physical card" path="gpu => bdf => slot">For DC Ops and the vendor: BDF → OAM slot and board serial. Never send just "GPU 4": indexes can change after a hardware swap.</Step>
+</Diagram>
+
+## Worked example: GPU 4 to its Pod and back
+
+<Walkthrough title="GPU 4 on gpu-node-1 → Pod → claim → card" caption="Illustrative example output. The splits and cross-checks are computed from the output shown.">
+  <WStep title="1 · GPU index → host PIDs">
+    <Out host="gpu-node-1" cmd="amd-smi process -g 4" out={t.processOut} marks={[{ at: ('PID: ' + t.pids[0]), note: 'The prefill driver process.' }, { at: ('PID: ' + t.enginePid), note: ('The vLLM engine: it holds ' + t.engineVram + ' of GPU memory.'), tone: 'good' }]} />
+    These are **host** PIDs: the numbers the GPU node's kernel uses, not the ones `ps` shows inside the container.
+  </WStep>
+  <WStep title="2 · PID → its key card: the cgroup path">
+    <Out host="gpu-node-1" cmd={("cat /proc/" + t.enginePid + "/cgroup")} out={t.cgroupOut} marks={[{ at: 'kubepods', note: ("Split it: QoS class <b>" + (t.qos) + "</b>, Pod UID <b>" + (t.podUid) + "</b>, container ID <b>" + (t.containerId.slice(0, 12)) + "…</b> (64 hex digits)."), tone: 'good' }]} />
+    Kubernetes puts every container in a cgroup named after its Pod. The kubelet writes the Pod UID with underscores in some layouts; here it has dashes, exactly as in the API. The other PID, {t.pids[0]}, has the same cgroup line: both processes are in one container.
+  </WStep>
+  <WStep title="3 · Container → Pod">
+    <Out host="gpu-node-1" cmd={("crictl ps --id " + (t.containerId.slice(0, 13)) + " -o json | python3 -c '…print(namespace, pod, container)'")} out={t.crictlOut} marks={[{ at: t.ns, note: 'Namespace, Pod and container name, from the container\'s labels.', tone: 'good' }]} />
+    From the management node, the UID alone is enough: `kubectl get pods -A -o jsonpath='{range .items[?(@.metadata.uid=="…")]}{.metadata.namespace}/{.metadata.name}{"\n"}{end}'` prints the same Pod. (`crictl` warns about a missing `/etc/crictl.yaml` on the node; the default endpoint still works.)
+  </WStep>
+  <WStep title="4 · Pod → its ResourceClaim">
+    <Out host="mgmt node" cmd={("kubectl -n " + (t.ns) + " get pod " + (t.pod) + " -o jsonpath='{.status.resourceClaimStatuses}'")} out={t.podClaimOut} marks={[{ at: 'resourceClaimName', note: 'The claim generated from the Pod\'s claim template: Pod name + <code>-gpu-</code> + a random suffix.' }]} />
+    Now switch direction: from the Kubernetes side, the Pod tells you which claim holds its GPU.
+  </WStep>
+  <WStep title="5 · Claim → device, and the loop closes">
+    <Out host="mgmt node" cmd={("kubectl -n " + (t.ns) + " get resourceclaim " + (t.claim) + " -o jsonpath='{.status.allocation.devices.results}{\"\\n\"}{.status.reservedFor}'")} out={t.claimOut} marks={[{ at: '"device"', note: 'The allocation is the tuple (driver, pool, device). The pool is the node name.' }, { at: '"uid"', note: ("<code>reservedFor</code> carries Pod UID " + (t.reservedUid) + ": " + (t.uidMatch ? 'the same UID as the cgroup path in step 2' : 'NOT the cgroup UID') + "."), tone: t.uidMatch ? 'good' : 'risk' }]} />
+    The register (claim) and the key card (cgroup) agree. That is the proof that this Pod owns this GPU.
+  </WStep>
+  <WStep title="6 · DRA device name → device files">
+    <Out host="gpu-node-1" cmd={("ls -l /proc/" + t.enginePid + "/fd | grep -E 'dri|kfd' | awk '{print $NF}' | sort | uniq -c")} out={t.fdOut} marks={[{ at: t.render, note: ("The AMD DRA driver names devices <code>gpu-&lt;card&gt;-&lt;render&gt;</code>: <code>" + (t.device) + "</code> = <code>" + (t.deviceCard) + "</code> + <code>" + (t.deviceRender) + "</code>. The process holds exactly that render node" + (t.renderMatch ? ' (checked)' : '') + "."), tone: 'good' }, { at: '/dev/kfd', note: '<code>/dev/kfd</code>: the ROCm compute interface every GPU program opens.' }]} />
+    If a process holds render nodes of GPUs it was not allocated, something bypassed DRA (a privileged Pod or a host process). That is worth a security look.
+  </WStep>
+  <WStep title="7 · Device → PCI address → slot and serial">
+    <Out host="mgmt node" cmd={"kubectl get resourceslice -o jsonpath='{range .items[?(@.spec.nodeName==\"gpu-node-1\")]}{range .spec.devices[*]}{.name}{\" \"}{.attributes.resource\\.kubernetes\\.io/pciBusID.string}{\" numa=\"}{.attributes.numaNode.int}{\"\\n\"}{end}{end}'"} out={t.sliceOut} marks={[{ at: t.device, note: ("<code>" + (t.device) + "</code> is PCI device <code>" + (t.bdf) + "</code>, NUMA node " + t.numa + ".") }]} />
+    <Out host="gpu-node-1" cmd={("amd-smi list -e -g " + (t.bdf))} out={t.listOut} marks={[{ at: 'BDF', note: 'Same BDF: this is GPU index 4.' }, { at: 'OAM_ID', note: ("Physical slot <b>" + (t.oam) + "</b>. <code>amd-smi static -B -g 4</code> gives board serial <b>" + (t.serial) + "</b>."), tone: 'warn' }]} />
+    Each device in the slice also carries `driverVersion`, `partitionProfile` (`spx_nps1`), `productName` and `pcieRoot` attributes. There is no health attribute.
+  </WStep>
+</Walkthrough>
+
+<Kpis items={[
+  { label: 'Pod', value: ('…-' + t.pod.split('-').at(-1)), detail: ("" + (t.ns) + ", container prefill") },
+  { label: 'Claim → device', value: t.device, detail: ("" + (t.card) + ", " + (t.render)), tone: 'primary' },
+  { label: 'PCI BDF', value: t.bdf, detail: ('GPU index 4, NUMA ' + t.numa) },
+  { label: 'Physical', value: ("OAM slot " + (t.oam)), detail: ("serial " + (t.serial)), tone: 'warn' },
+]} />
+
+For an RMA, give the vendor the **node, BDF, OAM slot and board serial**, never just "GPU 4".
+
+## The identifiers and where they meet
+
+| World | Identifier | Example on gpu-node-1 |
+| --- | --- | --- |
+| amd-smi / exporter | GPU index (`gpu_id`) | `4` |
+| PCI | BDF | <code>{t.bdf}</code> |
+| DRM | card / render node | <code>{t.card}</code>, <code>/dev/dri/{t.render}</code> |
+| DRA | device name in the ResourceSlice | <code>{t.device}</code> |
+| Hardware | OAM slot, board serial | slot <code>{t.oam}</code>, serial from `amd-smi static -B` |
+| Linux | host PID, cgroup | <code>{t.enginePid}</code>, `/kubepods/burstable/pod<uid>/<container-id>` |
+| Kubernetes | Pod, Pod UID, ResourceClaim | <code>llm-prefill-…-{t.pod.split('-').at(-1)}</code>, <code>{t.podUid.slice(0, 8)}-…</code>, <code>…-gpu-{t.claim.split('-').at(-1)}</code> |
+
+The joins:
+
+- **DRA device name → card and render node.** The AMD DRA driver names devices `gpu-<card>-<render>`, so <code>{t.device}</code> is <code>{t.deviceCard}</code> and <code>{t.deviceRender}</code>.
+- **ResourceSlice → BDF.** Each device carries the attribute `resource.kubernetes.io/pciBusID`.
+- **BDF → everything else.** `amd-smi list -e` prints index, BDF, card, render and OAM slot for each GPU.
+- **PID → Pod.** The process's cgroup path contains the Pod UID and container ID.
+- **Pod → GPU.** The ResourceClaim's `status.allocation` names the device, and `status.reservedFor` names the Pod UID.
+
+## The whole node on one screen
+
+This script prints one line per GPU: index, BDF, slot, DRA device name, PIDs, and Pod. Run it as root on the GPU node. It only reads (amd-smi, `/proc`, `crictl ps`).
+
+```shell
+#!/bin/bash
+# gpumap.sh — read-only: GPU index, BDF, OAM slot, DRA device, PIDs, Pod
+amd-smi list -e --json | python3 -c '
+import json, sys, re, subprocess
+procs = json.loads(subprocess.run(["amd-smi", "process", "--json"], capture_output=True, text=True).stdout)
+pids = {g["gpu"]: [p["process_info"]["pid"] for p in g.get("process_list", [])
+                   if isinstance(p, dict) and isinstance(p.get("process_info"), dict)] for g in procs}
+def pod(pid):
+    ids = re.findall(r"[0-9a-f]{64}", open("/proc/%d/cgroup" % pid).read())
+    if not ids: return "-"
+    out = subprocess.run(["crictl", "ps", "--id", ids[-1], "-o", "json"], capture_output=True, text=True).stdout
+    c = json.loads(out)["containers"]
+    return "%s/%s" % (c[0]["labels"]["io.kubernetes.pod.namespace"], c[0]["labels"]["io.kubernetes.pod.name"]) if c else "-"
+fmt = "%-4s%-14s%-5s%-13s%-18s%s"
+print(fmt % ("GPU", "BDF", "OAM", "DRA device", "PIDs", "Pod"))
+for g in json.load(sys.stdin):
+    ps = pids.get(g["gpu"], [])
+    dev = "gpu-%s-%s" % (g["card"][4:], g["render"][7:])
+    print(fmt % (g["gpu"], g["bdf"], g["oam_id"], dev, ",".join(map(str, ps)) or "-", pod(ps[0]) if ps else "-"))
+'
+```
+
+<Out host="gpu-node-1" cmd="./gpumap.sh" out={t.mapOut} />
+
+Three things to notice:
+
+- The index order follows the BDF, not the slot: GPU 0 sits in OAM slot {t.gpus[0].oam}, GPU 2 in slot {t.gpus[2].oam}. DC Ops works in slots.
+- The DRA names follow the DRM numbers, not the index: card numbers start at 1 here (`card1` is GPU 0), and on hosts where each GPU registers several DRM nodes they skip numbers. Do not guess the name from the index.
+- Only two of eight GPUs are busy. That matches the two ResourceClaims allocated from this node's pool (see below).
+
+## All GPUs in use on a node, from the claim side
+
+```shell
+kubectl get resourceclaims -A -o json | python3 -c '
+import json, sys
+for c in json.load(sys.stdin)["items"]:
+    for r in (c.get("status", {}).get("allocation") or {}).get("devices", {}).get("results", []):
+        if r["pool"] == "gpu-node-1":
+            print(c["metadata"]["namespace"], c["metadata"]["name"], r["device"])'
+```
+
+On `gpu-node-1` this would print two claims: one Pod on <code>{t.device}</code> and another on <code>{t.device2}</code>. That matches the map script exactly. The **claim is the allocation ledger**. When the ledger, `amd-smi process` and the exporter disagree, believe the ledger for "is it allocated" and `amd-smi process` for "is it in use".
+
+**Shortcut: the exporter label.** Busy GPUs carry the Pod name on their metrics (see [GPU metrics](/learn/gpu-metrics/)):
+
+<pre class="astro-code" tabindex="0"><code>{t.exporterOut}</code></pre>
+
+Use it for dashboards. In an incident, confirm with the claim: a blank label does not prove the GPU is free.
+
+## NVIDIA variant
+
+| Step | AMD | NVIDIA |
+| --- | --- | --- |
+| GPU → PIDs | `amd-smi process -g N` | `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv` |
+| PID → Pod | `/proc/<pid>/cgroup`, `crictl` | the same |
+| Device files | `/dev/dri/renderD*`, `/dev/kfd` | `/dev/nvidia<N>`, `/dev/nvidiactl`, `/dev/nvidia-uvm` |
+| Device ↔ BDF | `amd-smi list -e` | `nvidia-smi --query-gpu=index,uuid,pci.bus_id --format=csv` |
+| Claim → device | ResourceClaim `status.allocation` | the same (NVIDIA DRA driver `gpu.nvidia.com`; not verified here) |
+
+## Logs around a GPU Pod
+
+| Want | Command |
+| --- | --- |
+| Prefill engine log | `kubectl -n gpu-demo logs <pod> -c prefill` (add `--previous` after a crash) |
+| Why it restarted | `kubectl -n <ns> describe pod <pod>`: last state, exit code (139 = segfault, for example when the GPU dies) |
+| The node's view | `journalctl -k --since -1h \| grep -i amdgpu` on the GPU node |
+| DRA driver | `kubectl -n kube-amd-gpu logs <default-dra-driver-pod-on-node>` |
+| Exporter | `kubectl -n kube-amd-gpu logs <default-metrics-exporter-pod-on-node>` |
+
+<Callout tone="warn" title="Do not exec into workload Pods">Everything above works from the host and the API. `kubectl exec` into a prefill Pod changes nothing on the GPU, but it touches a production workload and is not needed for any of these joins.</Callout>
+
+<Callout tone="warn" title="Do not exec into workload Pods">Everything above works from the host and the API. `kubectl exec` into a prefill Pod changes nothing on the GPU, but it touches a production workload and is not needed for any of these joins.</Callout>
+
+## Further reading
+
+- [Kubernetes DRA](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/) · [AMD SMI CLI](https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html) · [nvidia-smi](https://docs.nvidia.com/deploy/nvidia-smi/index.html)
+- On this site: [DRA on the node](/learn/dra-on-the-node/) (how the claim becomes device files)

@@ -1,0 +1,103 @@
+---
+/**
+ * Callout: a tinted aside box with an icon, in one of five tones.
+ *   <Callout tone="warn" title="Heads up">…</Callout>
+ * tone: note | good | warn | risk | neutral (or the template's type: info | success | warning | error).
+ *
+ * Tinted background, a coloured rule down the left edge that curves around a
+ * floating icon at the top-left corner; the curve also carves the box's corner.
+ * The curve follows the icon's outline: round for circle icons, a slanted edge
+ * for the warning triangle (after joshwcomeau.com's asides).
+ * Links inside pick up the variant colour for their underline.
+ */
+type Type = 'info' | 'warning' | 'success' | 'error';
+/** `id`: anchor for links to this box (`#id`). */
+interface Props { tone?: 'note' | 'good' | 'warn' | 'risk' | 'neutral'; type?: Type; title?: string; id?: string }
+const TONE: Record<string, Type> = { note: 'info', neutral: 'info', good: 'success', warn: 'warning', risk: 'error' };
+const { tone, title, id } = Astro.props;
+const type: Type = Astro.props.type ?? TONE[tone ?? 'note'];
+
+const icons: Record<Type, string> = {
+  info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>',
+  warning: '<path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/>',
+  success: '<path d="M21.8 10A10 10 0 1 1 17 3.34"/><path d="m9 11 3 3L22 4"/>',
+  error: '<circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/>',
+};
+
+// Corner pieces: [width, height, viewBox, carve (page colour), rule (accent)].
+const ROUND = [28.5, 34.5, '0 0 57 69',
+  'M54 0V0.716804C54 25.9434 35.0653 47.1517 10 50L0 57V0H54Z',
+  'M56.9961 4.15364C57.0809 2.49896 55.8083 1.08879 54.1536 1.00394C52.499 0.919082 51.0888 2.19168 51.0039 3.84636L56.9961 4.15364ZM9.09704 51.7557L8.49716 48.8163L9.09704 51.7557ZM6 69V59.2227H0V69H6ZM9.69692 54.6951L14.3373 53.7481L13.1375 47.8693L8.49716 48.8163L9.69692 54.6951ZM14.3373 53.7481C38.202 48.8777 55.7486 28.4783 56.9961 4.15364L51.0039 3.84636C49.8967 25.4384 34.3213 43.5461 13.1375 47.8693L14.3373 53.7481ZM6 59.2227C6 57.0268 7.54537 55.1342 9.69692 54.6951L8.49716 48.8163C3.55195 49.8255 0 54.1756 0 59.2227H6Z'] as const;
+const SLANT = [37.5, 35, '0 0 75 70',
+  'M54.3545 15.0483L46 0.5H0V64L5.42113 56.1695C7.66253 52.9319 11.3497 51 15.2874 51H33.542C51.9925 51 63.5426 31.0483 54.3545 15.0483Z',
+  'M52.1101 4.52096C51.2932 3.07946 49.4625 2.57308 48.021 3.38993C46.5795 4.20678 46.0731 6.03754 46.8899 7.47904L52.1101 4.52096ZM15 54H37.2466V48H15V54ZM0 63V69.5H6V63H0ZM46.8899 7.47904L53.777 19.6328L58.9972 16.6747L52.1101 4.52096L46.8899 7.47904ZM37.2466 54C56.4023 54 68.4412 33.3405 58.9972 16.6747L53.777 19.6328C60.9545 32.2988 51.8049 48 37.2466 48V54ZM15 48C6.71573 48 0 54.7157 0 63H6C6 58.0294 10.0294 54 15 54V48Z'] as const;
+const [cw, ch, cvb, carve, rule] = type === 'warning' ? SLANT : ROUND;
+---
+
+<aside id={id} class:list={['callout', type]} data-reveal>
+  <div class="rule" aria-hidden="true">
+    <svg class:list={['corner', { slant: type === 'warning' }]} width={cw} height={ch} viewBox={cvb} preserveAspectRatio="none" fill="none">
+      <path class="carve" d={carve} />
+      <path class="stroke" d={rule} />
+    </svg>
+    <div class="line"></div>
+  </div>
+  <div class="icon" aria-hidden="true">
+    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+      stroke-linecap="round" stroke-linejoin="round" set:html={icons[type]} />
+  </div>
+  {title && <strong class="title">{title}</strong>}
+  <div class="body"><slot /></div>
+</aside>
+
+<style>
+  .callout {
+    --accent: var(--color-info);
+    --tint: var(--color-info-100);
+    --link-underline: var(--color-primary);
+    position: relative;
+    margin: 32px -32px 64px;
+    padding: 24px 32px 24px 29px;
+    border-left: 3px solid transparent;
+    border-radius: 0 4px 4px 0;
+    background: var(--tint);
+    font-size: 1rem;
+    line-height: 1.5;
+    transition: background 350ms;
+    /* A link to the box (#id) lands below the sticky header, icon included. */
+    scroll-margin-top: calc(var(--header-height) + 40px);
+  }
+  /* Back-to-back callouts sit a little closer together. */
+  :global(.callout + .callout) { margin-top: -16px; }
+  .warning { --accent: var(--color-alert); --tint: var(--color-warning-100); --link-underline: var(--color-warning-700); }
+  .success { --accent: var(--color-success); --tint: var(--color-success-100); --link-underline: var(--color-success); }
+  .error { --accent: var(--color-error); --tint: var(--color-error-100); --link-underline: var(--color-error); }
+
+  /* The rule: corner piece on top, then a 3px bar to the bottom, over the transparent left border. */
+  .rule { position: absolute; top: 0; left: 0; bottom: 0; display: flex; flex-direction: column; transform: translateX(-3px); pointer-events: none; }
+  .corner { display: block; overflow: visible; margin-top: -0.5px; }
+  .corner.slant { margin-top: -1.5px; }
+  .carve { fill: var(--color-background); transition: fill 350ms; }
+  .stroke { fill: var(--accent); }
+  .line { flex: 1 1; width: 3px; margin-top: -1px; border-radius: 0 0 100px 100px; background: var(--accent); }
+
+  /* The icon is centred on the box's top-left corner. */
+  .icon {
+    position: absolute;
+    top: 0;
+    left: 0;
+    transform: translate(calc(-50% - 1.5px), -50%);
+    padding: 8px;
+    color: var(--accent);
+  }
+  .icon svg { display: block; }
+
+  .title { display: block; margin-bottom: 8px; font-size: 1.125rem; font-weight: var(--font-weight-bold); line-height: 1.5; }
+  .body > :global(*:last-child) { margin-bottom: 0; }
+  .body :global(p) { font-size: 1rem; line-height: 1.5; margin-bottom: 20px; }
+  .body :global(a) { box-shadow: 0 1.5px 0 0 var(--link-underline); }
+
+  @media (max-width: 800px) {
+    .callout { margin-inline: calc(var(--viewport-padding) * -1); border-radius: 0; }
+  }
+</style>

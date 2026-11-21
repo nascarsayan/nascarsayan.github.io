@@ -1,0 +1,62 @@
+---
+/** Bad-page budget calculator: bad HBM rows → retired pages, budget used, memory lost. */
+import { PAGES_PER_ROW, THRESHOLD, PAGE_BYTES, HBM_BYTES } from './_budget';
+const cfg = JSON.stringify({ PAGES_PER_ROW, THRESHOLD, PAGE_BYTES, HBM_BYTES });
+---
+
+<figure class="bpc" data-bpc={cfg}>
+  <figcaption class="bpc-title">Bad-page budget calculator</figcaption>
+  <label class="bpc-in">Bad HBM rows so far <input data-k="rows" type="range" min="0" max="12" step="1" value="3" /> <output data-o="rows"></output></label>
+  <div class="bpc-out">
+    <div><span class="k">Retired pages</span><span class="v" data-o="pages"></span></div>
+    <div><span class="k">Budget used</span><span class="v" data-o="pct"></span></div>
+    <div><span class="k">HBM lost</span><span class="v" data-o="lost"></span></div>
+  </div>
+  <div class="bpc-bar" aria-hidden="true"><span data-o="bar"></span><i></i></div>
+  <p class="bpc-note" data-o="verdict"></p>
+  <p class="bpc-src">16 pages per bad row and the 128-page threshold come from the driver source and <code>amd-smi static</code>. Page size 4 KiB as in the kernel docs' example; not verified for MI355X.</p>
+</figure>
+
+<style>
+  .bpc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .bpc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .bpc-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 0.875rem; }
+  .bpc-in input { accent-color: var(--color-primary); }
+  .bpc-in output { min-width: 30px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bpc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 16px; margin-top: 12px; }
+  .bpc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .bpc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .bpc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bpc-bar { position: relative; height: 16px; margin-top: 14px; border-radius: 999px; background: var(--color-gray-100); overflow: hidden; }
+  .bpc-bar span { display: block; height: 100%; background: var(--color-primary); }
+  .bpc-bar span.over { background: var(--color-error); }
+  .bpc-bar i { position: absolute; top: 0; bottom: 0; left: 66.67%; width: 2px; background: var(--color-text); }
+  .bpc-note { margin-top: 6px; font-size: 0.9rem; }
+  .bpc-src { margin-top: 2px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-bpc]')) {
+    const c = JSON.parse(fig.dataset.bpc!);
+    const $ = (s: string) => fig.querySelector<HTMLElement>(s)!;
+    const input = fig.querySelector<HTMLInputElement>('[data-k=rows]')!;
+    const scale = 12 * c.PAGES_PER_ROW; // bar spans 0..192 pages; the mark sits at 128
+    const update = () => {
+      const rows = Number(input.value), pages = rows * c.PAGES_PER_ROW, lost = pages * c.PAGE_BYTES;
+      $('[data-o=rows]').textContent = String(rows);
+      $('[data-o=pages]').textContent = `${pages} of ${c.THRESHOLD}`;
+      $('[data-o=pct]').textContent = `${Math.round((100 * pages) / c.THRESHOLD)} %`;
+      $('[data-o=lost]').textContent = `${lost / 1024} KiB`;
+      const bar = $('[data-o=bar]');
+      bar.style.width = `${(100 * pages) / scale}%`;
+      bar.classList.toggle('over', pages > c.THRESHOLD);
+      $('[data-o=verdict]').textContent = pages === 0
+        ? 'No retired pages: the normal state for a healthy GPU.'
+        : pages <= c.THRESHOLD
+          ? `Keep serving. ${(c.THRESHOLD - pages) / c.PAGES_PER_ROW} more bad rows fit in the budget; ${lost / 1024} KiB is ${(lost / c.HBM_BYTES).toExponential(1)} of the GPU's memory. Ticket it and watch the trend.`
+          : `Threshold exceeded (BAD_PAGE_THRESHOLD_EXCEEDED: True): hold, drain and RMA the GPU. Tainting the node at this point is reasonable.`;
+    };
+    input.addEventListener('input', update);
+    update();
+  }
+</script>

@@ -1,0 +1,226 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "NVIDIA GPU tools: nvidia-smi, DCGM, Xid, Fabric Manager, IMEX"
+short: "NVIDIA tools"
+description: "The NVIDIA side of the toolbox for DGX, HGX and NVL72 platforms: an AMD↔NVIDIA command explorer by task, nvidia-smi queries, DCGM health and diagnostics, five Xids triaged step by step, the Fabric Manager start order on NVSwitch systems, IMEX, NVSentinel, and the bug report."
+updated: "2026-11-10"
+track: operations
+order: 2
+requires: [gpu-software-stack, gpu-partitioning]
+eyebrow: "Learn · Operating GPU nodes"
+links:
+  - { label: "Xid catalog", href: "https://docs.nvidia.com/deploy/xid-errors/analyzing-xid-catalog.html" }
+
+---
+import Callout from '@/components/content/Callout.astro';
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Badge from '@/components/content/Badge.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Out from '../amd-gpu-tools/_Out.astro';
+import bringup from './_bringup.diagram';
+import { TASKS } from './_tasks';
+import { XIDS } from './_xid';
+
+This page lists the standard NVIDIA tools, checked against NVIDIA's documentation, next to their AMD counterparts. The NVIDIA commands were not run for this page; re-check versions and paths on your own nodes.
+
+## The idea
+
+The questions do not change with the vendor: *which GPU is which, how is it doing, is it damaged, who uses it, are its links up?* Only the tool names do. `nvidia-smi` plays the part of `amd-smi`; **DCGM** (Data Center GPU Manager) adds a resident service that watches health and runs diagnostics; and NVIDIA's driver writes numbered **Xid** errors to the kernel log, each with a recommended action, where AMD writes free-text lines.
+
+One piece has no AMD counterpart. On HGX and DGX boards the GPUs do not connect to each other directly: they connect through **NVSwitch** chips, like servers through a network switch. A switch needs its routes programmed before traffic flows, and **Fabric Manager** is the service that programs them, like a controller in a software-defined network. Where the analogy breaks: a server with an unconfigured switch still works on its own; a CUDA program on an HGX node without a running Fabric Manager does not start at all, even though `nvidia-smi` lists every GPU.
+
+## AMD and NVIDIA, task by task
+
+Pick a task and a vendor. AMD output is illustrative example output (an example MI355X node, GPU 4). NVIDIA commands are from NVIDIA's documentation and **were not run for this page**, so no output is shown for them.
+
+<Explorer id="vendor" options={[
+  { key: 'task', label: 'Task', default: 'inventory', values: TASKS.map((t) => ({ value: t.id, label: t.label })) },
+  { key: 'vendor', label: 'Vendor', default: 'amd', values: [{ value: 'amd', label: 'AMD MI355X' }, { value: 'nvidia', label: 'NVIDIA' }] },
+]} variants={TASKS.flatMap((t) => [{ match: { task: t.id, vendor: 'amd' }, id: ("" + (t.id) + "-amd") }, { match: { task: t.id, vendor: 'nvidia' }, id: ("" + (t.id) + "-nvidia") }])}>
+  {TASKS.map((t) => (
+    <Variant id={("" + (t.id) + "-amd")}>
+      <Out host="gpu-node-1" cmd={t.amd.cmd} out={t.amd.out} />
+      <p>{t.amd.read}</p>
+    </Variant>
+  ))}
+  {TASKS.map((t) => (
+    <Variant id={("" + (t.id) + "-nvidia")}>
+      <Out host="HGX node (documented, not run)" cmd={t.nv.cmd.split('\n')[0]} out={t.nv.cmd.split('\n').slice(1).map((c) => ("\u0024 " + (c))).join('\n') || ' '} />
+      <p>{t.nv.read}</p>
+    </Variant>
+  ))}
+</Explorer>
+
+## The start order on an NVSwitch node
+
+<Diagram spec={bringup} title="What must be up before a CUDA program starts (HGX/DGX)">
+  <Step title="1 · Driver first" focus="drv">The kernel driver and the GSP firmware load. `nvidia-smi` already lists all GPUs at this point.</Step>
+  <Step title="2 · Fabric Manager checks versions" path="fm -> drv" state={{ fm: { tone: 'primary', detail: 'starting' } }}>At start, Fabric Manager checks the driver stack and **aborts if the versions are incompatible**. In practice, keep the Fabric Manager version equal to the driver version.</Step>
+  <Step title="3 · Routes programmed" path="fm => sw => gpus" focus="lsm, fm -> lsm" state={{ sw: { tone: 'good', detail: 'routes programmed' } }}>Fabric Manager (with NVLSM on B200/B300) programs the NVSwitch routes. Now GPU-to-GPU traffic can flow.</Step>
+  <Step title="4 · CUDA starts" path="app -> gpus" state={{ sw: { tone: 'good', detail: 'routes programmed' } }}>Only now does CUDA initialization succeed.</Step>
+  <Step title="Fabric Manager missing or mismatched" path="app -> gpus:503" state={{ fm: { tone: 'risk', detail: 'aborted: version mismatch' }, sw: { tone: 'muted', detail: 'no routes' }, app: { tone: 'risk', detail: 'cudaErrorSystemNotReady' } }}>A driver upgrade without the matching Fabric Manager: every GPU is listed, none is usable. CUDA init fails with `cudaErrorSystemNotReady`. Stopping Fabric Manager also loses fabric state, and GPUs need a reset after it restarts.</Step>
+</Diagram>
+
+## Worked example: five Xids, five decisions
+
+When the driver logs `NVRM: Xid` in `journalctl -k`, the line carries the PCI address and the code. The code alone decides the first move. Descriptions and immediate actions below are quoted from NVIDIA's Xid catalog; the last line of each step is a suggested response.
+
+<Walkthrough title="From an Xid code to an action" caption="Catalog text quoted from NVIDIA's Xid catalog. Response lines follow a hold → drain → capture → recover order.">
+  {XIDS.map((x, i) => (
+    <WStep title={("" + (i + 1) + " · Xid " + (x.xid) + ": " + (x.desc))}>
+      <p><Badge tone={x.action === 'IGNORE' ? 'good' : x.action === 'RESTART_APP' ? 'note' : 'risk'}>catalog action: {x.action}</Badge> <Badge tone="neutral">AMD analogue: {x.amd}</Badge></p>
+      <p>{x.ours}</p>
+    </WStep>
+  ))}
+</Walkthrough>
+
+The pattern: `RESTART_APP` codes are usually the program's fault, `IGNORE` codes are bookkeeping, and `RESET_GPU` / `RESTART_BM` codes are the hardware's. On HGX a reset is one GPU; on MI35x it is the whole hive.
+
+## The pieces on an NVIDIA node
+
+| Piece | What it is | AMD equivalent |
+| --- | --- | --- |
+| NVIDIA kernel driver + **GSP** firmware | the driver; recent GPUs offload much of it to the GPU System Processor | `amdgpu` + PSP/SMU firmware |
+| **NVML** + `nvidia-smi` | management library and its CLI | AMD SMI library + `amd-smi` |
+| **DCGM** (`nv-hostengine`, `dcgmi`) | Data Center GPU Manager: health watches, diagnostics, telemetry | no single equivalent: `amd-smi` + RVS/AGFHC + exporter |
+| **dcgm-exporter** | Prometheus exporter built on DCGM | device-metrics-exporter |
+| **Fabric Manager** (`nvidia-fabricmanager`) | configures NVSwitch routing on HGX/DGX boards | none: XGMI needs no fabric manager |
+| **NVLSM** | NVLink subnet manager, a Fabric Manager dependency on B200/B300 | none |
+| **IMEX** (`nvidia-imex`) | lets GPUs on different trays of one NVLink domain share memory | none on MI355X |
+
+## nvidia-smi: safe, read-only
+
+| Command | Shows | AMD equivalent |
+| --- | --- | --- |
+| `nvidia-smi` | summary: GPUs, utilization, memory, processes | `amd-smi monitor -q` |
+| `nvidia-smi -L` | GPU list with UUIDs | `amd-smi list` |
+| `nvidia-smi -q` | the full record for each GPU | `amd-smi static` + `metric` |
+| `nvidia-smi -q -d ECC` | ECC counters, volatile and aggregate | `amd-smi metric -e -k` |
+| `nvidia-smi -q -d ROW_REMAPPER` | remapped HBM rows, pending and failed | `amd-smi bad-pages` |
+| `nvidia-smi -q -d PERFORMANCE` | clock event (throttle) reasons | `amd-smi metric -v` |
+| `nvidia-smi -q -d TEMPERATURE` / `POWER` / `CLOCK` | sensors | `amd-smi metric -t -p -c` |
+| `nvidia-smi --query-gpu=<fields> --format=csv` | chosen fields, for scripts | `amd-smi metric --csv` |
+| `nvidia-smi --query-compute-apps=pid,gpu_uuid,used_memory --format=csv` | processes per GPU | `amd-smi process` |
+| `nvidia-smi topo -m` | GPU/NIC connection matrix with CPU and NUMA affinity | `amd-smi topology` |
+| `nvidia-smi nvlink -s` / `-e` | NVLink status / error counters | `amd-smi xgmi` / `metric -x` |
+| `nvidia-smi mig -lgi` | MIG GPU instances | `amd-smi partition` |
+
+The `-d` filter accepts: MEMORY, UTILIZATION, ECC, TEMPERATURE, POWER, CLOCK, COMPUTE, PIDS, PERFORMANCE, SUPPORTED_CLOCKS, PAGE_RETIREMENT, ACCOUNTING, ENCODER_STATS, SUPPORTED_GPU_TARGET_TEMP, VOLTAGE, FBC_STATS, ROW_REMAPPER, GSP_FIRMWARE_VERSION, POWER_SMOOTHING, POWER_PROFILES, BANK_REMAPPER (from the nvidia-smi documentation).
+
+**Query fields.** `--query-gpu` takes field names such as `index`, `uuid`, `pci.bus_id`, `utilization.gpu`, `memory.used`, `temperature.gpu` and `power.draw`. The manual page does not list them; `nvidia-smi --help-query-gpu` does, for the installed driver. Field names change between drivers. One example: the throttle fields were renamed to `clocks_event_reasons`, and the old `clocks_throttle_reasons` names came back only for compatibility. Always check `--help-query-gpu` on the node before you script a field.
+
+```shell
+# A morning check on an HGX node (not run for this page)
+nvidia-smi --query-gpu=index,pci.bus_id,temperature.gpu,power.draw,memory.used,utilization.gpu --format=csv
+nvidia-smi -q -d ECC,ROW_REMAPPER | grep -iE 'pending|failure|uncorr'
+```
+
+<Callout tone="warn" title="Disruptive">These change or stress GPUs; run them only on a drained node: `nvidia-smi -r` (GPU reset; needs root and no process on the GPU), `nvidia-smi drain`, `-pm` (persistence mode), `-pl` (power limit), `mig -cgi`/`-dgi` (create or destroy MIG instances), `dcgmi diag -r 2` and higher.</Callout>
+
+## DCGM
+
+**DCGM** runs as a host service (`nv-hostengine`) or inside the GPU operator. Most NVIDIA tooling, including dcgm-exporter and NVSentinel, talks to it.
+
+| Command | Use |
+| --- | --- |
+| `dcgmi discovery -l` | GPUs (and NVSwitches) DCGM sees |
+| `dcgmi health -s <systems>` then `dcgmi health -c` | set background health watches (PCIe, memory, NVLink, thermal…), then check them |
+| `dcgmi dmon -e <field ids>` | stream chosen fields |
+| `dcgmi diag -r 1` … `-r 4` | diagnostics; each level includes the ones below |
+
+Diagnostic levels, with NVIDIA's measured times on Hopper systems:
+
+| Level | Name | 8-GPU duration | Adds |
+| --- | --- | --- | --- |
+| `-r 1` | Short | under 2.5 s | software and deployment checks |
+| `-r 2` | Medium | under 10.5 min | more hardware plugins (see NVIDIA's table for the exact list) |
+| `-r 3` | Long | under 35 min | stress, NVBandwidth, NCCL tests, targeted power |
+| `-r 4` | Extra long | under 2.25 h | memtest and pulse test |
+
+The deployment check fails if other graphics processes run on the GPU, and the GPU memory test takes 75 % of GPU memory by default. Treat level 2 and above as disruptive. `dcgmi diag -r 3` is the closest NVIDIA counterpart of AMD's AGFHC.
+
+## Xid: NVIDIA's error codes
+
+The NVIDIA driver logs **Xid** errors to the kernel log:
+
+```shell
+journalctl -k | grep -i 'NVRM: Xid'
+```
+
+The line carries the PCI address and the code. NVIDIA's Xid catalog assigns each code an **immediate action** (a "resolution bucket") and an investigatory action. The codes most likely to matter on a serving fleet, quoted from the catalog:
+
+| Xid | Catalog description | Immediate action |
+| --- | --- | --- |
+| 13 | Graphics Engine Exception | RESTART_APP |
+| 31 | GPU memory page fault | RESTART_APP |
+| 43 | GPU stopped processing | IGNORE |
+| 48 | Double Bit ECC Error | WORKFLOW_XID_48 |
+| 62 | Internal micro-controller halt | RESET_GPU |
+| 63 | GPU memory remapping event | IGNORE |
+| 64 | GPU memory remapping failure | RESET_GPU |
+| 74 | NVLINK Error | WORKFLOW_NVLINK_ERR |
+| 79 | GPU has fallen off the bus | RESTART_BM (restart the bare-metal host) |
+| 92 | High single-bit ECC error rate | IGNORE |
+| 94 | Contained memory error | RESTART_APP |
+| 95 | Uncontained memory error | RESET_GPU |
+| 109 | Context Switch Timeout Error | RESET_GPU |
+| 119 / 120 | GSP RPC Timeout / GSP Error | RESET_GPU |
+| 136 | Link Training Failed | RESET_GPU |
+| 140 | ECC Unrecovered Error | RESET_GPU |
+| 143 | GPU Initialization Error | RESET_GPU |
+| 145 | NVLINK: RLW Error | WORKFLOW_NVLINK5_ERR |
+| 154 | GPU Recovery Action Changed | informational, about another Xid |
+
+How to read it: an application bug and a hardware fault can both produce an Xid. 13 and 31 usually mean a bad kernel or bad pointer, so restart the app. 79, 95, 119 and 140 mean the GPU itself needs a reset or the host a restart. On HGX, a reset is per GPU. On MI35x it is the whole hive.
+
+## NVLink systems: Fabric Manager, NVLSM, IMEX
+
+**Fabric Manager** configures the NVSwitch chips that connect GPUs on HGX/DGX baseboards. Facts from NVIDIA's Fabric Manager guide:
+
+- Service `nvidia-fabricmanager`; log `/var/log/fabricmanager.log`, or `journalctl -u nvidia-fabricmanager`.
+- At start it checks the driver stack and **aborts if the versions are incompatible**. Keep the Fabric Manager version equal to the driver version.
+- If a CUDA application starts before Fabric Manager finishes, or Fabric Manager fails, CUDA init fails with `cudaErrorSystemNotReady`. Stopping Fabric Manager loses fabric state, and GPUs need a reset after it restarts.
+- On B200/B300 it depends on **NVLSM** (log `/var/log/opensm.log`).
+
+The ops lesson: on an HGX node, a driver upgrade without a matching Fabric Manager leaves every GPU unusable, even though `nvidia-smi` lists them all.
+
+**IMEX** (`nvidia-imex`) supports GPU memory export and import across nodes in one NVLink domain (NVL72: 18 compute trays). Nodes in an IMEX domain find each other through `nodes_config.cfg`. NVIDIA's DRA driver manages IMEX for Kubernetes workloads through a `ComputeDomain` object. Rack-scale specifics are in [Rack-scale GPUs](/learn/rack-scale-gpus/).
+
+## NVSentinel
+
+**NVSentinel** is NVIDIA's open-source fault agent for Kubernetes GPU nodes: roughly node-problem-detector plus remediation, packaged for NVIDIA GPUs. From its README (v1.31.0):
+
+- **Detect**: GPU, NIC and system faults from DCGM, syslog and cloud maintenance events, reported as **node conditions**. It talks to DCGM directly, so the GPU operator must run DCGM as a standalone service.
+- **Protect**: optional quarantine (cordon) and drain.
+- **Remediate**: optional GPU reset or reboot, then return to service.
+- A circuit breaker pauses quarantine once the nodes cordoned in 5 minutes reach 50 % of the cluster.
+- The default install only monitors. Each further step is a separate Helm flag. It needs Kubernetes 1.34+ and has a flag for GPU operator DRA mode.
+
+Starting with detection only is the cautious path: automatic drain and reboot must agree with whoever owns draining your workloads.
+
+## Evidence for NVIDIA support
+
+`nvidia-bug-report.sh` (ships with the driver; run as root) collects kernel logs, `nvidia-smi -q`, PCI state and driver details into one compressed log for NVIDIA support. Run it **before** any reset or reboot, for the same reason as on AMD: recovery destroys evidence.
+
+## AMD and NVIDIA side by side
+
+| Task | AMD MI35x | NVIDIA |
+| --- | --- | --- |
+| Inventory | `amd-smi list -e` | `nvidia-smi -L`, `dcgmi discovery -l` |
+| Health now | `amd-smi metric -e -k`, `journalctl -k` | `dcgmi health -c`, Xid in `journalctl -k` |
+| Memory wear | `amd-smi bad-pages` | `nvidia-smi -q -d ROW_REMAPPER` |
+| Links | `amd-smi xgmi` | `nvidia-smi nvlink -s` |
+| Stress test (drained) | AGFHC, RVS, TransferBench | `dcgmi diag -r 3`, nvbandwidth |
+| Reset scope | whole hive (8 GPUs) | one GPU (HGX); NVLink-domain effects on NVL72 |
+| Fabric service | none | Fabric Manager (+ NVLSM, IMEX) |
+| Node fault agent | node-problem-detector with AMD rules | NVSentinel |
+
+## Further reading
+
+- [nvidia-smi documentation](https://docs.nvidia.com/deploy/nvidia-smi/index.html) · [Xid catalog](https://docs.nvidia.com/deploy/xid-errors/analyzing-xid-catalog.html)
+- [DCGM diagnostics: run levels](https://docs.nvidia.com/datacenter/dcgm/latest/user-guide/dcgm-diagnostics.html#run-levels-and-tests) · [DCGM feature overview](https://docs.nvidia.com/datacenter/dcgm/latest/user-guide/feature-overview.html) · [dcgm-exporter](https://github.com/NVIDIA/dcgm-exporter)
+- [Fabric Manager user guide](https://docs.nvidia.com/datacenter/tesla/fabric-manager-user-guide/index.html) · [IMEX guide](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/overview.html) · [NVSentinel](https://github.com/NVIDIA/NVSentinel)

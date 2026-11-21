@@ -1,0 +1,13 @@
+---
+/**
+ * Lays matrices out as an equation: <MatRow><Matrix …/><Op>×</Op><Matrix …/><Op>=</Op><Matrix …/></MatRow>.
+ * Wraps on narrow screens. Use <Op> for the operator symbols.
+ */
+---
+
+<div class="mrow"><slot /></div>
+
+<style>
+  .mrow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 6px 0 10px; }
+  .mrow :global(.mx) { margin: 0; }
+</style>

@@ -1,0 +1,19 @@
+---
+/** Pink, tracked-out uppercase eyebrow heading used for page sections. */
+interface Props { as?: 'h2' | 'h3'; class?: string; id?: string }
+const { as: Tag = 'h2', class: className, id } = Astro.props;
+---
+
+<Tag id={id} class:list={['section-heading', className]}><slot /></Tag>
+
+<style>
+  .section-heading {
+    font-size: 1rem;
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--color-secondary);
+    margin-bottom: 20px;
+  }
+</style>

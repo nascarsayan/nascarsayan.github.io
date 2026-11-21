@@ -1,0 +1,68 @@
+---
+/**
+ * Page-local horizontal bar chart / Gantt for worked examples: one row per
+ * label, segments placed on a shared axis (ms, tokens, bytes…).
+ *
+ *   <Bars max={50} unit="ms" ticks={[0, 10, 20]} rows={[{ label: 'GPU', segs: [{ from: 5, to: 28, tone: 'pink', text: 'forward', hi: true }] }]} />
+ *
+ * `hi` on any segment dims the others. Also used by kv-cache-management and decode-phase.
+ */
+interface Seg { from: number; to: number; tone?: string; text?: string; hi?: boolean }
+interface Row { label: string; segs: Seg[] }
+interface Props { rows: Row[]; max: number; unit?: string; ticks?: number[]; title?: string; note?: string; tickFmt?: (v: number) => string }
+const { rows, max, unit = '', ticks = [], title, note, tickFmt = (v: number) => v.toLocaleString('en-US') } = Astro.props;
+const anyHi = rows.some((r) => r.segs.some((s) => s.hi));
+const pct = (v: number) => `${Math.max(0, Math.min(100, (v / max) * 100))}%`;
+---
+
+<figure class="bars" class:list={[{ 'bars-dim': anyHi }]}>
+  {title && <figcaption class="bars-title" set:html={title} />}
+  <div class="bars-grid">
+    {rows.map((r) => (
+      <>
+        <span class="bars-label">{r.label}</span>
+        <span class="bars-track">
+          {r.segs.map((s) => (
+            <span class:list={['bars-seg', `t-${s.tone ?? 'primary'}`, { 'is-hi': s.hi }]} style={`left:${pct(s.from)};width:${pct(s.to - s.from)}`} title={s.text}>
+              <span class="bars-text">{s.text}</span>
+            </span>
+          ))}
+        </span>
+      </>
+    ))}
+    {ticks.length > 0 && (
+      <>
+        <span />
+        <span class="bars-axis">
+          {ticks.map((t) => <span class="bars-tick" style={`left:${pct(t)}`}>{tickFmt(t)}{t === ticks[ticks.length - 1] && unit ? ` ${unit}` : ''}</span>)}
+        </span>
+      </>
+    )}
+  </div>
+  {note && <p class="bars-note" set:html={note} />}
+</figure>
+
+<style>
+  .bars { margin: 8px 0 14px; max-width: 820px; }
+  .bars-title { margin-bottom: 6px; font-size: 0.8125rem; font-weight: var(--font-weight-bold); color: var(--color-gray-800); }
+  .bars-grid { display: grid; grid-template-columns: max-content 1fr; gap: 5px 10px; align-items: center; }
+  .bars-label { font-size: 0.75rem; font-weight: 600; color: var(--color-gray-700); text-align: right; white-space: nowrap; }
+  .bars-track { position: relative; height: 24px; border-radius: 6px; background: var(--color-gray-100); }
+  .bars-seg { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 5px; overflow: visible; transition: opacity 150ms; }
+  .bars-text { position: absolute; left: 6px; top: 50%; transform: translateY(-50%); font-size: 0.75rem; font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; color: var(--color-text); pointer-events: none; }
+  .bars-dim .bars-seg:not(.is-hi) { opacity: 0.35; }
+  .bars-seg.is-hi { outline: 2px solid var(--color-primary); outline-offset: 0; }
+  .t-muted { background: color-mix(in srgb, #94a3b8 45%, transparent); }
+  .t-pink { background: color-mix(in srgb, #ec4899 45%, transparent); }
+  .t-good { background: color-mix(in srgb, #22c55e 45%, transparent); }
+  .t-note { background: color-mix(in srgb, #3b82f6 40%, transparent); }
+  .t-primary { background: color-mix(in srgb, #6366f1 50%, transparent); }
+  .t-peach { background: color-mix(in srgb, #f97316 40%, transparent); }
+  .t-violet { background: color-mix(in srgb, #8b5cf6 45%, transparent); }
+  .t-warn { background: color-mix(in srgb, #eab308 50%, transparent); }
+  .bars-axis { position: relative; height: 16px; }
+  .bars-tick { position: absolute; transform: translateX(-50%); font-size: 0.6875rem; color: var(--color-muted); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .bars-tick:first-child { transform: none; }
+  .bars-tick:last-child { transform: translateX(-100%); }
+  .bars-note { margin-top: 4px; font-size: 0.75rem; color: var(--color-muted); }
+</style>

@@ -1,0 +1,80 @@
+---
+/**
+ * Request latency explorer: prompt length, prefix-cache hit, output length and
+ * an assumed decode speed → where the time goes. The prefill part is an assumed
+ * model (fixed overhead + tokens at 30% of MI355X peak); decode speed is the reader's choice.
+ */
+import { fit } from './_example';
+const KV_PER_TOKEN_FULL = 18 * 2048, KV_SLIDING_SEQ = 18 * 128 * 2048;
+---
+
+<figure class="e2e" data-e2e={JSON.stringify({ fit, KV_PER_TOKEN_FULL, KV_SLIDING_SEQ })}>
+  <figcaption class="e2e-title">Where a request's time goes (gpt-oss-120b, prefill and decode on separate pools)</figcaption>
+  <div class="e2e-in">
+    <label>Prompt <input data-k="prompt" type="range" min="0" max="8" step="1" value="4" /> <output data-o="prompt"></output></label>
+    <label>Prefix-cache hit <input data-k="hit" type="range" min="0" max="95" step="5" value="50" /> <output data-o="hit"></output></label>
+    <label>Output tokens <input data-k="out" type="range" min="0" max="6" step="1" value="3" /> <output data-o="out"></output></label>
+    <label>Decode speed (assumed) <input data-k="tps" type="range" min="0" max="5" step="1" value="3" /> <output data-o="tps"></output></label>
+  </div>
+  <div class="e2e-bar" aria-hidden="true"><span class="p" data-o="barp"></span><span class="d" data-o="bard"></span></div>
+  <div class="e2e-out">
+    <div><span class="k">Tokens to compute (whole 128-token blocks hit)</span><span class="v" data-o="unc"></span></div>
+    <div><span class="k">Prefill on one MI355X (model)</span><span class="v" data-o="pre"></span></div>
+    <div><span class="k">KV shipped to decode</span><span class="v" data-o="kv"></span></div>
+    <div><span class="k">Decode (output ÷ speed)</span><span class="v" data-o="dec"></span></div>
+    <div><span class="k">Total, without network and decode-side TTFT</span><span class="v" data-o="tot"></span></div>
+  </div>
+  <p class="e2e-src" data-o="src"></p>
+</figure>
+
+<style>
+  .e2e { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .e2e-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .e2e-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .e2e-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .e2e-in input { accent-color: var(--color-primary); }
+  .e2e-in output { min-width: 70px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .e2e-bar { display: flex; height: 18px; margin-top: 14px; border-radius: 999px; overflow: hidden; background: var(--color-gray-100); }
+  .e2e-bar .p { background: #2a78d6; }
+  .e2e-bar .d { background: #1baf7a; }
+  .e2e-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .e2e-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .e2e-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .e2e-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .e2e-src { margin-top: 8px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const PROMPT = [128, 256, 512, 1024, 2700, 4096, 8192, 16384, 32768];
+  const OUT = [1, 10, 50, 200, 500, 1000, 4000];
+  const TPS = [50, 100, 500, 1000, 2000, 3000];
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-e2e]')) {
+    const { fit, KV_PER_TOKEN_FULL, KV_SLIDING_SEQ } = JSON.parse(fig.dataset.e2e!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const o = (k: string) => $<HTMLElement>(`[data-o=${k}]`);
+    const v = (k: string) => Number($<HTMLInputElement>(`[data-k=${k}]`).value);
+    const t = (s: number) => (s >= 1 ? `${s.toFixed(2)} s` : `${(s * 1000).toFixed(0)} ms`);
+    const update = () => {
+      const p = PROMPT[v('prompt')], hit = v('hit') / 100, out = OUT[v('out')], tps = TPS[v('tps')];
+      const cached = Math.min(p - 1, Math.floor((p * hit) / 128) * 128);
+      const unc = p - cached;
+      const pre = fit.fixedS + unc / fit.tokensPerS;
+      const kv = KV_PER_TOKEN_FULL * p + Math.min(1, p / 128) * KV_SLIDING_SEQ;
+      const dec = out / tps;
+      o('prompt').textContent = `${p.toLocaleString('en-US')} tokens`;
+      o('hit').textContent = `${Math.round(hit * 100)}%`;
+      o('out').textContent = out.toLocaleString('en-US');
+      o('tps').textContent = `${tps.toLocaleString('en-US')} tokens/s`;
+      o('unc').textContent = `${unc.toLocaleString('en-US')} of ${p.toLocaleString('en-US')}`;
+      o('pre').textContent = t(pre);
+      o('kv').textContent = `${(kv / 2 ** 20).toFixed(0)} MiB`;
+      o('dec').textContent = t(dec);
+      o('tot').textContent = t(pre + dec);
+      o('barp').style.width = `${(pre / (pre + dec)) * 100}%`;
+      o('bard').style.width = `${(dec / (pre + dec)) * 100}%`;
+      o('src').textContent = `Blue: prefill, ${Math.round((pre / (pre + dec)) * 100)}% of the time. Green: decode. Prefill time = ${(fit.fixedS * 1000).toFixed(0)} ms + uncached tokens ÷ ${fit.tokensPerS.toLocaleString('en-US')} tokens/s, an assumed model (about 9 GFLOP per token at 30% of an MI355X's peak); real values vary and rise with queueing. Decode speed depends on the hardware and batch: pick your own. KV: 16-bit, window-aware.`;
+    };
+    fig.querySelectorAll('input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

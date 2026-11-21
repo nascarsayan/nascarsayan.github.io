@@ -1,0 +1,52 @@
+---
+/**
+ * Slim footer: wordmark, tagline and copyright; site links and socials.
+ */
+import Logo from '@/components/ui/Logo.astro';
+import Icon from '@/components/icons/Icon.astro';
+import { SITE, NAV, SOCIALS } from '@/config/site';
+---
+
+<footer class="footer">
+  <div class="inner max-width-wrapper">
+    <div>
+      <Logo />
+      <p class="tagline" id="footer-tagline" data-taglines={JSON.stringify(SITE.taglines)}>{SITE.taglines[0]}</p>
+      <p class="copyright">© {SITE.copyrightStart}-present {SITE.author}</p>
+    </div>
+    <ul role="list" class="links">
+      {NAV.map((l) => <li><a href={l.href}>{l.label}</a></li>)}
+      {SOCIALS.map((s) => (
+        <li><a href={s.href} aria-label={`${s.label} profile`} target="_blank" rel="noopener"><Icon name={s.icon} /></a></li>
+      ))}
+    </ul>
+  </div>
+</footer>
+
+<style>
+  .footer {
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid var(--color-gray-200);
+    font-size: 0.875rem;
+  }
+  .inner { position: relative; display: flex; justify-content: space-between; align-items: flex-end; gap: 32px; padding-bottom: 24px; }
+  .tagline { margin-top: 4px; font-weight: var(--font-weight-medium); }
+  .copyright { margin-top: 8px; font-size: 0.75rem; color: var(--color-gray-500); }
+  .links { display: flex; align-items: center; gap: 20px; }
+  .links a { display: inline-flex; text-decoration: none; }
+  .links a:hover { color: var(--color-primary); }
+  /* Narrow screens: links go under the name and wrap. */
+  @media (max-width: 720px) {
+    .inner { flex-direction: column; align-items: flex-start; gap: 16px; }
+    .links { flex-wrap: wrap; gap: 12px 20px; }
+  }
+</style>
+
+<script>
+  const tag = document.getElementById('footer-tagline');
+  if (tag) {
+    const list: string[] = JSON.parse(tag.dataset.taglines || '[]');
+    if (list.length) tag.textContent = list[Math.floor(Math.random() * list.length)];
+  }
+</script>

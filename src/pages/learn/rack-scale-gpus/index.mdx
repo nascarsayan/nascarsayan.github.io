@@ -1,0 +1,212 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Rack-scale GPUs: NVL72 and Helios"
+short: "Rack-scale GPUs"
+description: "When the unit is a 72-GPU rack, not an 8-GPU server: compute trays and switch trays, the NVLink domain, NVSwitch, Fabric Manager and NVLSM, IMEX and the Kubernetes ComputeDomain; Helios with UALink over Ethernet on Tomahawk 6 and AMD's fabric manager. Worked bandwidth numbers, failure domains, and what changes for placement, health and upgrades."
+updated: "2026-11-10"
+track: platforms
+order: 4
+requires: [gpu-memory-and-interconnects, k8s-gpu-allocation]
+eyebrow: "Learn · GPU platforms"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import rack from './_rack.diagram';
+import cd from './_cd.diagram';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import LinkCalc from './_LinkCalc.astro';
+import { nv } from './_rack';
+export const trayGrid = [[0,0,0,1,0,0],[0,1,0,0,0,0],[0,0,0,0,0,0]];
+
+In an MI355X server the fast GPU-to-GPU links stop at the edge of the box: 8 GPUs, wired to each other in a full mesh (see [memory and interconnects](/learn/gpu-memory-and-interconnects/)). A **rack-scale** system moves that edge to the rack. 72 GPUs sit in 18 **compute trays** of 4. The trays are wired through **switch trays** in the same rack, so any GPU reaches any other at scale-up speed, as if they were in one box.
+
+Each compute tray is still its own Linux host with its own BMC. It is normally one Kubernetes node. So the cluster sees 18 nodes of 4 GPUs, but the hardware is one machine with one shared fabric. Most of what is new for operators follows from that mismatch.
+
+## The idea first
+
+**What "rack-scale" is for.** Some work wants more GPUs than fit in one box to behave like one big GPU: large models split across GPUs (tensor or expert parallelism) exchange data every layer. Over the normal network that is too slow. So the vendors put a GPU-only switch fabric across the whole rack.
+
+**Everyday picture: an apartment block with shared plumbing.** Each flat (compute tray) has its own front door and address (its own Linux host, BMC, Kubernetes node). The water mains (switch trays) are shared by all 18 flats, and a building manager (fabric software) runs them. Two flats can pass water to each other through the mains far faster than by carrying buckets down the street (the scale-out NIC).
+
+| Piece | Represents | Question it answers |
+| --- | --- | --- |
+| Compute tray | one flat | "Which host and node runs my Pod?" |
+| Switch tray | the shared mains | "Can GPU 3 reach GPU 70 at fabric speed?" |
+| Fabric Manager / NVLSM, AMD fabric manager | the building manager | "Are the routes set up and healthy?" |
+| IMEX, ComputeDomain | a key that lets two flats share a tank | "May these two Pods map each other's GPU memory?" |
+| Scale-out NIC | the street | "How do I reach another rack or storage?" |
+
+**Where the picture breaks.** Kubernetes sees 18 independent flats and knows nothing of the mains: without extra labels it may place two halves of one job in different buildings. And a plumbing job (a fabric or driver upgrade) can affect every flat at once, even flats that never share water.
+
+<Kpis items={[
+  { label: 'GPUs per rack', value: String(nv.gpus), detail: ("" + (nv.trays) + " trays × " + (nv.perTray)) },
+  { label: 'Kubernetes nodes per rack', value: String(nv.trays), detail: 'one per compute tray', tone: 'warn' },
+  { label: 'NVLink vs NIC, per GPU', value: ("" + (nv.ratio) + "×"), detail: '900 vs 100 GB/s each way', tone: 'primary' },
+  { label: 'NVL72 aggregate NVLink', value: ("" + (nv.aggTBps) + " TB/s"), detail: '72 × 1.8 TB/s' },
+]} />
+
+## Worked example: tray → NVLink domain → ComputeDomain
+
+<Walkthrough title="A 2-Pod job on an NVL72, from one tray to a shared GPU memory domain" caption="Hardware numbers are NVIDIA's (approximate). The ComputeDomain flow follows NVIDIA's documentation.">
+  <WStep title="1 · One tray, one node">
+    A compute tray is 2 Grace CPUs and 4 Blackwell Ultra GPUs, its own BMC, its own Linux. Kubernetes sees it as one node with 4 GPUs. Rebooting it stops at most **{nv.perTray}** single-GPU workloads.
+  </WStep>
+  <WStep title="2 · 18 trays, one NVLink domain">
+    <Matrix title="The rack's 18 trays (1 = a tray the job lands on)" rows={['row 1', 'row 2', 'row 3']} cols={['a','b','c','d','e','f']} data={trayGrid} scale="seq" digits={0} />
+    All 18 trays plug into 9 NVLink switch trays. Each GPU has 1.8 TB/s bidirectional NVLink, so {nv.gpus} GPUs × 1.8 TB/s = **{nv.aggTBps} TB/s**, NVIDIA's "130 TB/s". Any GPU reaches any other in one switch hop.
+  </WStep>
+  <WStep title="3 · Why stay inside: move 10 GB">
+    | Path | Rate each way | Time for 10 GB |
+    | --- | --- | --- |
+    | NVLink to another tray in the rack | 900 GB/s | **{nv.move10GB.nvlink} ms** |
+    | ConnectX-8 NIC (any rack) | 100 GB/s | **{nv.move10GB.nic} ms** |
+
+    A factor of {nv.ratio}. Model-parallel work exchanges data every layer, so it must stay inside one rack's domain.
+  </WStep>
+  <WStep title="4 · Ask for a ComputeDomain">
+    ```yaml
+    apiVersion: resource.nvidia.com/v1beta1
+    kind: ComputeDomain
+    spec:
+      numNodes: 2
+      channel:
+        resourceClaimTemplate: {name: job-channel}
+    ```
+    The job creates a ComputeDomain and two Pods, each claiming 4 GPUs **and** a channel from the domain's claim template. (From NVIDIA's demo spec [`nvbandwidth-test-job-1.yaml`](https://github.com/NVIDIA/k8s-dra-driver-gpu/blob/main/demo/specs/imex/nvbandwidth-test-job-1.yaml), names shortened.)
+  </WStep>
+  <WStep title="5 · Placement: both Pods in one rack">
+    The scheduler must place both Pods on trays of the **same** rack (here trays b2 and d1 in the grid). Core Kubernetes does not know which rack a tray is in; that is what rack topology labels and a same-rack affinity rule are for.
+  </WStep>
+  <WStep title="6 · IMEX: the key to share memory">
+    The compute-domain plugin starts or reconfigures IMEX daemons on the two trays and injects an IMEX channel device into each container (NVIDIA's demo lists it under `/dev/nvidia-caps-imex-channels`). Now a process on one tray can map GPU memory exported by the other. Without IMEX the wires exist but the memory cannot be shared.
+  </WStep>
+  <WStep title="7 · Failure and teardown">
+    If one of the two trays reboots, its 4 GPUs go and the domain breaks for **both** Pods: 8 GPUs of work stop for one tray's fault. When the job ends, the domain and its IMEX setup are torn down.
+  </WStep>
+</Walkthrough>
+
+## Terms
+
+
+- **Scale-up domain**: the set of GPUs that can read and write each other's memory directly over the GPU fabric, without the network stack. NVIDIA calls it the **NVLink domain**.
+- **Compute tray**: a 1U server sled with CPUs, 4 GPUs, NICs, local SSDs and a BMC.
+- **Switch tray**: a sled holding the scale-up switch chips. It has its own management CPU and BMC; it does not run workloads.
+- **Fabric manager**: software that configures the switch chips, routes between GPUs, and watches the fabric for errors.
+- **Scale-out**: the normal RDMA network between racks and to storage (KV cache, model weights). It is separate from scale-up.
+
+<Diagram spec={rack} mode="build" title="Two rack-scale designs side by side" caption="Counts are per full rack. Each compute tray is one host and one BMC.">
+  <Step title="Compute trays" focus="nvc, amc">Both racks: 18 compute trays of 4 GPUs. Each tray is one host and one Kubernetes node.</Step>
+  <Step title="Switch trays" focus="nvs, ams, nvc -> nvs, amc -> ams">The trays connect through in-rack switch trays: NVSwitch chips (NVIDIA, 9 trays) or Tomahawk 6 Ethernet chips (AMD).</Step>
+  <Step title="Fabric software" focus="nvf, amf, nvf -> nvs, amf -> ams">Software configures and watches the switches: Fabric Manager and NVLSM, or AMD's fabric manager. It is a shared component with its own versions.</Step>
+</Diagram>
+
+## NVIDIA GB300 NVL72
+
+### Hardware
+
+| Part | GB300 NVL72 |
+| --- | --- |
+| Compute trays | 18, each with 2 Grace CPUs and 4 Blackwell Ultra GPUs (two GB300 "superchips") |
+| GPUs / CPUs per rack | 72 / 36 (NVIDIA) |
+| GPU memory | 20 TB HBM3E per rack, up to 576 TB/s (NVIDIA); ≈ 279 GB per GPU (20 TB / 72, approximate) |
+| CPU memory | 17 TB LPDDR5X per rack (NVIDIA); ≈ 960 GB per tray |
+| CPU ↔ GPU | NVLink-C2C, 900 GB/s bidirectional per superchip, cache-coherent |
+| Switch trays | 9 NVLink switch trays |
+| Scale-up bandwidth | 130 TB/s aggregate NVLink (NVIDIA) |
+| Scale-out | ConnectX-8 SuperNIC, 800 Gb/s per GPU (NVIDIA) |
+| Front-end | BlueField-3 DPU |
+
+### Worked numbers
+
+- **Per GPU.** NVLink 5: 1.8 TB/s bidirectional, 0.9 TB/s each way. 72 × 1.8 TB/s = {nv.aggTBps} TB/s: NVIDIA's "130 TB/s".
+- **Scale-up versus scale-out.** One GPU's NIC: 800 Gb/s = 100 GB/s each way, versus 900 GB/s NVLink: 10 GB takes about {nv.move10GB.nvlink} ms over NVLink and {nv.move10GB.nic} ms over the NIC.
+- **Per rack scale-out.** 72 × 800 Gb/s = {nv.scaleOutTbps} Tb/s, the sum of line rates, not a measured number.
+
+<LinkCalc />
+
+### The software that makes 72 GPUs one domain
+
+1. **NVSwitch chips** in the switch trays forward NVLink traffic between any two GPUs. The switch trays run NVIDIA's switch OS, NVOS (the GB300 NVL72 system software 2.0.0 lists NVOS 25.02.4463).
+2. **NVLSM**, the NVLink Subnet Manager, comes from InfiniBand. For fourth-generation NVSwitches (NVLink 5) the Fabric Manager guide says "the NVLSM service is responsible for configuring NVSwitch routing tables".
+3. **Fabric Manager (FM)** handles "GPU-side routing, NVLink configuration, and provides APIs for partition management", and monitors NVLink and NVSwitch errors. For driver branches before 620, FM must match the driver version; from 620 on, FM has its own version and installs independently, but still needs the driver's library.
+4. **IMEX** (import/export) is a service on each **compute** node. It "supports GPU memory export and import (NVLink P2P) and shared memory operations across OS domains". Without it, a process in tray 3 cannot map memory a GPU in tray 7 exported, even though the wires exist. An **IMEX domain** is the set of compute nodes listed in its `nodes_config.cfg`. NVIDIA ships IMEX with the driver, versioned together.
+5. **Rack management**: NVIDIA Mission Control with Base Command Manager (BCM 11.33.1 in Mission Control 2.3.1) installs and tracks the rack. Its pre-deployment checklist expects 18 compute trays, 9 NVLink switch trays and the power shelves in the BOM.
+
+### ComputeDomain: the fabric as a Kubernetes object
+
+NVIDIA's DRA driver has a second kubelet plugin, `compute-domain-kubelet-plugin`, next to the GPU plugin. It adds a **ComputeDomain** resource (`computedomain.resource.nvidia.com`):
+
+- A workload asks for a ComputeDomain (for example `spec.numNodes: 2`) and its Pods claim a channel from it.
+- When the Pods are scheduled, the driver "launches and/or reconfigures IMEX daemons and establishes and injects IMEX channels into containers as needed".
+- Its lifetime "is bound to the lifetime of the consuming workload". When the workload ends, the domain is torn down.
+- Pods in one namespace cannot join a ComputeDomain made for another namespace; IMEX enforces the boundary.
+
+<Diagram spec={cd} autoSteps title="A ComputeDomain across two NVL72 trays" caption="From NVIDIA's ComputeDomain documentation." />
+
+Why it matters: ComputeDomain ships inside NVIDIA's DRA driver, so whoever installs that driver on an NVL72 also decides whether Pods can use multi-node NVLink. Placement still needs rack labels and a same-rack rule.
+
+## AMD Helios
+
+### Hardware
+
+From AMD's Helios solution brief:
+
+| Part | Helios (full rack) |
+| --- | --- |
+| Compute trays | 18, each with 1 EPYC "Venice" CPU + 4 MI455X GPUs |
+| GPU memory | up to 31 TB HBM4 per rack |
+| Scale-up | UALink over Ethernet (UALoE), "single-switch-hop, multi-plane fabric, blind-mate rear cable cartridge" |
+| Scale-out | AMD Pensando Vulcano 800G AI NICs, "up to 3×800 Gb/s per GPU, or up to 43 TB/s rack bidirectional" |
+| Front-end | Pensando Salina DPU |
+
+Both Helios and GB300 NVL72 have 72 GPUs per rack.
+
+### UALink over Ethernet and Tomahawk 6
+
+**UALink** (Ultra Accelerator Link) is an open accelerator-to-accelerator interconnect standard from the UALink Consortium; the current spec is "Ultra Accelerator Link 200G 1.0". AMD's Helios carries it "over Ethernet": the GPU fabric uses Ethernet switch silicon (Broadcom **Tomahawk 6**, 102.4 Tb/s per chip, 512 SerDes lanes at 200G) instead of a proprietary switch.
+
+AMD quotes up to 260 TB/s of aggregate scale-up bandwidth per rack. Divided over 72 GPUs and two directions that is about 1.8 TB/s each way per GPU: the same class as NVLink 5, by simple arithmetic, not a measured number.
+
+### Management
+
+Each compute tray and switch tray has its own BMC, and the rack has power shelves with their own Redfish endpoints. AMD's rack and fabric management software configures the scale-up network and reports its health; its public documentation is limited, so treat details as vendor-specific.
+
+## What changes for operators
+
+| Topic | 8-GPU server (MI355X) | Rack-scale (NVL72, Helios) |
+| --- | --- | --- |
+| Unit of placement | node | rack domain: Pods that use the fabric must land in one rack (rack label + affinity) |
+| Kubernetes view | 1 node = 8 GPUs = whole hive | 18 nodes × 4 GPUs share one fabric; nothing in core Kubernetes says so |
+| Health | GPU and node signals | plus fabric state: switch trays, FM/NVLSM or AMD fabric manager, IMEX |
+| Failure domain | one server: 8 GPUs | a switch-tray or fabric fault can touch every tray; tray loss = 4 GPUs |
+| Management | one BMC | 18 compute + switch-tray BMCs + rack manager |
+| Upgrades | per node | driver, IMEX and FM versions are tied: plan per rack |
+| Monitoring | GPU exporter | plus switch-tray telemetry (for example gNMI) |
+
+<Callout tone="warn" title="Single-GPU workloads still depend on the fabric">
+Even a workload that uses one GPU per replica, with no tensor parallelism, depends on the fabric on a rack-scale system, because a fabric fault or a fabric-software upgrade can disturb GPUs that do not talk to each other.
+</Callout>
+
+## Failure modes to expect
+
+- **One GPU fails**: lose that GPU's work; whether the fabric routes around it is vendor-specific.
+- **A compute tray fails or reboots**: 4 GPUs and their host go. Other trays keep running, but IMEX domains that included the tray break.
+- **A switch tray fails**: bandwidth drops for every GPU; whether traffic continues depends on the multi-plane design.
+- **Fabric software fails** (FM, NVLSM, AMD fabric manager): new fabric setup fails; running traffic behaviour is vendor-specific and unverified.
+- **Version skew**: a compute-tray driver not matching FM or IMEX can stop the fabric forming.
+
+## Common misconceptions
+
+- **"72 GPUs in a rack means one big Kubernetes node."** No: 18 nodes, one fabric.
+- **"Helios uses an AMD proprietary switch like NVSwitch."** It uses Ethernet switch chips (TH6) carrying UALink over Ethernet.
+- **"The scale-out NIC is enough; ignore the fabric."** The fabric is a shared failure domain and has its own software to upgrade, even if your workloads do not use it.
+- **"ComputeDomain is optional extra."** On NVL72 it is how Kubernetes gets multi-node NVLink at all.
+
+## Further reading
+
+- [NVIDIA GB300 NVL72](https://www.nvidia.com/en-us/data-center/gb300-nvl72/) · [NVLink and NVLink Switch](https://www.nvidia.com/en-us/data-center/nvlink/) · [Fabric Manager user guide](https://docs.nvidia.com/datacenter/tesla/fabric-manager-user-guide/) · [IMEX overview](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/overview.html) · [ComputeDomains in the GPU Operator docs](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-cds.html) · [NVIDIA DRA driver](https://github.com/NVIDIA/k8s-dra-driver-gpu) · [NVL72 pre-deployment checklist](https://docs.nvidia.com/mission-control/docs/rack-bring-up-install/latest/pre-deployment-checklist.html) · [GB300 NVL72 2.0 package contents](https://docs.nvidia.com/dgx/dgxgb300nvl72-2-release-notes/package-contents.html)
+- [AMD Helios solution brief (PDF)](https://www.amd.com/content/dam/amd/en/documents/products/accelerators/instinct/amd-instinct-helios-blueprint-brochure.pdf) · [UALink Consortium](https://ualinkconsortium.org/) · [Broadcom Tomahawk 6 announcement](https://investors.broadcom.com/news-releases/news-release-details/broadcom-ships-tomahawk-6-worlds-first-1024-tbps-switch)

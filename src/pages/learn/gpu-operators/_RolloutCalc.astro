@@ -1,0 +1,78 @@
+---
+/**
+ * DaemonSet rollout calculator for the DRA driver on the sample cluster's GPU nodes.
+ * Rounds = ceil(nodes / maxUnavailable); with maxSurge 0 each node in a round
+ * has no DRA driver from the old Pod's exit until the new one registers.
+ */
+import { nodes, gpusPerNode, wipeSeconds } from './_rollout';
+const cfg = { nodes: nodes.length, gpus: gpusPerNode, wipe: wipeSeconds };
+---
+
+<figure class="roc" data-roc={JSON.stringify(cfg)}>
+  <figcaption class="roc-title">Rollout calculator: DRA driver DaemonSet on {cfg.nodes} GPU nodes</figcaption>
+  <div class="roc-in">
+    <label>maxUnavailable <input data-k="mu" type="range" min="1" max={cfg.nodes} step="1" value="1" /> <output data-o="mu"></output></label>
+    <label>Gap per node (old Pod gone → new one registered) <input data-k="gap" type="range" min="1" max="90" step="1" value="5" /> <output data-o="gap"></output></label>
+  </div>
+  <div class="roc-out">
+    <div><span class="k">Rounds</span><span class="v" data-o="rounds"></span></div>
+    <div><span class="k">Nodes without a driver at once</span><span class="v" data-o="down"></span></div>
+    <div><span class="k">GPUs that cannot start a new Pod meanwhile</span><span class="v" data-o="gpus"></span></div>
+    <div><span class="k">Driver-less time, whole rollout</span><span class="v" data-o="total"></span></div>
+  </div>
+  <p class="roc-legend">Each row is a round, each column a GPU node; red = that node has no DRA driver in that round.</p>
+  <div class="roc-bar" aria-hidden="true" data-o="bar"></div>
+  <p class="roc-note" data-o="note"></p>
+</figure>
+
+<style>
+  .roc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .roc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .roc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .roc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .roc-in input { accent-color: var(--color-primary); }
+  .roc-in output { min-width: 40px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .roc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .roc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .roc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .roc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .roc-bar { display: grid; gap: 3px; margin-top: 14px; }
+  .roc-bar :global(span) { height: 16px; border-radius: 4px; background: var(--color-gray-100); font-size: 0.6875rem; line-height: 16px; text-align: center; color: #fff; }
+  .roc-bar :global(span.on) { background: #e64553; }
+  .roc-legend { margin-top: 12px; font-size: 0.75rem; color: var(--color-muted); }
+  .roc-bar { margin-top: 4px !important; }
+  .roc-note { margin-top: 8px; font-size: 0.875rem; }
+</style>
+
+<script>
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-roc]')) {
+    const c = JSON.parse(fig.dataset.roc!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const out = (k: string) => $<HTMLElement>(`[data-o=${k}]`);
+    const update = () => {
+      const mu = Number($<HTMLInputElement>('[data-k=mu]').value);
+      const gap = Number($<HTMLInputElement>('[data-k=gap]').value);
+      const rounds = Math.ceil(c.nodes / mu);
+      out('mu').textContent = String(mu);
+      out('gap').textContent = `${gap} s`;
+      out('rounds').textContent = String(rounds);
+      out('down').textContent = `${mu} of ${c.nodes}`;
+      out('gpus').textContent = `${mu * c.gpus} of ${c.nodes * c.gpus}`;
+      out('total').textContent = `≈ ${rounds * gap} s`;
+      const bar = out('bar');
+      bar.style.gridTemplateColumns = `repeat(${c.nodes}, 1fr)`;
+      bar.innerHTML = '';
+      for (let r = 0; r < rounds; r++) for (let n = 0; n < c.nodes; n++) {
+        const s = document.createElement('span');
+        const on = Math.floor(n / mu) === r;
+        if (on) { s.className = 'on'; s.textContent = `r${r + 1}`; }
+        bar.append(s);
+      }
+      out('note').textContent = gap < c.wipe
+        ? `Each gap is under the kubelet's ${c.wipe} s wiping delay: the node's ResourceSlice stays in the API, so the scheduler keeps placing Pods there; they wait in ContainerCreating (the kubelet retries NodePrepareResources) until the new driver is back. Running Pods are not touched.`
+        : `A gap of ${gap} s passes the kubelet's ${c.wipe} s wiping delay: the kubelet deletes the node's ResourceSlice, so for ${gap - c.wipe} s per round the scheduler sees ${mu * c.gpus} fewer GPUs and new GPU Pods stay Pending. The driver republishes the slice when it registers. Running Pods are still not touched.`;
+    };
+    fig.querySelectorAll('input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

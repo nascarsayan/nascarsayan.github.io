@@ -1,0 +1,18 @@
+---
+/** Social links with their icons (from SOCIALS in src/config/site.ts). */
+import Icon from '@/components/icons/Icon.astro';
+import { SOCIALS } from '@/config/site';
+---
+
+<ul role="list" class="socials">
+  {SOCIALS.map((s) => (
+    <li><a href={s.href} target="_blank" rel="noopener"><Icon name={s.icon} size={20} /><span>{s.label}</span></a></li>
+  ))}
+</ul>
+
+<style>
+  .socials { display: flex; flex-wrap: wrap; gap: 12px 24px; margin: 8px 0 24px; padding: 0; list-style: none; }
+  .socials a { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; box-shadow: none; }
+  .socials a:hover { color: var(--color-primary); }
+  .socials a::after { display: none !important; }
+</style>

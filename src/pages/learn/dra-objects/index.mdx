@@ -1,0 +1,411 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "DRA objects in detail: classes, slices, claims and the scheduler"
+short: "DRA objects in detail"
+description: "Every resource.k8s.io/v1 object with YAML trimmed from a sample cluster: the gpu.amd.com DeviceClass, a ResourceSlice device, a ResourceClaimTemplate and an allocated ResourceClaim. CEL selectors, constraints, how the scheduler allocates, admin access, prioritized lists, device taints, and which feature gates are on in Kubernetes 1.35."
+updated: "2026-11-10"
+track: kubernetes
+order: 2
+requires: [k8s-gpu-allocation]
+eyebrow: "Learn · GPUs in Kubernetes"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Yaml from '../k8s-gpu-allocation/_Yaml.astro';
+import alloc from './_alloc.diagram';
+import idea from './_idea.diagram';
+import * as m from './_match';
+
+[GPU allocation in k8s](/learn/k8s-gpu-allocation/) gave the big picture. This page opens each DRA object, field by field, using illustrative example objects of a sample cluster (Kubernetes 1.35, AMD DRA driver v1.0.1). YAML is trimmed: `managedFields`, UIDs and resource versions are removed.
+
+## The idea
+
+DRA is a small ordering system with four forms and one clerk. Each object answers one question:
+
+| Object | Everyday picture | Question it answers | Who writes it |
+| --- | --- | --- | --- |
+| **ResourceSlice** | a store's shelf inventory | What GPUs are on this node, and what is each like? | the DRA driver |
+| **DeviceClass** | a product category | What counts as "an AMD GPU"? | the operator chart (admin) |
+| **ResourceClaimTemplate** | a blank order form | What will each Pod of this workload need? | the workload owner |
+| **ResourceClaim** | the filled-in order, with the item number stamped on it | What does this Pod need, and which GPU did it get? | controller (spec), scheduler (status) |
+
+The **scheduler** is the clerk: it walks the shelves in a fixed order and takes the first item that fits the category and the order (first fit). Click the i on a box for more.
+
+<Diagram spec={idea} title="Four objects, one clerk" mode="build">
+  <Step focus="slice">The driver stocks the shelf: one ResourceSlice per node.</Step>
+  <Step focus="class">The category says which shelf items count.</Step>
+  <Step focus="tmpl, claim, tmpl -> claim">Each Pod gets its own copy of the order form.</Step>
+  <Step focus="sched, slice -> sched, class -> sched, sched -> claim">The clerk finds a free match and stamps its ID on the order.</Step>
+</Diagram>
+
+Where the picture breaks: nothing is shipped. The GPU stays in its slot; the *Pod* is sent to the GPU's node. The stamp is a reservation that lasts as long as the claim. And the shelf list is rewritten by the driver whenever it likes, so editing it by hand does nothing.
+
+## Worked example: one order against one shelf
+
+Take the ResourceSlice of `gpu-node-1` and run a new one-GPU claim through the allocator by hand. Everything below is computed from the sample slice and claims, in the slice's own device order, which is the order first fit walks.
+
+<Walkthrough title={("A new claim meets " + (m.node))} caption="Device order, attributes and held devices are example output in the shape of kubectl get resourceslice / resourceclaims on the sample cluster. The selector results are computed on this page with the same logic as the CEL shown.">
+  <WStep title="1 · The shelf: 8 devices, in slice order">
+    <table>
+      <thead><tr><th>#</th><th>device</th><th>NUMA</th><th>PCI</th><th>pcieRoot</th><th>memory</th><th>now</th></tr></thead>
+      <tbody>{m.slice.map((d, i) => <tr><td>{i + 1}</td><td>{d.name}</td><td>{d.numa}</td><td>{d.pci}</td><td>{d.root}</td><td>{d.memMi}Mi</td><td>{m.isHeld(d) ? 'held' : 'free'}</td></tr>)}</tbody>
+    </table>
+    The driver discovered the GPUs in this order and published them as one slice (`resourceSliceCount: 1`). Two are already in claims: {m.held.join(' and ')}. Every GPU has its own PCIe root, while four GPUs share each NUMA node: {m.distinctRoots} roots and {m.distinctNuma} NUMA values for 8 devices.
+  </WStep>
+  <WStep title="2 · The class filter: device.driver == 'gpu.amd.com'">
+    <Yaml code={"# DeviceClass gpu.amd.com\nspec:\n  selectors:\n  - cel:\n      expression: device.driver == 'gpu.amd.com'"} />
+    The claim names `deviceClassName: gpu.amd.com`, so every device must pass the class's selectors first. All {m.results[0].matchCount} of 8 do: they were all published by that driver. A cluster with an NVIDIA driver too would see its devices fail here.
+  </WStep>
+  <WStep title="3 · The claim's own selector: ≥ 256 GiB">
+    <Yaml code={"requests:\n- name: gpu\n  exactly:\n    deviceClassName: gpu.amd.com\n    count: 1\n    selectors:\n    - cel:\n        expression: device.capacity[\"gpu.amd.com\"].memory.compareTo(quantity(\"256Gi\")) >= 0"} />
+    Each device publishes `memory: 294912Mi`, that is 294912 ÷ 1024 = **{m.memGiB.toFixed(1)} GiB**, so `compareTo` returns 1 and all {m.results[1].matchCount} pass. Selectors are ANDed: class selectors and claim selectors must all be true.
+  </WStep>
+  <WStep title="4 · Skip what is taken">
+    <Kpis items={[
+      { label: 'Match', value: m.results[1].matchCount, detail: 'class + selector' },
+      { label: 'Held', value: m.held.length, detail: m.held.join(', '), tone: 'warn' },
+      { label: 'Candidates', value: m.results[1].free.length, tone: 'good' },
+    ]} />
+    The allocator skips devices named in any other claim's `status.allocation`, and devices held in memory for Pods in flight (the `Reserve` step), so two Pods scheduled at once cannot get the same GPU.
+  </WStep>
+  <WStep title={("5 · First fit: " + (m.results[1].pick))}>
+    <Yaml code={("status:\n  allocation:\n    devices:\n      results:\n      - {request: gpu, driver: gpu.amd.com, pool: " + (m.node) + ", device: " + (m.results[1].pick) + "}\n    nodeSelector:\n      nodeSelectorTerms:\n      - matchFields:\n        - {key: metadata.name, operator: In, values: [" + (m.node) + "]}")} />
+    The first free match in slice order is **{m.results[1].pick}** (row {m.slice.findIndex((d) => d.name === m.results[1].pick) + 1}). There is no scoring: not "closest to the NIC", not "least used". The scheduler writes this in `PreBind`, then binds the Pod. Earlier Pods got other GPUs because other devices were free or held when they were placed.
+  </WStep>
+  <WStep title="6 · Ask for 2 GPUs on one PCIe root: Pending">
+    <Yaml code={"requests:\n- name: gpus\n  exactly: {deviceClassName: gpu.amd.com, allocationMode: ExactCount, count: 2}\nconstraints:\n- requests: [gpus]\n  matchAttribute: resource.kubernetes.io/pcieRoot"} />
+    <table>
+      <thead><tr><th>pcieRoot</th><th>free devices under it</th></tr></thead>
+      <tbody>{m.byRoot.map(([r, v]) => <tr><td>{r}</td><td>{v.join(', ')}</td></tr>)}</tbody>
+    </table>
+    A constraint says all devices of the listed requests must share one attribute value. Here the largest group has **{m.maxPerRoot}** device, so no pair exists on this node. The same holds on every node of this design: each slice has 8 GPUs under 8 different roots. The Pod stays Pending with a "cannot allocate all claims" event. A selector or constraint that looks reasonable can be impossible on the real hardware: read the slice first.
+  </WStep>
+</Walkthrough>
+
+## The identity of a device
+
+DRA names a device with three strings: **(driver, pool, device)**.
+
+- **driver**: `gpu.amd.com`. One DRA driver, one name, in DNS-subdomain form (max 63 characters).
+- **pool**: a group of devices the driver manages together. The AMD driver uses one pool per node, named after the node: `gpu-node-1`.
+- **device**: unique inside the pool. The AMD driver uses `gpu-<card>-<render>`, from the GPU's DRM device numbers: `gpu-5-132` is `/dev/dri/card5` plus `/dev/dri/renderD132`.
+
+The triple is what a claim records. It is stable only as long as the driver names devices the same way. The PCI address in the `resource.kubernetes.io/pciBusID` attribute ties a device to a physical slot, which is what you want for hardware tickets.
+
+## DeviceClass
+
+A **DeviceClass** is a cluster-scoped, named filter over devices. Admins or drivers create it; workloads refer to it by name. The AMD operator chart creates this one:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu.amd.com
+  labels:
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: gpu-operator-charts-v1.5.1
+spec:
+  selectors:
+  - cel:
+      expression: device.driver == 'gpu.amd.com'
+```
+
+- `spec.selectors`: CEL expressions. A device belongs to the class only if **all** of them are true.
+- `spec.config` (not used here): opaque, driver-specific parameters passed to the driver for every device allocated through this class.
+- Being cluster-scoped, a class is also a policy point. An admin can create a narrower class, for example `mi355x-whole` with an extra selector on `productName` and `type`, and allow only that class in some namespaces through admission policy.
+
+## ResourceSlice
+
+A **ResourceSlice** is the driver's inventory. The driver owns it; any manual edit is overwritten. The AMD driver writes one slice per node, owned by the Node object, so deleting the Node deletes the slice.
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceSlice
+metadata:
+  name: 00000-gpu.amd.com-gpu-node-1-x7q2m
+  generateName: 00000-gpu.amd.com-gpu-node-1-
+  ownerReferences:
+  - {apiVersion: v1, kind: Node, name: gpu-node-1, controller: true}
+spec:
+  driver: gpu.amd.com
+  nodeName: gpu-node-1          # only this node can use these devices
+  pool:
+    name: gpu-node-1
+    generation: 1                    # bumped when the pool changes
+    resourceSliceCount: 1            # slices that make up this pool
+  devices:
+  - name: gpu-5-132
+    attributes:
+      type:              {string: amdgpu}               # full GPU, not a partition
+      productName:       {string: Instinct_MI355X_OAM}
+      deviceID:          {string: "0x75a3"}             # PCI device ID
+      driverVersion:     {version: 6.14.0}              # semver type
+      driverVersionFull: {string: 6.14.0.70000}
+      partitionProfile:  {string: spx_nps1}
+      numaNode:          {int: 1}
+      resource.kubernetes.io/pciBusID: {string: "0000:8b:00.0"}
+      resource.kubernetes.io/pcieRoot: {string: pci0000:80}
+    capacity:
+      memory:       {value: 294912Mi}    # 288 GiB of HBM
+      computeUnits: {value: "256"}
+      simdUnits:    {value: 1Ki}
+  # … 7 more devices
+```
+
+Field notes:
+
+- **Node access.** Exactly one of `nodeName`, `nodeSelector`, `allNodes` or `perDeviceNodeSelection` says which nodes can reach the devices. GPUs are local, so `nodeName`. A network-attached device could use `allNodes: true`.
+- **Pools and generations.** A large pool may span several slices. The scheduler uses a pool only when it sees all `resourceSliceCount` slices with the newest `generation`. A half-published pool is ignored, which prevents allocation from a stale inventory.
+- **Typed attributes.** Each attribute is one of `string`, `int`, `bool` or `version` (semver). `driverVersion` is a `version`, so CEL can compare it with `semver()`. Unqualified names (`numaNode`) belong to the driver's domain. Qualified names (`resource.kubernetes.io/pciBusID`) are shared, standard attributes so different drivers can be aligned.
+- **Capacities** are Kubernetes quantities. `294912Mi` is 294912 ÷ 1024 = 288 GiB; the node label says `288G`.
+- **Limits.** A slice holds at most 128 devices (64 if it uses taints or shared counters). Each device has at most 32 attributes plus capacities.
+- **The `00000-` prefix.** The scheduler is first fit and walks slices and pools in name order. The `kubeletplugin` helper library prefixes names so that the order matches the driver's wish.
+
+The driver logs the same content when it publishes. In example output, a fresh driver Pod on `gpu-node-3` prints `Discovered 8 AMD GPU devices` and then `Publishing ResourceSlice: {"Pools": {"gpu-node-3": …}}`.
+
+## ResourceClaimTemplate
+
+A **ResourceClaimTemplate** is a namespaced blueprint. Each Pod that references it gets its own claim. The template for the prefill model:
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: llm-prefill-gpu
+  namespace: gpu-demo
+  labels:
+    example.com/model-id: gpt-oss-120b
+spec:
+  spec:                         # the ResourceClaim spec to stamp out
+    devices:
+      requests:
+      - name: gpu               # request name; referenced in results
+        exactly:
+          deviceClassName: gpu.amd.com
+          allocationMode: ExactCount
+          count: 1
+```
+
+And the Pod side, from the Deployment's Pod template:
+
+```yaml
+spec:
+  resourceClaims:
+  - name: gpu                                           # name inside the Pod
+    resourceClaimTemplateName: llm-prefill-gpu
+  containers:
+  - name: prefill
+    resources:
+      claims: [{name: gpu}]                             # this container uses it
+      limits: {cpu: "8", memory: 256Gi, rdma/hca_devices: "1"}
+```
+
+`spec.resourceClaims` declares the claim for the Pod; `resources.claims` says which containers see the devices. A container that does not list the claim gets no device files.
+
+### Request forms
+
+| Field | Meaning | Status in 1.35 |
+| --- | --- | --- |
+| `exactly.allocationMode: ExactCount`, `count: N` | N devices that match | GA |
+| `exactly.allocationMode: All` | every matching device on one node; fails if any is in use | GA |
+| `exactly.selectors[].cel` | extra filter on top of the class | GA |
+| `exactly.adminAccess: true` | access devices even if in use (see below) | beta, on |
+| `firstAvailable: [...]` | prioritized list: try sub-request 1, else 2, … (max 8) | beta, on |
+| `constraints[].matchAttribute` | all devices in the listed requests share an attribute value | GA |
+| `config[].opaque` | driver-specific parameters for some requests | GA |
+
+A claim can hold at most 32 requests, 32 constraints and 32 allocated devices.
+
+## CEL selectors
+
+CEL (Common Expression Language) is the same language Kubernetes uses in `ValidatingAdmissionPolicy`. In DRA, each expression sees one object, `device`, with `driver`, `attributes` and `capacity`. Attributes and capacities are grouped by domain.
+
+```yaml
+selectors:
+# only whole GPUs, not partitions
+- cel: {expression: 'device.attributes["gpu.amd.com"].type == "amdgpu"'}
+# at least 256 GiB of memory
+- cel: {expression: 'device.capacity["gpu.amd.com"].memory.compareTo(quantity("256Gi")) >= 0'}
+# driver new enough
+- cel: {expression: 'device.attributes["gpu.amd.com"].driverVersion.isGreaterThan(semver("6.12.0"))'}
+# a fixed NUMA node
+- cel: {expression: 'device.attributes["gpu.amd.com"].numaNode == 1'}
+```
+
+Two GPUs on the same PCIe root, written as a constraint:
+
+```yaml
+requests:
+- name: gpus
+  exactly: {deviceClassName: gpu.amd.com, allocationMode: ExactCount, count: 2}
+constraints:
+- requests: [gpus]
+  matchAttribute: resource.kubernetes.io/pcieRoot
+```
+
+### Try a selector on the sample slice
+
+Pick a selector to see which of the 8 devices on <code>{m.node}</code> it matches, and which one first fit would allocate right now.
+
+<Explorer id="cel" options={[{ key: 'sel', label: 'Selector', default: 'mem', values: m.selectors.map((x) => ({ value: x.id, label: x.label })) }]} variants={m.selectors.map((x) => ({ match: { sel: x.id }, id: ("cel-" + (x.id)) }))}>
+  {m.results.map((r) => (
+    <Variant id={("cel-" + (r.id))}>
+      <Yaml code={("- cel:\n    expression: " + (r.cel))} />
+      {r.error ? (
+        <Callout tone="risk" title="Evaluation error: allocation aborted">CEL fails on the first device with <code>{r.error}</code>. This is not a "no match": the scheduler stops allocating this claim and the Pod stays Pending with the error in its events.</Callout>
+      ) : (
+        <table>
+          <thead><tr><th>device</th><th>NUMA</th><th>PCI</th><th>match</th><th>now</th></tr></thead>
+          <tbody>{r.rows.map((d) => <tr><td>{d.name}</td><td>{d.numa}</td><td>{d.pci}</td><td>{d.match ? '✓' : '✗'}</td><td>{d.held ? 'held' : d.name === r.pick ? <strong>first fit: allocated</strong> : 'free'}</td></tr>)}</tbody>
+        </table>
+      )}
+      {!r.error && <p>{r.matchCount} of 8 match; {r.free.length} of those are free. {r.pick ? <>First fit picks <code>{r.pick}</code>.</> : <>Nothing free matches: the Pod stays Pending on this node, and the scheduler tries other nodes.</>}</p>}
+    </Variant>
+  ))}
+</Explorer>
+
+<Callout tone="warn" title="A typo aborts allocation">
+Referencing an attribute that a device does not have is an evaluation error, not `false`. The scheduler then aborts allocation for that claim, and the Pod stays Pending with a CEL error in its events. Check what your hardware really publishes (`kubectl get resourceslice -o yaml`) before writing selectors, or guard the lookup with an `in` test, for example `"numaNode" in device.attributes["gpu.amd.com"] && …`.
+</Callout>
+
+Each expression is capped at 10 KiB and a runtime cost of 1,000,000 units, roughly 0.1 s per evaluation on the reference machine.
+
+## ResourceClaim: an allocated one
+
+The resourceclaim controller stamped this claim out of the template for Pod `…-p4x7k`. The scheduler filled in `status`.
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaim
+metadata:
+  name: llm-prefill-5f7d8c9b6-p4x7k-gpu-z8k3q
+  namespace: gpu-demo
+  annotations:
+    resource.kubernetes.io/pod-claim-name: gpu         # name inside the Pod
+  finalizers:
+  - resource.kubernetes.io/delete-protection           # no delete while in use
+  ownerReferences:
+  - {apiVersion: v1, kind: Pod, name: llm-prefill-5f7d8c9b6-p4x7k, controller: true}
+spec:                                                  # copied from the template
+  devices:
+    requests:
+    - name: gpu
+      exactly: {deviceClassName: gpu.amd.com, allocationMode: ExactCount, count: 1}
+status:
+  allocation:
+    devices:
+      results:
+      - request: gpu
+        driver: gpu.amd.com
+        pool: gpu-node-1
+        device: gpu-5-132
+    nodeSelector:                                      # where the Pod may run
+      nodeSelectorTerms:
+      - matchFields:
+        - {key: metadata.name, operator: In, values: [gpu-node-1]}
+  reservedFor:                                         # who uses it now
+  - {resource: pods, name: llm-prefill-5f7d8c9b6-p4x7k, uid: b0d10001-…}
+```
+
+- `status.allocation.devices.results`: the source of truth for "who has which GPU".
+- `status.allocation.nodeSelector`: copied from the slice's node access. Any Pod that uses this claim must run on `gpu-node-1`.
+- `status.reservedFor`: consumers, max 256. A claim can be shared by several Pods if they all reference it by name (`resourceClaimName` instead of a template). Template claims are private to one Pod.
+- The Pod links back in `status.resourceClaimStatuses: [{name: gpu, resourceClaimName: …-gpu-z8k3q}]`.
+- `kubectl get resourceclaims` prints `STATE allocated,reserved`: allocated means `status.allocation` is set, reserved means `reservedFor` is not empty.
+- `status.devices` (not used by the AMD driver) lets a driver report per-device conditions or network data. The feature gate `DRAResourceClaimDeviceStatus` is beta and on in 1.35.
+
+## How the scheduler allocates
+
+<Diagram spec={alloc} title="From Pod creation to an allocated claim" caption="Names are from the sample prefill Pod. The scheduler phases are the DynamicResources plugin's extension points. Press play to step through." autoSteps />
+
+1. **PreEnqueue.** The Pod is not even tried until every claim it references exists. A Pod whose template is missing waits here.
+2. **PreFilter.** The plugin gathers the Pod's claims. Claims already allocated (shared claims) fix the node. Unallocated claims are collected for allocation.
+3. **Filter (per node).** For each candidate node, the plugin runs the allocator over the slices that node can reach. It tries devices in slice and pool name order, checks class selectors, claim selectors and constraints, and skips devices already allocated to other claims or held by Pods in flight. First fit wins; there is no "best GPU" scoring in the base algorithm.
+4. **Reserve.** The chosen devices go into an in-memory "in flight" set, so a second Pod scheduled in parallel cannot pick them.
+5. **PreBind.** The plugin writes `status.allocation` and adds the Pod to `reservedFor` in the API. If that write fails, `Unreserve` drops the in-memory hold and the Pod is retried.
+6. **Bind.** Only now does the Pod get `spec.nodeName`.
+
+Things this implies:
+
+- **Normal scheduling rules still apply.** CPU, memory, node affinity, taints and `rdma/hca_devices` filter nodes before the device check matters. A Pod with a perfect GPU match still fails on a node without 256 GiB of free memory.
+- **No preemption for devices.** The scheduler does not evict lower-priority Pods to free a GPU. A full cluster leaves the Pod Pending.
+- **Bypassing the scheduler breaks DRA.** A Pod created with `spec.nodeName` already set skips allocation. The kubelet refuses to start it until its claims are allocated and reserved for it.
+- **Load.** Every candidate node runs CEL for every device. In a cluster of a few hundred GPUs that is small. The alpha gate `DRASchedulerFilterTimeout` (off in 1.35) can cap a slow filter.
+
+## Admin access
+
+A request with `adminAccess: true` can be allocated a device **that is already in use** by another claim. It exists for monitoring and debugging agents that must see every GPU. The canonical form uses `allocationMode: All` to get every matching device on a node.
+
+- Only allowed in namespaces labelled `resource.kubernetes.io/admin-access: "true"`. The API server rejects it elsewhere.
+- Feature gate `DRAAdminAccess`: beta, on by default in 1.34 and 1.35, GA in 1.36.
+- The AMD metrics exporter does not need it. It reads GPUs through the host and maps them to Pods through the kubelet's PodResources API.
+
+## Newer features and their status
+
+**Prioritized list (`firstAvailable`).** "Give me one MI355X, else two smaller GPUs." The scheduler tries sub-requests in order. Beta, on in 1.35. Useful for mixed fleets; a single-model fleet does not need it.
+
+**Partitionable devices.** Lets a driver publish overlapping devices (a whole GPU and its partitions) that consume from **shared counters**, so allocating a partition makes the whole GPU unavailable and the other way round. Alpha, off in 1.35 (`DRAPartitionableDevices`), beta from 1.36. The AMD driver v1.0.1 does not create partitions; it publishes whatever mode the GPU is already in (`type: amdgpu` or `amdgpu-partition`). See [GPU partitioning](/learn/gpu-partitioning/).
+
+**Device taints and DeviceTaintRule.** Like node taints, but on one device. Effects: `NoSchedule` (do not allocate), `NoExecute` (also evict Pods using it, done by a controller in kube-controller-manager) and `None` (informational). Drivers can put taints in slices (`DRADeviceTaints`); admins can taint devices without the driver through a cluster-scoped `DeviceTaintRule` (`DRADeviceTaintRules`, served as `resource.k8s.io/v1alpha3` in 1.35). Both are alpha and off in 1.35. A cluster that has not enabled the gate does not serve the API (`kubectl get devicetaintrules` fails). An alpha API carries no upgrade guarantee, so anything built on it must expect changes at 1.36.
+
+**Consumable capacity.** Several claims share one device and each consumes part of a capacity (for example memory). Alpha in 1.35.
+
+**Extended resource mapping.** A DeviceClass can declare `extendedResourceName`, so legacy Pods asking for `amd.com/gpu: 1` are served by DRA. Alpha in 1.35, beta in 1.36.
+
+**Binding conditions.** Delay binding until a device reports ready (for attachable fabric devices). Alpha in 1.35.
+
+## Feature gates in Kubernetes 1.35
+
+From the Kubernetes feature-gate reference. "On" means on by default; nothing on the sample cluster overrides the defaults (no `--feature-gates` on the API server, scheduler or controller-manager, none in the kubelet config).
+
+| Gate | Stage in 1.35 | Default | What it unlocks |
+| --- | --- | --- | --- |
+| `DynamicResourceAllocation` | GA (since 1.34) | on | the core API and scheduling |
+| `DRAAdminAccess` | beta | on | `adminAccess` requests |
+| `DRAPrioritizedList` | beta | on | `firstAvailable` |
+| `DRAResourceClaimDeviceStatus` | beta | on | `status.devices` |
+| `KubeletPodResourcesDynamicResources` | beta | on | DRA devices in the PodResources API |
+| `DRAPartitionableDevices` | alpha | off | shared counters |
+| `DRADeviceTaints` | alpha | off | taints in slices, tolerations in claims |
+| `DRADeviceTaintRules` | alpha | off | `DeviceTaintRule` objects |
+| `DRAConsumableCapacity` | alpha | off | shared consumable capacity |
+| `DRAExtendedResource` | alpha | off | extended-resource mapping |
+| `DRADeviceBindingConditions` | alpha | off | binding conditions |
+| `DRASchedulerFilterTimeout` | alpha | off | filter time limit |
+| `ResourceHealthStatus` | alpha | off | device health in Pod status |
+
+Alpha gates must be turned on in each component that uses them (API server, scheduler, controller-manager, kubelet), and alpha API versions need `--runtime-config` on the API server.
+
+## Read it yourself
+
+```shell
+kubectl get deviceclass gpu.amd.com -o yaml
+kubectl get resourceslices -o wide
+kubectl get resourceslices --field-selector spec.nodeName=gpu-node-1 -o yaml
+kubectl get resourceclaimtemplates -A
+kubectl get resourceclaims -A -o wide
+kubectl get resourceclaim <claim> -n <ns> -o jsonpath='{.status.allocation.devices.results}'
+# which Pod holds which GPU, cluster-wide
+kubectl get resourceclaims -A -o json | jq -r '.items[] | [.metadata.namespace, (.status.reservedFor[0].name // "-"), (.status.allocation.devices.results[0] | "\(.pool)/\(.device)")] | @tsv'
+```
+
+## Misconceptions
+
+- **"The DeviceClass decides which GPUs a namespace may use."** Only if you build that. By default any namespace may create claims against any class. Access control is RBAC on `resourceclaims` plus admission policy.
+- **"Deleting a claim frees the GPU at once."** The `delete-protection` finalizer keeps the claim while it is reserved. The GPU is free after the Pod stops and the kubelet has unprepared it.
+- **"Editing a ResourceSlice fixes bad data."** The driver overwrites it. Fix the driver or the node.
+- **"The pool name is the node name."** For the AMD driver, yes. It is the driver's choice, not a rule.
+
+## Further reading
+
+- [DRA API reference concepts: DeviceClass, ResourceClaim, ResourceSlice](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/dra-api/) · [Admin access](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/dra-api/#admin-access) · [Prioritized list](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/dra-api/#prioritized-list)
+- [How DRA works](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/how-dra-works/) · [Optional DRA features](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/dra-features/) · [Device taints and tolerations](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/device-taints/)
+- [Standard device attributes](https://kubernetes.io/docs/reference/node/dra-standard-device-attributes/) · [Feature gates](https://kubernetes.io/docs/reference/command-line-tools-reference/feature-gates/)
+- [AMD DRA driver: device attributes](https://github.com/ROCm/k8s-gpu-dra-driver/blob/v1.0.1/docs/driver-attributes.md) · [AMD DRA driver: troubleshooting](https://github.com/ROCm/k8s-gpu-dra-driver/blob/v1.0.1/docs/troubleshooting.md)
+- [CEL language definition](https://cel.dev/)

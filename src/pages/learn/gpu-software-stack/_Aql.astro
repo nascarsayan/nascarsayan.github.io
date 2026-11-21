@@ -1,0 +1,48 @@
+---
+/**
+ * The 64-byte AQL kernel dispatch packet as a byte map: 8 rows of 8 bytes.
+ *   <Aql highlight={['grid_size_x']} />   outlines fields; others dim.
+ */
+import { aql } from './_launch';
+interface Props { highlight?: string[]; notes?: boolean }
+const { highlight = [], notes = true } = Astro.props;
+const hi = new Set(highlight);
+---
+
+<figure class="aq" class:list={[{ 'aq-dim': hi.size > 0 }]}>
+  <div class="aq-grid">
+    {[0, 1, 2, 3, 4, 5, 6, 7].map((r) => <span class="aq-off" style={`grid-row:${r + 2}`}>{r * 8}</span>)}
+    {[0, 1, 2, 3, 4, 5, 6, 7].map((c) => <span class="aq-col" style={`grid-column:${c + 2}`}>+{c}</span>)}
+    {aql.map((f) => (
+      <span class:list={['aq-f', `aq-${f.group}`, { 'aq-hi': hi.has(f.name) }]}
+        style={`grid-row:${Math.floor(f.off / 8) + 2};grid-column:${(f.off % 8) + 2} / span ${f.size}`}
+        title={f.note || f.name}>
+        <b>{f.name}</b><i>{f.value}</i>
+      </span>
+    ))}
+  </div>
+  {notes && (
+    <figcaption>
+      Byte offsets 0–63; field names and sizes from <code>hsa_kernel_dispatch_packet_t</code> (ROCR-Runtime <code>hsa.h</code>). Values: this page's example launch.
+    </figcaption>
+  )}
+</figure>
+
+<style>
+  .aq { margin: 8px 0 12px; max-width: 760px; }
+  .aq-grid { display: grid; grid-template-columns: 28px repeat(8, minmax(0, 1fr)); gap: 3px; font-size: 0.6875rem; }
+  .aq-off, .aq-col { color: var(--color-muted); font-variant-numeric: tabular-nums; align-self: center; }
+  .aq-col { grid-row: 1; text-align: center; }
+  .aq-off { grid-column: 1; text-align: right; padding-right: 4px; }
+  .aq-f { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 38px; padding: 2px 4px; border-radius: 5px; background: var(--aq); color: #0f172a; text-align: center; overflow: hidden; transition: opacity 150ms; }
+  .aq-f b { font-weight: 600; font-size: 0.65rem; word-break: break-all; }
+  .aq-f i { font-style: normal; font-family: var(--font-family-mono, ui-monospace, monospace); font-size: 0.75rem; font-weight: 700; }
+  .aq-hdr { --aq: #fde68a; }
+  .aq-shape { --aq: #bfdbfe; }
+  .aq-mem { --aq: #bbf7d0; }
+  .aq-ptr { --aq: #fbcfe8; }
+  .aq-res { --aq: #e2e8f0; }
+  .aq-dim .aq-f:not(.aq-hi) { opacity: 0.35; }
+  .aq-hi { outline: 2px solid var(--color-primary); outline-offset: -1px; }
+  .aq figcaption { margin-top: 6px; font-size: 0.75rem; color: var(--color-muted); }
+</style>

@@ -1,0 +1,275 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Attention and the KV cache"
+short: "Attention & KV cache"
+description: "How attention works step by step (queries, keys, values, softmax, causal mask, multi-head and grouped-query attention, sliding windows), why servers keep every past token's keys and values, and exact KV cache size formulas with worked numbers for gpt-oss-120b and Llama 3.3 70B."
+updated: "2026-11-10"
+track: inference
+order: 3
+requires: [tokens-and-transformers]
+eyebrow: "Learn · LLM inference"
+links:
+  - { label: "gpt-oss-120b config.json", href: "https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json" }
+  - { label: "GQA paper", href: "https://arxiv.org/abs/2305.13245" }
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import step from './_step.diagram';
+import idea from './_idea.diagram';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import MatRow from '@/components/content/MatRow.astro';
+import Op from '@/components/content/Op.astro';
+import KvCalc from './_KvCalc.astro';
+import * as ex from './_example';
+
+[Tokens and transformers](/learn/tokens-and-transformers/) showed that each layer has an attention block, the only place where tokens see each other. This page opens that block, then explains the **KV cache**: the per-token memory that makes generation fast, and that decides how many users fit on a GPU and how many bytes a disaggregated server must ship from the prefill GPU to the decode GPU.
+
+## The idea first
+
+**The problem attention solves.** A word's meaning depends on the words around it. "Fast" means something different in "the GPU is fast" and in "Ramadan fast". "It" means nothing until you know what it points to. So every token needs a way to **pull in information from the earlier tokens that matter to it**, and to ignore the rest. Attention is that mechanism: a *soft lookup* that every token runs over all earlier tokens, in every layer.
+
+**Three roles, three matrices.** For the lookup, each token plays three different parts. The model learns one weight matrix per part and multiplies the token's vector by it:
+
+| Matrix | Gives each token a… | The question it answers | Library analogy | In “The GPU is fast” |
+| --- | --- | --- | --- | --- |
+| W<sub>Q</sub> | **query** | "What am I looking for?" | the search you type | “fast” asks: *what thing am I describing?* |
+| W<sub>K</sub> | **key** | "What can I be found for?" | the label on a book's spine | “GPU” advertises: *I am a thing, a noun*; “The”: *I am a function word* |
+| W<sub>V</sub> | **value** | "What do I hand over if picked?" | the book's contents | “GPU” hands over: *what a GPU is* |
+
+**Why three separate matrices, not one?** Because *how a word is found* and *what it gives* are different things. "GPU" should be found by any word looking for a noun (its key), but what it should pass on is its meaning (its value), and what it is itself looking for (its query, perhaps a verb) is a third thing again. Training adjusts the three matrices so that useful lookups score high.
+
+<Diagram spec={idea} title="One lookup, three moves" caption="The labels in the boxes are a human reading of what trained heads often do; in a real model keys and queries are just vectors, learned, not words.">
+  <Step title="Ask" focus="q">The token "fast" turns into a query: a vector that encodes what it is looking for.</Step>
+  <Step title="Compare with every label" focus="q, kThe, kGPU, kis, kfast, q -> kThe, q -> kGPU, q -> kis, q -> kfast">Its query is compared with the key of every token so far (including itself). A dot product measures how well two vectors point the same way: big when the query and key match.</Step>
+  <Step title="Take a blend of contents" focus="vThe, vGPU, vis, vfast, out, kThe -> vThe, kGPU -> vGPU, kis -> vis, kfast -> vfast, vThe -> out, vGPU -> out, vis -> out, vfast -> out">The match strengths become shares that add up to 1. The token takes that share of each value and adds the blend to itself. "Fast" now carries information about "GPU".</Step>
+</Diagram>
+
+**Why each step is there:**
+
+- **Dot product** (query · key): a cheap similarity score. Vectors that point the same way give a big number.
+- **Divide by $$\sqrt{d}$$:** longer vectors give bigger dot products; scaling keeps scores in a range where the next step stays smooth instead of all-or-nothing.
+- **Softmax:** turns scores into shares of a fixed budget of 1. A token can spread its attention or focus it, but cannot attend "more than everything".
+- **Causal mask:** a token may only look backwards. You cannot use words that have not been written yet when generating left to right.
+- **Weighted sum of values:** the actual information transfer. The output is mostly the values of the best matches.
+
+**Many heads = many questions at once.** One head asks one kind of question. A layer runs many heads in parallel, each with its own three matrices: one may track which noun an adjective describes, another what "it" refers to, another nearby punctuation. (Heads specialise during training; their "questions" are not always human-readable.)
+
+**Where the library analogy breaks.** The lookup is *soft*: the token takes a blend of all books, weighted, not one book. Queries, keys and values are learned vectors, not words. And it happens in every layer: later layers look up over representations that earlier layers already mixed.
+
+**The KV cache, intuitively.** Once a token is in the text, its label (key) and its contents (value) never change, because later words cannot affect earlier ones (the mask). So the server keeps them on the shelf. Each new token brings one new *question* (its query, used once and thrown away) and adds one new *label + book* to the shelf. The shelf only grows: that growing shelf, in every layer and every head, is the KV cache, and it is what fills GPU memory and what disaggregated serving ships from the prefill machine to the decode machine.
+
+Now the same thing with real numbers.
+
+## Worked example: four tokens, real numbers
+
+Watch the idea above run on a toy model: one head, vectors of 4 numbers instead of 64, and the prompt **"The GPU is fast"**. Every number below is computed from the ones before it (the embeddings and weights are made up; a real model learns them). Step through with the arrows, or switch to *Spread* to see every step at once.
+
+<Walkthrough title="Attention on “The GPU is fast”, then two decode steps" caption="Toy sizes: d = 4, one head, no RoPE. gpt-oss-120b does the same with d = 64, 64 query heads, 8 KV heads and 36 layers.">
+  <WStep title="1 · Each token is a vector">
+    <MatRow>
+      <Matrix title="X: token vectors (input to this layer)" rows={ex.prompt} cols={ex.dims} data={ex.X.slice(0, 4)} scale="div" corner="token" />
+    </MatRow>
+    Each row is one token's hidden state as it enters the attention block: 4 numbers here, 2,880 in gpt-oss-120b. Nothing yet connects the tokens; each row knows only about itself.
+  </WStep>
+  <WStep title="2 · Project: Q, K, V = X × three weight matrices">
+    <MatRow>
+      <Matrix title="X" rows={ex.prompt} data={ex.X.slice(0, 4)} scale="div" />
+      <Op>×</Op>
+      <Matrix title="W<sub>Q</sub>" data={ex.Wq} scale="none" digits={0} />
+      <Op>=</Op>
+      <Matrix title="Q (queries)" rows={ex.prompt} cols={ex.dims} data={ex.Q.slice(0, 4)} scale="div" />
+    </MatRow>
+    <MatRow>
+      <Matrix title="K = X × W<sub>K</sub> (keys)" rows={ex.prompt} cols={ex.dims} data={ex.K.slice(0, 4)} scale="div" />
+      <Matrix title="V = X × W<sub>V</sub> (values)" rows={ex.prompt} cols={ex.dims} data={ex.V.slice(0, 4)} scale="div" />
+    </MatRow>
+    Three matrix multiplies give every token a **query** ("what am I looking for?"), a **key** ("what do I offer?") and a **value** ("what I pass on if chosen"). Row "GPU" of Q is row "GPU" of X times W<sub>Q</sub>: {ex.projText(1, ex.Wq)}.
+  </WStep>
+  <WStep title="3 · Score every query against every key: Q·Kᵀ / √d">
+    <MatRow>
+      <Matrix title="Q" rows={ex.prompt} data={ex.Q.slice(0, 4)} scale="div" />
+      <Op>·</Op>
+      <Matrix title="Kᵀ" rows={ex.dims} cols={ex.prompt} data={ex.KT4} scale="div" />
+      <Op>÷ √4 =</Op>
+      <Matrix title="Scores (query row × key column)" rows={ex.prompt} cols={ex.prompt} data={ex.rawPre} scale="seq" corner="query ↓ key →" highlight={{ cells: [[3, 1]] }} />
+    </MatRow>
+    Score[i][j] is how well token i's query matches token j's key: a dot product, divided by √d so the numbers stay in a range softmax handles well. Row "fast", column "GPU" (outlined): {ex.dotText(ex.Q, 3, ex.K, 1, 2)}.
+  </WStep>
+  <WStep title="4 · Causal mask: no peeking at the future">
+    <MatRow>
+      <Matrix title="Masked scores" rows={ex.prompt} cols={ex.prompt} data={ex.pre.scores} scale="seq" corner="query ↓ key →" note="Above the diagonal = later tokens, set to −∞." />
+    </MatRow>
+    A token may only look at itself and earlier tokens, so everything above the diagonal becomes −∞. This is what lets the model generate left to right: token 3's result can never depend on token 4. It is also why earlier tokens' keys and values never change later, which is the whole reason a KV cache works.
+  </WStep>
+  <WStep title="5 · Softmax each row into weights that sum to 1">
+    <MatRow>
+      <Op>softmax(</Op>
+      <Matrix title="Masked scores" rows={ex.prompt} cols={ex.prompt} data={ex.pre.scores} scale="seq" />
+      <Op>) =</Op>
+      <Matrix title="Attention weights" rows={ex.prompt} cols={ex.prompt} data={ex.pre.weights} scale="seq" highlight={{ rows: [3] }} />
+    </MatRow>
+    Softmax makes each row positive and sum to 1 (−∞ becomes 0). Read row **"fast"**: it puts 0.42 on "GPU", 0.42 on itself, and little on "The" and "is". In a trained model this is how an adjective finds the noun it describes.
+  </WStep>
+  <WStep title="6 · Mix the values: output = weights × V">
+    <MatRow>
+      <Matrix title="Weights" rows={ex.prompt} cols={ex.prompt} data={ex.pre.weights} scale="seq" highlight={{ rows: [3] }} />
+      <Op>×</Op>
+      <Matrix title="V" rows={ex.prompt} cols={ex.dims} data={ex.V.slice(0, 4)} scale="div" highlight={{ rows: [1, 3] }} />
+      <Op>=</Op>
+      <Matrix title="Output" rows={ex.prompt} cols={ex.dims} data={ex.pre.out} scale="div" highlight={{ rows: [3] }} />
+    </MatRow>
+    Each output row is a weighted average of the value rows. Output "fast" ≈ 0.42 × V["GPU"] + 0.42 × V["fast"] + small parts of the rest: the token now carries information about the GPU. This is **prefill**: all four rows computed at once, as one big matrix multiply. The K and V matrices are now saved: that is the **KV cache** for this layer and head.
+  </WStep>
+  <WStep title="7 · Decode “!”: one new row, read the whole cache">
+    <MatRow>
+      <Matrix title="New q (only this token is projected)" rows={['!']} cols={ex.dims} data={[ex.Q[4]]} scale="div" />
+      <Op>·</Op>
+      <Matrix title="K cache (4 rows read + 1 appended)" rows={ex.tokens.slice(0, 5)} cols={ex.dims} data={ex.K.slice(0, 5)} scale="div" highlight={{ rows: [4] }} />
+      <Op>→</Op>
+      <Matrix title="Weights" rows={['!']} cols={ex.tokens.slice(0, 5)} data={ex.step5.weights} scale="seq" />
+    </MatRow>
+    <MatRow>
+      <Matrix title="V cache (1 row appended)" rows={ex.tokens.slice(0, 5)} cols={ex.dims} data={ex.V.slice(0, 5)} scale="div" highlight={{ rows: [4] }} />
+      <Op>→</Op>
+      <Matrix title="Output for “!”" rows={['!']} cols={ex.dims} data={ex.step5.out} scale="div" />
+    </MatRow>
+    The model has produced "!". Now only that token is projected: one q, one k, one v. Its k and v are **appended** to the cache (highlighted row). Its q is scored against all 5 keys, and the output mixes all 5 values. The 4 old rows were not recomputed, only **read**. This one-row-at-a-time shape is **decode**.
+  </WStep>
+  <WStep title="8 · Decode “.”: the cache grows by one row per token">
+    <MatRow>
+      <Matrix title="K cache, 6 rows" rows={ex.tokens} cols={ex.dims} data={ex.K} scale="div" highlight={{ rows: [5] }} />
+      <Matrix title="V cache, 6 rows" rows={ex.tokens} cols={ex.dims} data={ex.V} scale="div" highlight={{ rows: [5] }} />
+      <Op>→</Op>
+      <Matrix title="Weights for “.”" rows={['.']} cols={ex.tokens} data={ex.step6.weights} scale="seq" />
+    </MatRow>
+    Each step adds one K row and one V row, in **every layer and every KV head**. For gpt-oss-120b that is 36 layers × 8 KV heads × 64 numbers × 2 (K and V): 36,864 numbers, 72 KiB in 16-bit, per token, if every layer kept every token. Half its layers keep only the last 128 tokens, so long contexts cost about 36 KiB per token (worked out below). A 4,000-token prompt has written ~4,000 rows into each of those caches before decode starts; every decode step reads all of them. That read is why decode is bandwidth-bound, and those rows are what disaggregated serving ships between machines.
+  </WStep>
+</Walkthrough>
+
+## Attention, step by step
+
+Take one layer and one head. The input is the normed hidden state of each token, a vector $$x$$ of 2,880 numbers in gpt-oss-120b.
+
+1. **Project.** Multiply $$x$$ by three learned matrices to get a query $$q$$, a key $$k$$ and a value $$v$$, each 64 numbers (the **head size**, `head_dim`).
+2. **Position.** Apply [RoPE](/learn/tokens-and-transformers/#attention-tokens-look-at-each-other) to $$q$$ and $$k$$: rotate them by angles that depend on the token's position.
+3. **Score.** For token $$t$$, compute the dot product of its query with the key of every token $$s \le t$$: `score[s] = q_t · k_s / sqrt(64)`. Dividing by the square root of the head size keeps scores in a range where softmax behaves.
+4. **Mask.** Tokens after $$t$$ are not allowed (score set to minus infinity). This **causal mask** is why a model can generate left to right: no token's output depends on the future.
+5. **Normalize.** Softmax turns the scores into weights that are positive and sum to 1.
+6. **Mix.** The head's output is the weighted sum of the values: `out_t = Σ weight[s] · v_s`.
+
+In matrix form, for all tokens at once: `softmax(Q·Kᵀ / sqrt(d) + mask) · V`. With $$n$$ tokens, `Q·Kᵀ` is an $$n \times n$$ score matrix: attention cost grows with the **square** of the sequence length during prefill.
+
+### Many heads
+
+One head can only learn one kind of "look-up". So the layer runs many heads side by side, each with its own projections. gpt-oss-120b has **64 query heads** of size 64 per layer: the query projection maps 2,880 → 64 × 64 = 4,096 numbers. The 64 head outputs are concatenated (4,096 numbers) and an output matrix maps them back to 2,880, which is added to the residual stream.
+
+### Grouped-query attention: fewer keys and values
+
+In the original design (multi-head attention, MHA) every query head has its own key and value head. **Grouped-query attention (GQA)** lets a group of query heads share one key/value head. gpt-oss-120b has 64 query heads and **8 KV heads**: each K/V head serves 8 query heads. The extreme case, one K/V head for all, is multi-query attention (MQA).
+
+GQA barely changes quality but cuts the keys and values that must be **stored** by the group factor, here 8×. Since storage of K and V is the whole problem below, almost every current model uses it. Llama 3.3 70B also has 8 KV heads (for 64 query heads of size 128).
+
+### Sliding windows and sinks (gpt-oss specifics)
+
+- gpt-oss alternates two layer types (`layer_types` in the config): 18 **sliding-window** layers, where each token only attends to the previous 128 tokens (`sliding_window: 128`), and 18 **full** layers that see the whole context.
+- Each head has a learned extra term in the softmax denominator (the model card calls it similar to *attention sinks*). It lets a head put weight on "nothing" instead of being forced to spread weight over tokens. It costs no cache memory.
+
+<Diagram spec={step} title="Attention for one new token (one layer)" caption="A decode step. Only the new token is projected; the keys and values of all earlier tokens come from the cache." />
+
+## Why cache K and V
+
+Look at step 3 again. To produce token 1,001, the model needs the keys and values of tokens 1 to 1,000 **in every layer**. Those vectors depend only on earlier tokens (causal mask), so once computed they never change.
+
+Without a cache, every new token would rerun the whole sequence through all 36 layers: generating 1,000 tokens after a 4,000-token prompt would process about 4.5 million token-positions instead of 5,000. With a cache, each step computes Q, K and V for **one** new token, appends its K and V, and reads the stored ones. That stored set is the **KV cache**.
+
+The trade: compute is saved, memory is spent. And reading that memory every step is what makes [decode](/learn/decode-phase/) bandwidth-bound.
+
+## How big: the formula
+
+For each token, each layer stores one key and one value per KV head:
+
+$$
+\begin{aligned}
+\text{KV bytes per token} &= 2\,(\text{K and V}) \times \text{layers} \times \text{KV heads} \times \text{head size} \times \text{bytes per number} \\
+\text{KV bytes per sequence} &= \text{KV bytes per token} \times \text{tokens in context}
+\end{aligned}
+$$
+
+Query heads do not appear: queries are used once and thrown away. That is why GQA shrinks the cache.
+
+Try it: pick a model, a context length and a number of users.
+
+<KvCalc />
+
+### gpt-oss-120b
+
+From the config: 36 layers, 8 KV heads, head size 64. In 16-bit (2 bytes) per number:
+
+- Per token per layer: 2 × 8 × 64 × 2 B = **2 KiB**.
+- Per token, all 36 layers: **72 KiB** (73,728 bytes).
+
+That is the simple answer, and it holds for contexts up to 128 tokens. For longer contexts the sliding-window layers matter: they only need the **last 128 tokens**. A server that exploits this (vLLM's [hybrid KV cache manager](https://docs.vllm.ai/en/latest/design/hybrid_kv_cache_manager.html) frees blocks that fall outside the window) stores:
+
+```text
+full layers:    18 × 2 KiB = 36 KiB per token, for every token
+sliding layers: 18 × 128 tokens × 2 KiB = 4.5 MiB per sequence, at most
+```
+
+| Context | Naive (all 36 layers) | Window-aware | Window-aware, FP8 KV |
+| --- | --- | --- | --- |
+| 1 token | 72 KiB | 72 KiB | 36 KiB |
+| 4,085 tokens (a long prompt) | 287 MiB | 148 MiB | 74 MiB |
+| 32,768 tokens | 2.25 GiB | 1.13 GiB | 0.57 GiB |
+| 131,072 tokens (max) | 9 GiB | 4.5 GiB | 2.25 GiB |
+| 100 users × 32,768 tokens | 225 GiB | 113 GiB | 57 GiB |
+
+Which column applies depends on the server and its configuration: a server that does not free out-of-window blocks pays the naive figure.
+
+### Llama 3.3 70B, for contrast
+
+80 layers, 8 KV heads, head size 128, 16-bit:
+
+- Per token: 2 × 80 × 8 × 128 × 2 B = **320 KiB**, 4.4× gpt-oss-120b's naive figure.
+- A 4,085-token prompt: about 1.25 GiB. A 32k context: 10 GiB. The full 131,072-token context: 40 GiB, for one user.
+- Without GQA (64 KV heads), it would be 2.5 MiB per token, and a 32k context would need 80 GiB.
+
+### What fits on one MI355X
+
+An MI355X has 288 GB of HBM. gpt-oss-120b's weights take about 65 GB. vLLM by default uses 90% of HBM (`gpu_memory_utilization=0.9`, about 259 GB), and after weights, activations and buffers it reserves the rest for KV, roughly 150 GiB.
+
+So one MI355X holds about **4 million tokens** of gpt-oss-120b KV in 16-bit, window-aware: 150 GiB / 36 KiB ≈ 4.4 M (illustrative; the exact figure depends on the server's buffers). With the naive 72 KiB per token it would be half that. 4 M tokens divided by the 131,072-token maximum context is about 32 users at full length, or about 1,000 users at 4k. With Llama 3.3 70B (141 GB of weights, 320 KiB per token) the same GPU would hold only a few hundred thousand tokens.
+
+This is why, for long contexts, **KV memory, not compute, limits how many users a server can hold at once**, and why servers fight for every byte with paging, prefix sharing and KV quantization: see [KV cache management](/learn/kv-cache-management/).
+
+## Attention cost per step
+
+Attention also costs compute and bandwidth that grow with context:
+
+- **FLOPs.** Per layer per new token: `2 × query heads × head size × context` for the scores plus the same for the weighted sum, so `4 × 64 × 64 × context` = 16,384 × context FLOPs in gpt-oss-120b. At a 32k context across the 18 full layers that is about 9.7 GFLOP per token: as much as all the model's linear layers (about 9 GFLOP).
+- **Bytes.** In decode each step reads the sequence's whole cache once: 1.13 GiB per token generated at 32k (window-aware). That is about 8 FLOPs per byte read. A GPU needs about 600 FLOPs per byte to be compute-bound ([roofline](/learn/gpu-memory-hierarchy/)), so decode attention is firmly **bandwidth-bound**, and batching users does not help: each sequence has its own KV.
+
+FlashAttention and PagedAttention are the GPU kernels that do this efficiently: see [Prefill and decode as kernels](/learn/llm-kernels/).
+
+<Callout tone="note" title="How this shows up when operating a server">
+vLLM reports the share of its reserved KV blocks in use (`GPU KV cache usage`). On a prefill-only server in a disaggregated setup it stays low by design: prefill builds a request's KV, sends it to the decode side, and frees it. A decode server's equivalent number is the one that tracks user load. The KV volume sent per request is the formula above times the prompt length.
+</Callout>
+
+## Common misconceptions
+
+- **"The KV cache is a cache of answers."** It is a cache of intermediate per-token vectors for *this* sequence. Two identical prompts share it only if a [prefix cache](/learn/kv-cache-management/) is on.
+- **"More query heads means a bigger cache."** Only KV heads count. gpt-oss has 64 query heads and stores K/V for 8.
+- **"KV size depends on hidden size."** It depends on $$\text{layers} \times \text{KV heads} \times \text{head size}$$. gpt-oss's hidden size is 2,880 but its K/V width per layer is 8 × 64 = 512.
+- **"Long contexts cost only memory."** They also cost bandwidth on every decode step and quadratic compute in prefill.
+
+## Further reading
+
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (scaled dot-product and multi-head attention)
+- [GQA: training generalized multi-query transformer models](https://arxiv.org/abs/2305.13245) · [Multi-query attention](https://arxiv.org/abs/1911.02150)
+- [Efficient streaming language models with attention sinks](https://arxiv.org/abs/2309.17453)
+- [DeepSeek-V2](https://arxiv.org/abs/2405.04434) (multi-head latent attention: another way to shrink K/V, by compressing them into a small latent vector)
+- [gpt-oss model card](https://arxiv.org/abs/2508.10925) · [config.json](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json)
+- [vLLM hybrid KV cache manager](https://docs.vllm.ai/en/latest/design/hybrid_kv_cache_manager.html) (sliding-window plus full-attention models)
+- [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/) (attention section)

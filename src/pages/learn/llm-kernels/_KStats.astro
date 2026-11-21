@@ -1,0 +1,45 @@
+---
+/** Prefill vs decode numbers for one kernel of the layer (from _example.ts). */
+import * as ex from './_example';
+interface Props { id: string; sliding?: boolean }
+const { id, sliding = false } = Astro.props;
+const p = (sliding ? ex.preSliding : ex.pre).find((r) => r.id === id)!;
+const d = (sliding ? ex.decSliding : ex.dec).find((r) => r.id === id)!;
+const perTok = p.flops / ex.T;
+const cols = [
+  { label: `Prefill, ${ex.T.toLocaleString('en-US')} prompt tokens`, r: p },
+  { label: `Decode, ${ex.Bdec} sequences × 1 token`, r: d },
+];
+---
+
+<div class="ks">
+  <p class="ks-tok">This token: <b>{ex.fFlops(perTok)}</b>{p.kind !== 'element' ? '' : ' (element-wise)'} · {p.name}</p>
+  <div class="ks-grid">
+    {cols.map(({ label, r }) => (
+      <div class:list={['ks-col', r.bound === 'compute' ? 'is-c' : 'is-m']}>
+        <p class="ks-h">{label}</p>
+        <dl>
+          <dt>Shape</dt><dd>{r.shape}</dd>
+          <dt>Work</dt><dd>{ex.fFlops(r.flops)} · {ex.fBytes(r.bytes)} from HBM</dd>
+          <dt>Intensity</dt><dd><b>{ex.fI(r.intensity)} FLOP/B</b> vs ridge ~{Math.round(r.ridge)}</dd>
+          <dt>Time ≥</dt><dd><b>{ex.fTime(r.time)}</b>, <span class="ks-b">{r.bound}-bound</span></dd>
+        </dl>
+      </div>
+    ))}
+  </div>
+</div>
+
+<style>
+  .ks { margin: 6px 0 4px; }
+  .ks-tok { margin: 0 0 8px; font-size: 0.875rem; }
+  .ks-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 10px; }
+  .ks-col { padding: 10px 12px; border-radius: 10px; background: var(--color-cloud-100); border-left: 3px solid #94a3b8; }
+  .ks-col.is-c { border-left-color: #16a34a; }
+  .ks-col.is-m { border-left-color: #d97706; }
+  .ks-h { margin: 0 0 6px !important; font-size: 0.8125rem; font-weight: 700; }
+  .ks dl { display: grid; grid-template-columns: 74px 1fr; gap: 2px 8px; margin: 0; font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+  .ks dt { color: var(--color-muted); }
+  .ks dd { margin: 0; }
+  .is-c .ks-b { color: #16a34a; font-weight: 600; }
+  .is-m .ks-b { color: #d97706; font-weight: 600; }
+</style>

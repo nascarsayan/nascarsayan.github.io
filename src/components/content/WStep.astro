@@ -1,0 +1,15 @@
+---
+/** One step of a <Walkthrough>: a title, then any content (visual first, then text). */
+interface Props { title: string }
+const { title } = Astro.props;
+---
+
+<div class="wt-step" data-title={title}>
+  <p class="wt-step-title">{title}</p>
+  <div class="wt-step-body"><slot /></div>
+</div>
+
+<style>
+  .wt-step-title { margin-bottom: 10px; font-size: 1.0625rem; font-weight: var(--font-weight-bold); color: var(--color-primary); }
+  .wt-step-body :global(p) { max-width: 760px; margin-top: 8px; }
+</style>

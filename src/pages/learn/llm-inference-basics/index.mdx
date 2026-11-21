@@ -1,0 +1,128 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "LLM inference from the model's side (overview)"
+short: "LLM inference"
+description: "Tokens and layers, mixture of experts, attention and the KV cache, prefill, decode, batching, speculative decoding, the kernels they become, and why the two phases behave so differently: one gpt-oss-120b request followed end to end with numbers."
+updated: "2026-11-10"
+track: inference
+hub: true
+order: 10
+requires: [tokens-and-transformers, mixture-of-experts, attention-and-kv-cache, kv-cache-management, prefill-phase, decode-phase, batching-and-scheduling, speculative-decoding, llm-kernels]
+eyebrow: "Learn · Overview"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import LearnGraph from '@/components/learn/LearnGraph.astro';
+import E2E from './_E2E.astro';
+import phases from './_phases.diagram';
+import * as ex from './_example';
+
+This track explains what a large language model computes when it serves a request, mechanism by mechanism, and why that shapes how inference servers are built: prefill is compute-bound, decode is bandwidth-bound, and large deployments even run them on separate machines. The running example is **gpt-oss-120b**, an open-weight mixture-of-experts model, with numbers from its published config.
+
+## The idea first
+
+**An LLM is a next-token guesser called in a loop.** Give it text, it returns a probability for every possible next token (a token is a word piece). Pick one, append it, ask again. Everything a server does is about running that loop fast for many users at once.
+
+**Reading versus writing.** Think of answering an exam question. First you **read** the whole question: you can take in all of it at once, in parallel. Then you **write** the answer one word at a time, and each word depends on the words before it. A model does the same:
+
+| Phase | What it does | Question it answers | What limits it | Where it lives |
+| --- | --- | --- | --- | --- |
+| **Prefill** (reading) | runs all prompt tokens through the model in one pass | "What does the prompt mean, and what is the first token?" | arithmetic (lots of math per weight read) | GPU compute units |
+| **KV cache** (the notes) | keeps every token's keys and values from every layer | "What do I need to remember so I never re-read the prompt?" | memory size | GPU memory (HBM) |
+| **Decode** (writing) | one new token per step, re-reading all the notes | "Given everything so far, what comes next?" | memory bandwidth (little math per byte read) | GPU memory bandwidth |
+
+**The notes are the key idea.** While reading, the model writes notes about every token (in every layer). When writing, each new word consults all the notes instead of re-reading the question. Those notes, the **KV cache**, are what fills GPU memory, and, in a disaggregated server, what is shipped over the network from the machine that read the prompt to the one that writes the answer.
+
+**Where the analogy breaks.** The notes are not a summary: they grow by one entry per token, per layer, and are never compressed. "Reading" is not cheap: for a typical chat request it is most of the arithmetic. And "writing" is slow not because of thinking but because every word means re-fetching the model's weights and all the notes from memory.
+
+<Diagram spec={phases} title="One request" caption="Prefill builds the KV cache once; decode reads it every step and appends to it. Step through.">
+  <Step title="Read the prompt" path="prompt => pre">The whole prompt (here 4,085 tokens) enters prefill at once.</Step>
+  <Step title="Write the notes" path="pre => kv" state={{ kv: { detail: 'K and V of all 4,085 tokens × 36 layers' } }}>Prefill computes keys and values for every token in every layer and stores them: the KV cache. A disaggregated server sends this cache to a separate decode machine, often while prefill is still running.</Step>
+  <Step title="Write one token" path="kv => dec => out" state={{ dec: { detail: 'step 1: reads all 4,085 tokens of notes' } }}>Decode makes the first output token by reading the whole cache.</Step>
+  <Step title="Add to the notes, repeat" path="dec => kv" state={{ kv: { detail: '4,086 tokens, then 4,087…' }, dec: { detail: 'one token per step, until stop' } }}>Each new token adds its own keys and values to the cache, and the loop runs again until an end token or the length limit.</Step>
+</Diagram>
+
+## One request, end to end: prefill with numbers
+
+An illustrative request on one MI355X, followed step by step. Every number is computed from the gpt-oss-120b config; times are at spec-sheet peak and at an assumed {(ex.MFU * 100).toFixed(0)}% of it.
+
+<Walkthrough title={("A " + (ex.req.prompt.toLocaleString('en-US')) + "-token prompt through prefill")} caption="Prefill side only. Illustrative prompt; FLOPs and bytes from the published model config.">
+  <WStep title="1 · The prompt arrives as tokens">
+    <Kpis items={[
+      { label: 'Prompt', value: ("" + (ex.req.prompt.toLocaleString('en-US')) + " tokens"), detail: 'chat template + history + question' },
+      { label: 'Model', value: 'gpt-oss-120b', detail: ("one MI355X, " + (ex.layers) + " layers") },
+    ]} />
+    The text was turned into integer token ids upstream (how: [Tokens and transformers](/learn/tokens-and-transformers/)). From here on, only token counts matter.
+  </WStep>
+  <WStep title="2 · Prefix cache: which 128-token blocks are already known?">
+    <Matrix title={("The prompt in " + (ex.blocks.length) + " blocks of 128 tokens (cell = tokens in the block; outlined = cache hit)")} data={ex.blockGrid} digits={0} scale="none" highlight={{ cells: Array.from({ length: ex.cachedBlocks }, (_, i) => [0, i]) }} />
+    The server hashes the prompt block by block from the start and finds the first {ex.cachedBlocks} blocks already in its cache ({ex.req.cached} tokens), for example a shared system prompt. The rest, {ex.req.uncached.toLocaleString('en-US')} tokens, must be computed. Only whole blocks match, so a hit is always a multiple of 128. Mechanism: [KV cache management](/learn/kv-cache-management/).
+  </WStep>
+  <WStep title="3 · Wait for a slot">
+    The engine schedules the request into the next step, within the token budget and free KV memory ([Batching and scheduling](/learn/batching-and-scheduling/)). On an idle server this takes a few milliseconds; behind a long prompt it can take hundreds.
+  </WStep>
+  <WStep title={("4 · One forward pass: " + (ex.fmtT(ex.flops)))}>
+    <Kpis items={[
+      { label: ("Math for " + (ex.req.uncached.toLocaleString('en-US')) + " new tokens"), value: ex.fmtT(ex.flops), detail: '~9 GFLOP per token + attention' },
+      { label: 'At MI355X FP8 peak', value: ("" + (ex.idealMs.toFixed(1)) + " ms"), detail: '5 PFLOP/s, approximate' },
+      { label: ("At " + ((ex.MFU * 100).toFixed(0)) + "% of peak"), value: ("" + (ex.realMs.toFixed(1)) + " ms"), tone: 'primary' },
+    ]} />
+    All {ex.req.uncached.toLocaleString('en-US')} new tokens go through the {ex.layers} layers together, in one engine step. The GPU is doing big matrix multiplies, yet a step of this size reaches only part of its peak: it still spends a large share of its time reading the ~61 GB of expert weights (7.6 ms at 8 TB/s), plus fixed overhead ([Prefill](/learn/prefill-phase/)).
+  </WStep>
+  <WStep title={("5 · The notes: " + (ex.fmtMiB(ex.kv)) + " of KV")}>
+    <Kpis items={[
+      { label: ("KV for " + (ex.req.prompt.toLocaleString('en-US')) + " tokens"), value: ex.fmtMiB(ex.kv), detail: '16-bit, window-aware' },
+      { label: 'If every layer kept every token', value: ex.fmtMiB(ex.kvNaive) },
+    ]} />
+    The KV covers the whole prompt, cached blocks included: decode needs all of it. In a disaggregated server it is sent to the decode side layer by layer as each layer finishes, so the transfer overlaps the forward pass.
+  </WStep>
+  <WStep title="6 · Done: the first token">
+    The prefill step samples the first output token. With [speculative decoding](/learn/speculative-decoding/), a small draft model also processes the prompt. From here decode runs, one token per step, at a speed set by memory bandwidth ([Decode](/learn/decode-phase/)).
+  </WStep>
+</Walkthrough>
+
+### Try it: where the time goes
+
+Change the prompt, the cache hit and the answer length. Short answers to long prompts are prefill-heavy; long answers are decode-heavy, which is why the two phases are sized separately.
+
+<E2E />
+
+## The ideas in order
+
+1. **Tokens and layers.** Text becomes integer tokens (`kubectl` is two). Each token becomes a vector of 2,880 numbers, and 36 transformer layers update it: RMSNorm, attention with RoPE, a mixture-of-experts MLP, residual adds. The last vector picks the next token. Almost all of it is matrix multiplies, about 9 GFLOP per token. → [Tokens and transformers](/learn/tokens-and-transformers/)
+2. **Mixture of experts.** Each layer has 128 expert MLPs; a router sends each token to 4. So gpt-oss has 117 B parameters to *store* but uses 5.1 B per token to *compute*. Batching helps less than for dense models because different tokens wake different experts. → [Mixture of experts](/learn/mixture-of-experts/)
+3. **Attention and the KV cache.** Attention is where tokens see each other through queries, keys and values. Keys and values of past tokens never change, so the server keeps them: $$2 \times \text{layers} \times \text{KV heads} \times \text{head size} \times \text{bytes}$$ per token, 36–72 KiB for gpt-oss-120b, 320 KiB for Llama 3.3 70B. → [Attention and the KV cache](/learn/attention-and-kv-cache/)
+4. **KV cache management.** The cache is stored in 128-token blocks with block tables (paging), shared across requests with the same prefix, offloaded to CPU memory, optionally quantized to FP8. → [KV cache management](/learn/kv-cache-management/)
+5. **Prefill.** The whole prompt in one pass: fills the KV cache, sets time to first token, compute-bound once a step holds a few thousand tokens. Long prompts are chunked, for example at 8,192 tokens per step. → [Prefill](/learn/prefill-phase/)
+6. **Decode.** One token per sequence per step, re-reading weights and KV each time: about 2 FLOPs per byte, so bandwidth-bound on any HBM GPU. Sets inter-token latency. → [Decode](/learn/decode-phase/)
+7. **Batching and scheduling.** Each step the scheduler picks which requests run within a token budget and the free KV memory. Continuous batching re-forms the batch every step. Separating prefill and decode is itself a scheduling decision. → [Batching and scheduling](/learn/batching-and-scheduling/)
+8. **Speculative decoding.** A small draft guesses several tokens; the target checks them in one pass and keeps the ones it agrees with, with the same output. A disaggregated server then needs a draft prefill as well as a target prefill. → [Speculative decoding](/learn/speculative-decoding/)
+9. **Kernels.** On the GPU, prefill becomes big GEMMs and FlashAttention; decode becomes skinny GEMMs and paged attention. → [Prefill and decode as kernels](/learn/llm-kernels/)
+10. **Hardware fit.** On the [roofline](/learn/gpu-memory-hierarchy/), prefill sits at a GPU's compute roof; decode sits far below its ridge point, limited by memory bandwidth. That is why the phases are sized, and sometimes placed, separately.
+
+<LearnGraph hub="llm-inference-basics" />
+
+## Words you will see in logs and dashboards
+
+| Term | Meaning | Where it shows |
+| --- | --- | --- |
+| context tokens | prompt tokens processed by prefill in a step | vLLM `Iteration(...)` log line |
+| generation tokens | tokens produced by decode in a step | same line; always 0 on a prefill-only server |
+| prompt tokens by source | prompt tokens served from the prefix cache / computed | `vllm:prompt_tokens_by_source_total` |
+| KV cache usage | share of reserved KV blocks in use | `GPU KV cache usage`, `vllm:kv_cache_usage_perc` |
+| TTFT | time to first token | `vllm:time_to_first_token_seconds` |
+| ITL / TPOT | inter-token latency / time per output token | `vllm:inter_token_latency_seconds` |
+| batch | requests processed together in one step | `vllm:num_requests_running` |
+| preemption | a running request evicted to free KV memory | `vllm:num_preemptions` |
+| acceptance rate | share of draft tokens the target keeps | decode side |
+
+## Further reading
+
+- [gpt-oss model card](https://arxiv.org/abs/2508.10925) · [config.json](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json)
+- [vLLM documentation](https://docs.vllm.ai/en/latest/)
+- [Efficient memory management for LLM serving with PagedAttention](https://arxiv.org/abs/2309.06180)
+- [DistServe](https://arxiv.org/abs/2401.09670) (prefill/decode disaggregation)

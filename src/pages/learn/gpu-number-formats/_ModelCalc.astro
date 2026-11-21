@@ -1,0 +1,89 @@
+---
+/**
+ * Weight memory and decode floor by number format, for a dense model on one
+ * MI355X (288 GB HBM, 8 TB/s peak; both approximate spec values).
+ */
+const formats = [
+  { id: 'fp32', label: 'FP32', bits: 32 },
+  { id: 'bf16', label: 'BF16 / FP16', bits: 16 },
+  { id: 'fp8', label: 'FP8 (per-tensor scale)', bits: 8 },
+  { id: 'mxfp8', label: 'MXFP8', bits: 8.25 },
+  { id: 'mxfp6', label: 'MXFP6', bits: 6.25 },
+  { id: 'nvfp4', label: 'NVFP4', bits: 4.5 },
+  { id: 'mxfp4', label: 'MXFP4', bits: 4.25 },
+];
+const params = [1, 8, 20, 70, 120, 405, 671];
+---
+
+<figure class="mc" data-mc={JSON.stringify({ formats, params })}>
+  <figcaption class="mc-title">Model weights by number format</figcaption>
+  <div class="mc-in">
+    <label>Parameters <input data-k="p" type="range" min="0" max={params.length - 1} step="1" value="3" /> <output data-o="p"></output></label>
+    <label>Format <select data-k="f">{formats.map((f) => <option value={f.id} selected={f.id === 'fp8'}>{f.label} · {f.bits} bits</option>)}</select></label>
+  </div>
+  <div class="mc-out">
+    <div><span class="k">Weights</span><span class="v" data-o="gb"></span></div>
+    <div><span class="k">MI355X needed for weights alone</span><span class="v" data-o="gpus"></span></div>
+    <div><span class="k">Floor per decode step (read all weights once at 8 TB/s)</span><span class="v" data-o="ms"></span></div>
+    <div><span class="k">Ceiling, tokens/s for one sequence</span><span class="v" data-o="tps"></span></div>
+  </div>
+  <div class="mc-bars" data-o="bars"></div>
+  <p class="mc-note">Dense model, weights only, peak bandwidth: real steps are slower, and the KV cache and activations need memory too. A mixture-of-experts model reads only its active experts per token, so its floor is lower than this. Dashed line: one MI355X (288 GB).</p>
+</figure>
+
+<style>
+  .mc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .mc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .mc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .mc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .mc-in select, .mc-in input { accent-color: var(--color-primary); }
+  .mc-in output { min-width: 60px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .mc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .mc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .mc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .mc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .mc-bars { position: relative; display: grid; grid-template-columns: max-content 1fr max-content; gap: 4px 10px; align-items: center; margin-top: 14px; font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+  .mc-bars :global(.t) { position: relative; height: 14px; border-radius: 999px; background: var(--color-gray-100); overflow: visible; }
+  .mc-bars :global(.b) { height: 100%; border-radius: 999px; background: #94a3b8; }
+  .mc-bars :global(.on .b) { background: var(--color-primary); }
+  .mc-bars :global(.on) { font-weight: 700; }
+  .mc-bars :global(.hbm) { position: absolute; top: -3px; bottom: -3px; border-left: 2px dashed #e5484d; }
+  .mc-note { margin-top: 8px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const HBM = 288, BW = 8000; // GB, GB/s
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-mc]')) {
+    const { formats, params } = JSON.parse(fig.dataset.mc!) as { formats: { id: string; label: string; bits: number }[]; params: number[] };
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const out = (k: string) => $<HTMLElement>(`[data-o=${k}]`);
+    const gbOf = (p: number, bits: number) => (p * bits) / 8; // billions of params × bytes = GB
+    const update = () => {
+      const p = params[Number($<HTMLInputElement>('[data-k=p]').value)];
+      const f = formats.find((x) => x.id === $<HTMLSelectElement>('[data-k=f]').value)!;
+      const gb = gbOf(p, f.bits);
+      out('p').textContent = `${p}B`;
+      out('gb').textContent = `${gb < 10 ? gb.toFixed(1) : Math.round(gb)} GB`;
+      const n = Math.ceil(gb / HBM);
+      out('gpus').textContent = n <= 1 ? `1 (${Math.round((gb / HBM) * 100)}% of HBM)` : `${n} (${Math.round(gb)} / ${HBM} GB)`;
+      const ms = (gb / BW) * 1000;
+      out('ms').textContent = `${ms < 10 ? ms.toFixed(2) : ms.toFixed(1)} ms`;
+      out('tps').textContent = `${Math.round(1000 / ms).toLocaleString('en-US')}`;
+      const max = Math.max(gbOf(p, 32), HBM * 1.05);
+      const bars = out('bars');
+      bars.innerHTML = '';
+      for (const g of formats) {
+        const v = gbOf(p, g.bits), on = g.id === f.id;
+        const a = document.createElement('span'); a.textContent = g.label; if (on) a.className = 'on';
+        const t = document.createElement('span'); t.className = `t${on ? ' on' : ''}`;
+        const b = document.createElement('span'); b.className = 'b'; b.style.display = 'block'; b.style.width = `${Math.min(100, (v / max) * 100)}%`;
+        const h = document.createElement('span'); h.className = 'hbm'; h.style.left = `${(HBM / max) * 100}%`;
+        t.append(b, h);
+        const c = document.createElement('span'); c.textContent = `${v < 10 ? v.toFixed(1) : Math.round(v)} GB`; if (on) c.className = 'on';
+        bars.append(a, t, c);
+      }
+    };
+    fig.querySelectorAll('select, input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

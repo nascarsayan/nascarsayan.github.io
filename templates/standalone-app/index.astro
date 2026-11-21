@@ -1,0 +1,48 @@
+---
+/**
+ * Standalone app template: one static page with its own markup, styles and
+ * script. BaseLayout keeps the site header, footer and theme. Runs entirely in
+ * the browser, so it works on GitHub Pages (no backend).
+ */
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import Hero from '@/components/hero/Hero.astro';
+---
+
+<BaseLayout title="App title" description="One line on what the app does.">
+  <Hero slot="hero">
+    <Fragment slot="title">App title</Fragment>
+    <Fragment slot="lede">One line on what the app does.</Fragment>
+  </Hero>
+  <div class="app max-width-wrapper">
+    <label for="app-input">Text</label>
+    <textarea id="app-input" rows="6" maxlength="20000" placeholder="Type or paste text"></textarea>
+    <dl class="stats">
+      <div><dt>Characters</dt><dd id="app-chars">0</dd></div>
+      <div><dt>Words</dt><dd id="app-words">0</dd></div>
+      <div><dt>Lines</dt><dd id="app-lines">0</dd></div>
+    </dl>
+  </div>
+</BaseLayout>
+
+<style>
+  .app { padding-top: 24px; padding-bottom: 40px; display: grid; gap: 12px; max-width: 720px; }
+  textarea { width: 100%; padding: 12px; font: inherit; color: var(--color-text); background: var(--color-background); border: 1px solid var(--color-gray-300); border-radius: var(--radius); }
+  .stats { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin: 0; }
+  .stats div { padding: 12px; border-radius: var(--radius); background: var(--color-gray-100); }
+  dt { font-size: 0.75rem; text-transform: uppercase; color: var(--color-muted); }
+  dd { margin: 4px 0 0; font-size: 1.5rem; }
+</style>
+
+<script>
+  // Bundled by Astro (TypeScript allowed). Write results with textContent, never innerHTML.
+  const input = document.getElementById('app-input') as HTMLTextAreaElement;
+  const set = (id: string, n: number) => { document.getElementById(id)!.textContent = n.toLocaleString(); };
+  const update = () => {
+    const text = input.value;
+    set('app-chars', text.length);
+    set('app-words', text.trim() ? text.trim().split(/\s+/).length : 0);
+    set('app-lines', text ? text.split('\n').length : 0);
+  };
+  input.addEventListener('input', update);
+  update();
+</script>

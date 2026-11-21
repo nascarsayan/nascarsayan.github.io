@@ -1,0 +1,231 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPU partitioning: AMD modes and NVIDIA MIG"
+short: "Partitioning"
+description: "How one physical GPU becomes several logical ones. AMD compute partitions (SPX, DPX, QPX, CPX) along XCD lines and memory partitions (NPS1, NPS2) along IOD lines on MI355X; NVIDIA MIG profiles, MPS and time-slicing. What changes in /dev, amd-smi and ResourceSlices, how a change is applied, and why large-model serving keeps GPUs whole."
+updated: "2026-11-10"
+track: fundamentals
+order: 7
+requires: [gpu-memory-and-interconnects, gpu-software-stack]
+eyebrow: "Learn · GPU fundamentals"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import dcm from './_dcm.diagram';
+import PartExplorer from './_PartExplorer.astro';
+import * as P from './_modes';
+
+An MI355X has 256 compute units and 288 GB of memory. An 8-billion-parameter model in BF16 needs about 16 GB. Giving it a whole GPU wastes most of the card. **Partitioning** splits one physical GPU into several logical GPUs, each with its own compute and memory, so several small jobs share a card with hardware isolation.
+
+Large-model serving usually uses **whole GPUs**: every MI355X runs in SPX/NPS1 and Kubernetes sees 8 devices per node. Partitioning still matters to operators. It decides how many devices the node advertises, what a "GPU" in a claim, a metric or an alert actually is, and changing it is as disruptive as a driver change.
+
+## The idea first
+
+Think of one MI355X as **an office floor with 8 rooms (the XCDs) and two storerooms (the HBM on each of the two IODs)**. Partitioning is how you let the floor:
+
+| Setting | Office picture | The question it answers |
+| --- | --- | --- |
+| **Compute partition** (SPX, DPX, QPX, CPX) | one company rents all 8 rooms, or 2, 4 or 8 companies rent equal blocks of rooms | "How many GPUs does software see, and how big is each?" |
+| **Memory partition** (NPS1, NPS2) | everyone's files are spread over both storerooms, or each half of the floor uses the storeroom next to it | "Where does each logical GPU's memory physically come from?" |
+
+Where the picture breaks: the tenants still share the building's **power, front door and fire alarm** (one PSP, one power budget, one XGMI hive), so a fault that resets the card resets every tenant. And the memory setting does not change *how much* memory each tenant gets, only *where* it lives: each logical GPU gets an equal share of the card's 288 GB either way.
+
+Try every combination. The colours show which XCDs form one logical GPU; the yellow bars are the memory pools.
+
+<PartExplorer />
+
+The counts follow the example `amd-smi partition` output below. Memory per logical GPU is the card's HBM divided equally, the rule AMD documents for MI300X (CPX: 8 × 24 GB of 192 GB); the MI355X split is assumed to follow the same rule. Which XCD sits on which IOD is drawn schematically.
+
+## AMD: two independent settings
+
+On MI300-family and MI350-family GPUs, two settings decide how the chiplets are exposed. They follow the physical layout in [what a GPU is](/learn/what-is-a-gpu/): compute partitions follow **XCD** lines, memory partitions follow **IOD** lines.
+
+### Compute (accelerator) partition
+
+SPX (single) is 1 logical GPU of 8 XCDs and 256 CUs, the default, for big models; DPX (dual) 2 × 128 CUs and 144 GB; QPX (quad) 4 × 64 CUs and 72 GB; CPX (core) 8 × 32 CUs and 36 GB, for many tiny models. `amd-smi partition` lists the profiles the hardware offers, with the resources each logical GPU gets. Illustrative output, trimmed to GPU 0 (`*` marks the current profile):
+
+```text
+ACCELERATOR_PARTITION_PROFILES:
+GPU_ID  PROFILE_INDEX  MEMORY_PARTITION_CAPS  ACCELERATOR_TYPE  NUM_PARTITIONS  RESOURCE_TYPE  RESOURCE_INSTANCES
+0       0              NPS1                   SPX*              1               XCC            8
+                                                                                DMA            16
+        1              NPS1,NPS2              DPX               2               XCC            4
+                                                                                DMA            8
+        2              NPS1,NPS2              QPX               4               XCC            2
+                                                                                DMA            4
+        3              NPS1,NPS2              CPX               8               XCC            1
+                                                                                DMA            2
+```
+
+An **XCC** (accelerated compute core) is the schedulable compute unit of one XCD; on these GPUs there is one XCC per XCD. The logical GPU a partition produces is an **XCP**. In SPX, the command processor spreads a kernel's workgroups round-robin over all 8 XCCs; in CPX, each XCP runs its kernels on its own XCC only, which keeps data in that XCD's L2 cache.
+
+### Memory partition (NPS)
+
+**NPS** stands for NUMA nodes per socket ("socket" here means the GPU package). **NPS1** is one 288 GB pool, addresses interleaved over all 8 HBM stacks on both IODs: simplest, but every access may cross the IOD-to-IOD link. **NPS2** is two 144 GB pools, one per IOD; the XCDs on that IOD use their local pool, so there is less cross-IOD traffic, lower latency and lower power. AMD's white paper calls DPX + NPS2 the most efficient MI350 mode. MI300X had NPS4 (four IODs); MI355X has two IODs, so it stops at NPS2.
+
+There cannot be more memory pools than compute partitions, so **SPX + NPS2 is not offered** (the output above lists only NPS1 for SPX); the other seven combinations are. The ROCm compatibility matrix lists the configurations AMD supports in bare-metal deployments; check it before relying on one.
+
+## Worked example: one 8-GPU MI355X node in CPX + NPS2
+
+What would an 8-GPU node look like cut into the smallest pieces? Every number is computed from the card's counts (memory per partition as explained above; the Kubernetes and render-node shapes are expected, not observed).
+
+<Walkthrough title="From 8 whole GPUs to 64 logical ones" caption="Counts from the example amd-smi partition output; per-partition memory from AMD's documented equal split; device names and ResourceSlice shape after repartitioning are illustrative.">
+  <WStep title="1 · Today: 8 cards in SPX + NPS1">
+    <Kpis items={[
+      { label: 'Logical GPUs', value: String(P.spx.node), detail: '1 per card' },
+      { label: 'Each', value: ("" + (P.spx.cus) + " CUs"), detail: ("" + (P.spx.xcds) + " XCDs, " + (P.spx.dma) + " DMA engines") },
+      { label: 'Each', value: ("" + (P.spx.hbmGB) + " GB"), detail: ("" + (P.vramMiB.toLocaleString('en-US')) + " MiB") },
+      { label: 'Render nodes used', value: ("" + (P.spx.render) + " of " + (P.preRender)), detail: 'pre-created by the driver' },
+    ]} />
+    The command processor spreads each kernel's workgroups round-robin over all 8 XCCs (an **XCC**, accelerated compute core, is the schedulable compute part of one XCD). Kubernetes sees 8 devices.
+  </WStep>
+  <WStep title="2 · Compute: each XCD becomes its own GPU">
+    <Matrix title="Which logical GPU (XCP) each XCD of card 0 belongs to" rows={['IOD 0', 'IOD 1']} cols={['XCD a', 'XCD b', 'XCD c', 'XCD d']} data={[P.cpx.owner.slice(0, 4), P.cpx.owner.slice(4, 8)]} scale="none" digits={0} />
+    In CPX the card becomes {P.cpx.parts} **XCPs** (the logical GPU a partition produces), each with {P.cpx.xcds} XCC, {P.cpx.cus} CUs and {P.cpx.dma} DMA engines. A kernel launched on an XCP runs on its one XCD only, which keeps its data in that XCD's 4 MB L2 cache.
+  </WStep>
+  <WStep title={("3 · Memory: two " + (P.cpx.poolGB) + " GB pools, " + (P.cpx.perPool) + " XCPs each")}>
+    <Matrix title="HBM per logical GPU, GB (rows: memory pool)" rows={['pool 0 (IOD 0)', 'pool 1 (IOD 1)']} cols={['XCP', 'XCP', 'XCP', 'XCP']} data={[[P.cpx.hbmGB, P.cpx.hbmGB, P.cpx.hbmGB, P.cpx.hbmGB], [P.cpx.hbmGB, P.cpx.hbmGB, P.cpx.hbmGB, P.cpx.hbmGB]]} scale="none" digits={0} note={("" + (P.cpx.poolGB) + " GB ÷ " + (P.cpx.perPool) + " = " + (P.cpx.hbmGB) + " GB each (" + (P.cpx.vramMiB.toLocaleString('en-US')) + " MiB).")} />
+    NPS2 splits the 8 HBM stacks into one pool per IOD. The 4 XCPs on IOD 0 take their memory only from its 4 stacks, so their traffic never crosses to the other IOD. In NPS1 each XCP would still get {P.cpx.hbmGB} GB, interleaved over all 8 stacks.
+  </WStep>
+  <WStep title={("4 · The node: " + (P.cpx.node) + " logical GPUs")}>
+    <Matrix title="amd-smi index of each logical GPU" rows={P.cardRows} cols={P.partCols} data={P.ids} scale="seq" digits={0} highlight={{ cells: [[0, 5]] }} />
+    8 cards × {P.cpx.parts} = **{P.cpx.node}** entries in `amd-smi list` and HIP, IDs 0 to {P.cpx.node - 1} (AMD documents the same for 8 × MI300X in CPX). Logical GPUs of one card share its PCI bus and device; the function digit tells them apart (for example `0000:2f:00.0` to `0000:2f:00.7` for card 1, following AMD's MI300X example). "GPU 5" now means card 0, XCP 5, not the sixth card: every index in metrics, `HIP_VISIBLE_DEVICES` and logs changes meaning.
+  </WStep>
+  <WStep title={("5 · Device files: all " + (P.preRender) + " render nodes in use")}>
+    <Kpis items={[
+      { label: 'Render nodes backed', value: ("" + (P.cpx.render) + " of " + (P.preRender)), tone: 'warn' },
+      { label: 'Card 0 (example)', value: P.renderRange(0), detail: 'primary + 7 spares today' },
+      { label: '/dev/kfd', value: '1', detail: 'still one for the node' },
+    ]} />
+    The driver already created these nodes at boot, even in SPX. In this example the 8 primaries are `renderD128` to `renderD135` and the 56 spares (`platform-amdgpu_xcp_*`) follow from `renderD136`; card 0's spares are `renderD136` to `renderD142`. Real hosts can number them differently, so map through `/dev/dri/by-path`. In CPX each of the 8 per card backs a logical GPU. A container must get the right one through CDI.
+  </WStep>
+  <WStep title={("6 · Kubernetes: " + (P.cpx.node) + " smaller devices")}>
+    <Kpis items={[
+      { label: 'ResourceSlice devices', value: ("" + (P.spx.node) + " → " + (P.cpx.node)), tone: 'primary' },
+      { label: 'computeUnits', value: ("" + (P.spx.cus) + " → " + (P.cpx.cus)) },
+      { label: 'memory', value: ("" + (P.cpx.vramMiB.toLocaleString('en-US')) + "Mi"), detail: ("was " + (P.vramMiB.toLocaleString('en-US')) + "Mi; expected") },
+      { label: 'partitionProfile', value: 'cpx_nps2', detail: 'expected value' },
+    ]} />
+    The DRA driver would republish the node's ResourceSlice with {P.cpx.node} devices, and every claim that selects on `computeUnits` or `memory` would match differently. The node labeller's labels (`amd.com/gpu.cu-count`, `beta.amd.com/gpu.vram.288G=8`) change too. The exact shape of a partitioned ResourceSlice is not verified here.
+  </WStep>
+  <WStep title="7 · What fits now">
+    <Kpis items={[
+      { label: '8B model, BF16', value: 'fits', detail: ("16 GB + " + (P.cpx.hbmGB - 16) + " GB for KV cache"), tone: 'good' },
+      { label: '70B model, FP8', value: 'does not fit', detail: ("70 GB > " + (P.cpx.hbmGB) + " GB"), tone: 'risk' },
+      { label: 'Copies of an 8B model', value: ("" + (P.cpx.node) + " per node"), detail: ("instead of " + (P.spx.node)) },
+    ]} />
+    A 70B model would need tensor parallelism across at least two partitions, which defeats the purpose. That arithmetic is why partitioning suits small models and many tenants, and why large models use whole GPUs.
+  </WStep>
+</Walkthrough>
+
+## What changes on the node
+
+**Device files and enumeration.** As in the [worked example](#worked-example-one-8-gpu-mi355x-node-in-cpx--nps2): the 64 pre-created render nodes (one primary plus 7 spare per GPU; 56 `amdgpu_xcp_*` platform devices) start backing logical GPUs, `/dev/kfd` stays one file, and `amd-smi list` and HIP list one entry per XCP, so **"GPU 5" in SPX is not "GPU 5" in CPX**.
+
+**Metrics.** AMD SMI treats XCP 0 as the **primary** partition: only it reports device-wide values such as board power. Other partitions report only their own utilization and clocks. Socket-level numbers (power, temperature) describe the whole card even when read through one partition.
+
+**Kubernetes.** The AMD DRA driver publishes each device with a `partitionProfile` attribute. On an unpartitioned MI355X every device reads:
+
+```yaml
+      partitionProfile: {string: spx_nps1}
+    capacity:
+      computeUnits: {value: "256"}
+      memory: {value: 294912Mi}
+```
+
+**Fault domains do not shrink.** Partitions share one package, one PSP, one power budget and one XGMI hive. A fault that resets the card resets every partition on it, and a hive reset still takes all 8 cards.
+
+## How a change is applied, and why it is disruptive
+
+From AMD's partitioning documentation:
+
+1. The GPU must be **idle**: no process on any partition of the physical GPU.
+2. Compute partition: `amd-smi set --compute-partition <mode>` (root). It takes effect without a reboot. AMD's MI300X guide notes the GPU returns to SPX after a reboot or driver reload unless something sets it again.
+3. Memory partition: `amd-smi set --memory-partition <mode>`, then a **driver reload** (`modprobe -r amdgpu && modprobe amdgpu`; `amd-smi reset -r` is not available in newer ROCm releases). The reload reconfigures **every GPU in the hive at once**.
+4. Re-enumerate: all old device handles and indexes are invalid.
+
+In Kubernetes, the AMD GPU Operator's **Device Config Manager** (DCM) automates this per node. Its documented flow, step by step (it runs only when `configManager.enable` is `true`; with it off, nothing can repartition a GPU in use):
+
+<Diagram spec={dcm} title="DCM repartitions one node (documented flow)">
+  <Step title="Before" focus="pods, gpu, slice">8 inference Pods run on 8 whole GPUs; the ResourceSlice lists 8 devices.</Step>
+  <Step title="1 · Taint: evict everything" path="op => k8s => pods" state={{ k8s: { detail: 'amd-dcm=up:NoExecute', tone: 'warn' }, pods: { detail: '0 running: evicted', tone: 'risk' } }}>The operator taints the node `amd-dcm=up:NoExecute`. Every GPU workload is evicted: the GPUs must be idle.</Step>
+  <Step title="2 · Label the profile" path="op => k8s => dcm" state={{ k8s: { detail: 'tainted + profile label', tone: 'warn' }, pods: { detail: '0 running', tone: 'risk' }, dcm: { detail: 'applying profile', tone: 'primary' } }}>The operator sets `dcm.amd.com/gpu-config-profile=<profile>`. DCM sees the label and starts.</Step>
+  <Step title="3 · Apply" path="dcm => gpu => slice" state={{ k8s: { detail: 'tainted + profile label', tone: 'warn' }, pods: { detail: '0 running', tone: 'risk' }, dcm: { detail: 'applying profile', tone: 'primary' }, gpu: { detail: 'repartitioning', tone: 'warn' }, slice: { detail: 'republishing', tone: 'warn' } }}>DCM sets the compute and memory modes; a memory-mode change reloads the driver for the whole hive. The DRA driver republishes the ResourceSlice with the new devices. A memory-mode change also reloads the driver.</Step>
+  <Step title="4 · Untaint" path="op => k8s => pods" state={{ k8s: { detail: 'no DCM taint' }, gpu: { detail: 'new mode', tone: 'sky' }, slice: { detail: 'e.g. 64 devices in CPX', tone: 'sky' }, pods: { detail: 'schedulable again', tone: 'good' } }}>The operator removes the taint. Pods schedule again, onto the new, smaller devices. A partition change is therefore a node maintenance operation, the same class as a driver upgrade.</Step>
+</Diagram>
+
+<Callout tone="warn" title="Never on a live node">Every `amd-smi set` and `amd-smi reset` command, and every DCM label change, evicts or kills GPU work. On a live node only read: `amd-smi partition`, `cat /sys/class/drm/card*/device/current_compute_partition` and `current_memory_partition`.</Callout>
+
+The read-only sysfs view, one line per GPU (example output for GPU 0):
+
+```text
+0000:11:00.0 compute=SPX mem=NPS1 avail_c=SPX, DPX, QPX, CPX avail_m=NPS1, NPS2
+```
+
+## NVIDIA: MIG, MPS and time-slicing
+
+### MIG (Multi-Instance GPU)
+
+MIG cuts a GPU into hardware-isolated **GPU instances**. The building blocks are slices: a **memory slice** is about 1/8 of the GPU's memory capacity and bandwidth (with its memory controllers and cache), an **SM slice** about 1/7 of the SMs. A GPU instance combines memory and SM slices plus copy and media engines; it can be split further into **compute instances** that share the instance's memory. Profiles are named `<compute slices>g.<memory>gb`.
+
+Supported GPU instance profiles on **B300 (288 GB)**, from NVIDIA's MIG guide:
+
+| Profile | Max instances | Memory | SMs |
+| --- | --- | --- | --- |
+| `1g.34gb` | 7 | 1/8 | 1/7 |
+| `1g.34gb+me` (with media engines) | 1 | 1/8 | 1/7 |
+| `1g.67gb` | 4 | 2/8 | 1/7 |
+| `2g.67gb` | 3 | 2/8 | 2/7 |
+| `3g.135gb` | 2 | 4/8 | 3/7 |
+| `4g.135gb` | 1 | 4/8 | 4/7 |
+| `7g.269gb` | 1 | full | full |
+
+The **GB300 (252 GB) product** listed in the guide, the GPU in DGX Station, has the same shape with `1g.31gb` up to `7g.251gb`. MIG profiles for the GB300 in NVL72 were not checked for this page.
+
+Operational facts from the guide:
+
+- Since Hopper, enabling MIG mode does **not** need a GPU reset. MIG mode is **not persistent across reboots**: it lasts while the driver is loaded, so something (the GPU Operator's MIG manager, a systemd unit) must set it at boot.
+- MIG devices are reached through extra device nodes under `/dev/nvidia-caps/`, which must also go into the container.
+- Peer-to-peer between MIG instances on one GPU works from driver R570.
+- Creating or destroying instances needs the affected instances idle; `nvidia-smi mig` commands do it.
+
+### MPS and time-slicing
+
+| Method | What is shared | Isolation |
+| --- | --- | --- |
+| **MIG** | nothing: own SMs, memory, cache, bandwidth | hardware; a fault in one instance does not affect the others (except whole-GPU faults) |
+| **MPS** (Multi-Process Service) | the GPU, concurrently, through one server process | separate address spaces, optional limits on SM share; memory bandwidth contended |
+| **Time-slicing** | the GPU, one process at a time in turns | none for memory capacity; the Kubernetes device plugin simply advertises one GPU several times |
+
+## AMD and NVIDIA side by side
+
+| | AMD MI355X | NVIDIA B300 / GB300 |
+| --- | --- | --- |
+| Unit of split | XCD (8 per card) | GPU slice (7 SM slices, 8 memory slices) |
+| Max logical GPUs | 8 (CPX) | 7 (`1g` profiles) |
+| Memory split | NPS1 or NPS2, by IOD | per instance, in eighths |
+| Mixed sizes on one card | no; all partitions in one mode are equal | yes, any valid placement of profiles |
+| Change compute layout | idle GPU, no reboot | idle instances, no reset on Hopper+ |
+| Change memory layout | driver reload, whole hive | part of the profile |
+| Persistence | compute resets to SPX on driver reload (per MI300X guide) | MIG mode lost on reboot |
+| Kubernetes automation | GPU Operator Device Config Manager | GPU Operator MIG manager |
+
+## Why this matters for operations
+
+- **Device count is a function of mode.** A node is "8 GPUs" only in SPX. Capacity planning, dashboards and claim templates must state the mode.
+- **Names move.** Index, render node and amd-smi ID change with the mode. Use PCI address plus partition ID when you correlate.
+- **Repartitioning is maintenance.** Drain, change, verify the ResourceSlice, uncordon. On AMD a memory-mode change reloads the driver for the whole hive.
+- **Isolation is partial.** Partitions protect against noisy neighbours in compute and memory capacity, not against card-level or hive-level faults.
+
+## Further reading
+
+- [AMD CDNA 4 white paper: compute and memory partitioning](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf) (pages 10–12)
+- [AMD SMI: GPU partitioning concepts](https://rocm.docs.amd.com/projects/amdsmi/en/latest/conceptual/partition.html) · [MI300X partitioning overview](https://instinct.docs.amd.com/projects/amdgpu-docs/en/latest/gpu-partitioning/mi300x/overview.html) · [quick start](https://instinct.docs.amd.com/projects/amdgpu-docs/en/latest/gpu-partitioning/mi300x/quick-start-guide.html)
+- [ROCm compatibility matrix: partitioning support](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html)
+- [AMD GPU Operator: applying partition profiles (DCM)](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/dcm/applying-partition-profiles.html)
+- [NVIDIA MIG user guide: concepts](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/concepts.html) · [supported profiles](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/supported-mig-profiles.html) · [getting started](https://docs.nvidia.com/datacenter/tesla/mig-user-guide/getting-started-with-mig.html)

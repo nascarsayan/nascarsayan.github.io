@@ -1,0 +1,26 @@
+---
+/**
+ * One step of a <Diagram>.
+ *   focus: ids lit for the whole step (`a`, `g.b`, `a -> b`, message ids), comma-separated.
+ *   path:  a round trip, `client -> switch -> proxy -> pod`. The request travels hop by
+ *          hop (senders wait, with typing dots), then the reply comes back the same way,
+ *          lighting each node; it replays until the step changes. A path that returns to
+ *          its start (`a -> b -> a`) carries its own reply. The far end's answer:
+ *          `pod` (2xx, default), `pod:404` / `pod:4xx`, `pod:503` / `pod:5xx`, or
+ *          `pod:hang` (it never answers). `a -x> b` drops the request on that hop.
+ *          `a => b` is one-way (nothing comes back). Each hop needs an edge between the
+ *          two nodes (either direction; against the arrow means travelling back).
+ *   state: how boxes and edges look during this step, when it differs from the drawing
+ *          (e.g. the healthy steps of a story drawn in its stalled state):
+ *          `{ m1: { tone: 'teal', detail: 'working' }, 'p1-m1': { tone: 'neutral' } }`.
+ *          Keys: tone, detail, tag (nodes), label, dashed (edges).
+ *   narration: lines for the narration bar, keyed by node: shown when the packet
+ *          reaches that node, e.g. `{ m1: 'The read blocks on the stalled mount' }`.
+ *          Without it the bar narrates each hop and the outcome on its own.
+ */
+export interface StepState { tone?: string; detail?: string; tag?: string; label?: string; dashed?: boolean }
+interface Props { focus?: string; path?: string; title?: string; state?: Record<string, StepState>; narration?: Record<string, string> }
+const { focus = '', path, title, state, narration } = Astro.props;
+---
+
+<li class="dg-step" data-focus={focus} data-path={path} data-state={state && Object.keys(state).length ? JSON.stringify(state) : undefined} data-say={narration && Object.keys(narration).length ? JSON.stringify(narration) : undefined}>{title && <strong class="dg-step-title">{title}</strong>}<slot /></li>

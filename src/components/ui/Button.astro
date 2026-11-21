@@ -1,0 +1,66 @@
+---
+/**
+ * Solid call-to-action button with an inset "icon well" on the left.
+ *   [ ↓ |      Show more      ]
+ */
+import Icon from '@/components/icons/Icon.astro';
+interface Props {
+  href?: string;
+  type?: 'button' | 'submit';
+  icon?: 'arrow-down' | 'arrow-right';
+  class?: string;
+  [k: string]: any;
+}
+const { href, type = 'button', icon = 'arrow-down', class: className, ...rest } = Astro.props;
+const Tag = href ? 'a' : 'button';
+---
+
+<Tag href={href} type={href ? undefined : type} class:list={['cta', className]} {...rest}>
+  <span class="well" aria-hidden="true">
+    <span class="well-inner">
+      <Icon name={icon} size={20} />
+    </span>
+  </span>
+  <span class="label"><slot /></span>
+</Tag>
+
+<style>
+  .cta {
+    display: inline-flex;
+    align-items: center;
+    min-width: 250px;
+    height: 42px;
+    padding: 0;
+    border-radius: 4px;
+    background: var(--color-cta-bg);
+    color: rgb(255 255 255);
+    font-size: 1rem;
+    text-decoration: none;
+    transition: background 200ms;
+  }
+  .well {
+    order: 1;
+    display: grid;
+    place-content: center;
+    width: 42px;
+    height: 42px;
+    transition: transform 200ms cubic-bezier(0, 0.67, 0.6, 1.24);
+  }
+  .well-inner {
+    display: grid;
+    place-content: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 2px;
+    background: var(--color-cta-well);
+  }
+  .label {
+    order: 2;
+    flex: 1;
+    padding: 0 20px 0 16px;
+    font-weight: var(--font-weight-medium);
+    line-height: 1.5;
+    text-align: center;
+  }
+  .cta:active .well { transform: scale(0.92); }
+</style>

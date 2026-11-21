@@ -1,0 +1,83 @@
+---
+/**
+ * A small labelled matrix (or vector) with heatmap colouring, for worked
+ * examples.
+ *
+ *   <Matrix title="Scores Q·Kᵀ/√d" rows={['The','GPU']} cols={['The','GPU']}
+ *     data={[[0.5, null], [0.2, 1.1]]} scale="seq" highlight={{ rows: [1] }} />
+ *
+ * - `data`: numbers; `null` is a masked cell, shown as −∞ in grey.
+ * - `scale`: `seq` (light → strong, for weights and scores), `div` (negative
+ *   red, positive blue, for raw vectors), or `none`.
+ * - `highlight`: rows, cols or [row, col] cells drawn with a strong outline;
+ *   everything else dims slightly when anything is highlighted.
+ * - `digits`: decimals shown (default 2). `note`: a line under the grid.
+ */
+interface Props {
+  title?: string;
+  rows?: string[];
+  cols?: string[];
+  data: (number | null)[][];
+  scale?: 'seq' | 'div' | 'none';
+  digits?: number;
+  highlight?: { rows?: number[]; cols?: number[]; cells?: [number, number][] };
+  note?: string;
+  /** Suffix for the row-label column header, e.g. "token". */
+  corner?: string;
+}
+const { title, rows, cols, data, scale = 'seq', digits = 2, highlight, note, corner = '' } = Astro.props;
+const nums = data.flat().filter((v): v is number => typeof v === 'number');
+const max = Math.max(...nums.map(Math.abs), 1e-9);
+const min = Math.min(...nums);
+const top = Math.max(...nums);
+const hiR = new Set(highlight?.rows ?? []);
+const hiC = new Set(highlight?.cols ?? []);
+const hiX = new Set((highlight?.cells ?? []).map(([r, c]) => `${r},${c}`));
+const anyHi = hiR.size + hiC.size + hiX.size > 0;
+const isHi = (r: number, c: number) => hiR.has(r) || hiC.has(c) || hiX.has(`${r},${c}`);
+const bg = (v: number | null) => {
+  if (v === null || scale === 'none') return '';
+  if (scale === 'div') {
+    const t = Math.min(1, Math.abs(v) / max);
+    return `background: color-mix(in srgb, ${v < 0 ? 'var(--mx-neg)' : 'var(--mx-pos)'} ${Math.round(t * 70)}%, transparent)`;
+  }
+  const t = top === min ? 1 : (v - min) / (top - min);
+  return `background: color-mix(in srgb, var(--mx-pos) ${Math.round(8 + t * 72)}%, transparent)`;
+};
+const fmt = (v: number | null) => (v === null ? '−∞' : v.toFixed(digits).replace('-', '−'));
+---
+
+<figure class="mx" class:list={[{ 'mx-dim': anyHi }]}>
+  {title && <figcaption class="mx-title" set:html={title} />}
+  <div class="mx-scroll">
+    <table>
+      {cols && (
+        <thead><tr>{rows && <th class="mx-corner">{corner}</th>}{cols.map((c, j) => <th class:list={[{ 'mx-hi-h': hiC.has(j) }]}>{c}</th>)}</tr></thead>
+      )}
+      <tbody>
+        {data.map((row, i) => (
+          <tr>
+            {rows && <th scope="row" class:list={[{ 'mx-hi-h': hiR.has(i) }]}>{rows[i]}</th>}
+            {row.map((v, j) => <td class:list={[{ 'mx-mask': v === null, 'mx-hi': isHi(i, j) }]} style={bg(v)}>{fmt(v)}</td>)}
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+  {note && <p class="mx-note" set:html={note} />}
+</figure>
+
+<style>
+  .mx { --mx-pos: #3b82f6; --mx-neg: #e5484d; display: inline-block; margin: 0 16px 12px 0; vertical-align: top; }
+  .mx-title { margin-bottom: 4px; font-size: 0.8125rem; font-weight: var(--font-weight-bold); color: var(--color-gray-800); }
+  .mx-scroll { overflow-x: auto; }
+  table { border-collapse: separate; border-spacing: 2px; font-variant-numeric: tabular-nums; font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.8125rem; }
+  .mx th { padding: 2px 8px; font-weight: 600; font-size: 0.75rem; text-transform: none; letter-spacing: 0; border: 0; color: var(--color-gray-700); text-align: center; white-space: nowrap; }
+  th[scope='row'] { text-align: right; }
+  .mx td { min-width: 46px; border: 0; padding: 4px 6px; text-align: right; border-radius: 4px; color: var(--color-text); background: var(--color-gray-100); transition: opacity 150ms; }
+  td.mx-mask { color: var(--color-gray-500); background: repeating-linear-gradient(45deg, var(--color-gray-100), var(--color-gray-100) 4px, transparent 4px, transparent 8px); text-align: center; }
+  .mx-dim td:not(.mx-hi) { opacity: 0.45; }
+  td.mx-hi { outline: 2px solid var(--color-primary); outline-offset: -1px; font-weight: 700; }
+  th.mx-hi-h { color: var(--color-primary); }
+  .mx-note { margin-top: 4px; max-width: 420px; font-size: 0.75rem; color: var(--color-muted); }
+</style>

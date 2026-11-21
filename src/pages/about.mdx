@@ -1,0 +1,166 @@
+---
+layout: ../layouts/ArticleLayout.astro
+title: Sayan Naskar
+eyebrow: About
+subtitle: Platform engineer · Tool tinkerer · India
+description: "Sayan Naskar — platform engineer. Kubernetes clusters, and the tools around them."
+updated: "2026-11-21"
+links:
+  - { label: "Download PDF", href: "/about/resume.pdf" }
+  - { label: "nascarsayan@gmail.com", href: "mailto:nascarsayan@gmail.com" }
+  - { label: "github.com/nascarsayan", href: "https://github.com/nascarsayan" }
+  - { label: "linkedin.com/in/nascarsayan", href: "https://www.linkedin.com/in/nascarsayan/" }
+---
+import Timeline from '@/components/content/Timeline.astro';
+import TimelineItem from '@/components/content/TimelineItem.astro';
+import Cards from '@/components/content/Cards.astro';
+import Card from '@/components/content/Card.astro';
+import Badge from '@/components/content/Badge.astro';
+import Fold from '@/components/content/Fold.astro';
+
+Cluster platform at Cerebras, lately GPUs. Use AI effectively to constantly switch to new priority deliverables. Always improving guardrails, hooks and helpers so agents follow rules by design, not skills alone: automate the AI away. Every fix, experiment or feature gets a validation harness: one fast binary, deterministic runs on real or simulated systems. Lean tools over bloated ones (Rust, Go, TypeScript), with real UX care, even CLIs. Currently learning deep learning, LLMs and GPUs from first principles.
+
+## Experience
+
+<Timeline>
+<TimelineItem when="Aug 2025 – Present" title="Cerebras Systems · Software Engineer, Cluster Platform" tone="primary">
+
+<Badge>k8s</Badge> <Badge>Helm</Badge> <Badge>Argo CD</Badge> <Badge>Go</Badge> <Badge>Rust</Badge> <Badge>Ceph</Badge> <Badge>Akeyless</Badge> <Badge>Envoy Gateway</Badge> <Badge>NVIDIA GPU Operator</Badge>
+
+- Owned **Akeyless secrets management** end to end: automated install, injector delivery, safe across blue-green upgrades and domain changes. Scale-tested to **2,000 pods**; on-call runbooks.
+- Moved core services off imperative installs to **Helm + Argo** (the cluster's control-plane service, the workload operator, a network health-check mesh, an admission webhook → Kyverno). Built a **Kubernetes state-diff tool** (Go) + parity harness proving both installs match.
+- **Blue-green upgrades**: per-batch node groups, clear failure states, safe cancel, no duplicate runs.
+- Built the **node readiness controller** + coordinated containerd/kubelet restarts; fixed Ceph restarts corrupting CephFS mounts; NGINX → Envoy Gateway; registry health checks via HAProxy.
+- **GPU bring-up for disaggregated inference**: NVIDIA GPU Operator as a platform app, ARM64 ports for DGX Spark, simulated NVL72 racks to test without hardware, AMD MI355X node onboarding.
+- Team agent skill for Argo conversions (+3k lines) and a guide to common AI conversion mistakes; drive Claude/Codex across tickets, PRs and CI with parallel agents and adversarial AI reviews.
+- 70+ merged PRs, ~370 commits, 100+ tickets, 70+ design docs and runbooks in 15 months.
+
+<Fold summary="More detail">
+
+- **Secrets:** packaged Akeyless as a platform app with conditional install; moved services from basic-auth secrets to injector sidecars; gateway and webhook replicas scale with cluster size; injector metrics, log persistence and rotation. Secret paths migrate when a cluster changes its service domain, and auth bindings survive blue-green upgrades. Scale tests at 1.5–2k pods surfaced slow gateway rollouts, which I took to the vendor.
+- **GitOps:** the control-plane service converted in a stacked series of PRs, installer steps moved into Helm hooks; the workload operator from kustomize to Helm + ApplicationSet; cert-manager chart; Kyverno policies replaced a homegrown webhook (net −2k lines); pinned Helm 3.11 → 3.18.
+- **State-diff tool:** snapshots a whole cluster (2,300+ objects) and sorts every difference into noise, expected or wrong. Teammates run it on both sides of big PRs. Paired with greenfield and brownfield regression harnesses on a test cluster.
+- **Upgrades:** node-group-aware session migration, detach/attach across node categories, cancel that leaves nothing behind, PTYs for k8s commands so retries don't orphan processes, monitoring data carried across Ceph migration.
+- **Reliability:** readiness controller plus a reporter DaemonSet checking Ceph, containerd and NIC speed, with liveness alerts and a runbook; a gate that catches NICs stuck on downgraded PCIe links; registry backends pulled from rotation when storage stalls; RCAs for filling volumes, NFS mount hangs and unreachable artifact stores.
+- **GPUs:** GPU operator upgrade test plan, NVSentinel in monitor mode, ARM64 worker fixes from the DGX Spark bring-up, multi-arch builds for Multus and the ping mesh, LLM prefill benchmarks, and an AMD vs NVIDIA operator mapping for the team.
+- **Writing:** 70+ wiki pages: proposals, scale-test reports, runbooks, and a guide to the mistakes AI makes when converting installers to Argo.
+
+</Fold>
+
+</TimelineItem>
+<TimelineItem when="Jul 2020 – Jul 2025" title="Microsoft · Software Engineer II, Azure Arc" tone="note">
+
+<Badge>Go</Badge> <Badge>k8s</Badge> <Badge>C# / .NET</Badge> <Badge>PowerShell</Badge> <Badge>Azure</Badge> <Badge>VMware</Badge> <Badge>Prometheus / Grafana</Badge>
+
+- Core dev on the **k8s operator behind Azure Arc for VMware and SCVMM**, first commit to **GA (Nov 2023)**. Inventory sync 36 → 9 min; guest-agent install failures halved via SSH/WinRM fallbacks.
+- Onboarded 30+ customers (2,000+ VMs), success **65% → 92%**. Fixed vCenter session leak [upstream in CAPV](https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/pull/2235); owned the [Azure CLI extensions](https://github.com/Azure/azure-cli-extensions/tree/main/src/connectedvmware) and onboarding scripts; mentored two interns.
+
+<Fold summary="More detail">
+
+- Moved the SCVMM operator to a separate gRPC service in .NET; generated PowerShell from Go structs via reflection so filtering happens at the edge (10x less network traffic, 30% less memory).
+- Load tests with pprof and Grafana dashboards for operator health; SSH and PowerShell-remoting fallbacks when VMware Tools fails to install the guest agent.
+- Unblocked a $105K customer whose vCenter IP clashed with the pod CIDR, with an L7 proxy workaround built alongside a cloud architect. Rebuilt customer networks in the lab (NSX, iptables, Squid proxies, AD) to reproduce issues.
+- Found inode exhaustion and a vCenter session leak in the Arc appliance; [reported](https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/issues/2066) and fixed upstream. Designed the KMS plugin for encrypting etcd secrets at rest.
+- Ported onboarding scripts from PowerShell/Bash to TypeScript for the Azure portal; maintained the [onboarding, batch-install and deboarding scripts](https://github.com/Azure/azure-arc-for-vmware-scripts). Last stint: software end-of-life detection for Azure Migrate.
+
+</Fold>
+
+</TimelineItem>
+</Timeline>
+
+## Things I built
+
+### Personal developer CLI
+
+Single Rust CLI (~50k lines, 230+ commits) replacing my pile of shell and Python scripts: worktree per branch, ssh picker carrying my shell to any cluster node, CI results fed back to agents, Claude Code ↔ chat bridge, agent guardrail hooks, prompt archive with secret redaction.
+
+<Badge tone="primary">Rust</Badge> <Badge tone="primary">systemd</Badge> <Badge tone="primary">chat bot API</Badge> <Badge tone="primary">Claude Code hooks</Badge>
+
+<Fold summary="More detail">
+
+- `repos`: bare clone plus a worktree per branch; PR numbers work as branch names; idle worktrees fold away.
+- `ssh cluster`: fzf picker over every cluster, shared connections, my own zsh and tools on any node without touching root's dotfiles; only changed files upload.
+- `cc`: mirrors Claude Code sessions to a chat DM so I can steer them from my phone; command grammar built for a phone keyboard (no dashes, no bangs).
+- `ci watch`, `git review`: CI results and PR review threads synced into local files agents can read.
+- `hooks`: ~15 guardrails for agents: steer to rg/fd, block /tmp writes, gitleaks before commits, never rewrite pushed branches.
+- `apps`, `job`: ~60 pinned tools for amd64 and arm64; daily jobs for dotfiles, shared shell history with secrets templated out, cleanup. One systemd daemon supervises it all; `upgrade` lints, tests, rebuilds and swaps its own binary.
+- Started as zsh functions and Python; rewrote in Rust for speed and zero interpreters.
+
+</Fold>
+
+### Docs site + diagram framework
+
+Built in a week to explain clusters: typed specs, auto layout, animated step-through flows. 150 diagrams: reviews, incidents, GPU explainers; teammates cloned it.
+
+<Badge tone="primary">Astro</Badge> <Badge tone="primary">TypeScript</Badge> <Badge tone="primary">Go (TALA layout)</Badge> <Badge tone="primary">Bun</Badge>
+
+<Fold summary="More detail">
+
+- Diagrams are typed TypeScript specs; a Go tool (TALA) lays them out with real font metrics, and the build fails on dangling references or diagrams that would need scrolling.
+- Step-through walkthroughs with play/next, packets colored by response (2xx, 4xx, 5xx, hang), speed control and narration.
+- 30+ components: explorers, decision trees, matrices, scrollytelling, terminal replays. Plus a comments server, search, glossary with shareable links, light/dark, and wiki export.
+- Used for a before/after flow atlas of the control-plane service, Helm → Argo reviews, an incident write-up, GPU operator comparisons and simulated NVL72 racks.
+
+</Fold>
+
+### Smaller tools
+
+VSCode extensions easing review of agent diffs and large core refactors, zero-dependency Raycast-style Chrome launcher, Rust live-dataviz server, a few apps for friends.
+
+<Badge tone="primary">TypeScript</Badge> <Badge tone="primary">JavaScript</Badge> <Badge tone="primary">Rust</Badge>
+
+<Fold summary="More detail">
+
+- **idiff**: groups a refactor's diff into sections and exports review bundles pinned to commits. **worktree-diff**: review any git worktree in VSCode's multi-file diff and leave comments for agents.
+- **Chrome launcher**: fuzzy search over tabs, history and bookmarks; `>pr`, `>ticket`, `>wiki` commands over a pre-built index; plain JS, no build step.
+- **dataviz**: server-rendered tables and charts over a WebSocket, one tiny client script, strict schema checks. **box**: rootless dev sandbox on nix.
+- For friends: a [driving-test trainer](https://github.com/nascarsayan/driving-mcqs) (431 questions), a peer-to-peer word duel, a hotel-catalogue → map pipeline.
+
+</Fold>
+
+## Earlier
+
+<Timeline>
+<TimelineItem when="2016–19" title="Dhanotree · Founding engineer">
+
+College startup; built and sold a pharmacy POS (Vue, React, Node, GraphQL); ran our own infra on DigitalOcean: git, chat and mail servers, nginx, Let's Encrypt, serverless sites.
+
+</TimelineItem>
+<TimelineItem when="2019" title="Samsung R&D · Intern">
+
+Web app and CLI to view and version image-annotation datasets with git.
+
+</TimelineItem>
+</Timeline>
+
+## Education & skills
+
+<Cards>
+<Card title="Education" tag="2015–2020" tone="primary">
+
+IIT Kharagpur — Dual Degree (B.Tech + M.Tech), Computer Science
+
+</Card>
+<Card title="Languages">
+
+Go, Rust, TypeScript, C#, PowerShell, Python
+
+</Card>
+<Card title="Platform">
+
+Kubernetes (k8s), Helm, Argo CD, Envoy, Ceph, Prometheus, Grafana, Azure
+
+</Card>
+<Card title="Tooling">
+
+Claude Code, Codex, Astro, React, Vue, Node, Bun, VSCode extensions
+
+</Card>
+<Card title="Certifications" tone="good">
+
+Cisco CCNA Routing & Switching, CCENT
+
+</Card>
+</Cards>
+
+The [PDF](/about/resume.pdf) is a printable copy of this page. Last updated Nov 2026.

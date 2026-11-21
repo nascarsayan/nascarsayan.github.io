@@ -1,0 +1,152 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Prefill: reading the prompt"
+short: "Prefill"
+description: "Prefill runs every prompt token through the model in one pass, fills the KV cache and sets time to first token. One prefill worked through with numbers, the FLOP formula with a calculator, why it is compute-bound, chunked prefill of a 30,000-token prompt, and head-of-line blocking."
+updated: "2026-11-10"
+track: inference
+order: 5
+requires: [attention-and-kv-cache, kv-cache-management, mixture-of-experts]
+eyebrow: "Learn · LLM inference"
+links:
+  - { label: "Sarathi-Serve (chunked prefill)", href: "https://arxiv.org/abs/2403.02310" }
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Bars from './_Bars.astro';
+import PrefillCalc from './_PrefillCalc.astro';
+import idea from './_idea.diagram';
+import * as ex from './_example';
+
+**Prefill** is the first forward pass of a request: the whole prompt goes through the model at once. It runs once per request, before [decode](/learn/decode-phase/) generates the answer. In a disaggregated server, prefill and decode even run on separate pools of machines.
+
+## The idea
+
+Think of a support engineer handed a long ticket. Before replying, they read the whole ticket once and jot a margin note next to every line ("this is the error", "this is the node name"). Then they write the answer, glancing at the notes instead of rereading the ticket.
+
+- **Reading the whole ticket at once** is prefill. Every prompt token is known up front, so nothing forces the model to go one token at a time: it pushes all of them through each layer together.
+- **The margin notes** are the [KV cache](/learn/attention-and-kv-cache/): a key and a value for every prompt token in every layer. Decode reads these notes at every step instead of recomputing the prompt.
+- **The first word of the reply** is the first output token, predicted from the last prompt position. The wait until it appears is **time to first token (TTFT)**.
+
+Where the analogy breaks: a person reads a short ticket faster than a long one. A GPU barely does. Much of its cost is reading the *model's weights* from memory, and that happens once per layer whether the prompt is 30 tokens or 3,000. So prefill is efficient only when many tokens share each weight read. That is the performance story of this page.
+
+<Diagram spec={idea} title="What prefill is for" mode="build" caption="Prefill does two jobs: fill the KV cache and predict the first output token.">
+  <Step focus="prompt">The prompt arrives complete: all its tokens are known.</Step>
+  <Step path="prompt => pass">All prompt tokens go through each of the 36 layers together, as one matrix.</Step>
+  <Step path="pass => kv">Each layer writes the K and V of every prompt token: the notes decode will need.</Step>
+  <Step path="pass => first">The last position's output picks the first new token.</Step>
+  <Step path="kv => dec" focus="first, first -> dec">Decode takes over and reads the KV cache every step.</Step>
+</Diagram>
+
+## One prefill, worked through
+
+An illustrative request on one MI355X: a **{ex.n(ex.m.prompt_tokens)}-token prompt** whose first **{ex.n(ex.m.cached_tokens)}** tokens (two 128-token blocks: the shared start of a chat template) are already in the [prefix cache](/learn/kv-cache-management/). Only **{ex.n(ex.m.uncached_tokens)}** tokens must be computed.
+
+<Kpis items={[
+  { label: 'Linear layers', value: ex.T(ex.mf.lin), detail: ("" + (ex.n(ex.m.uncached_tokens)) + " tokens × 9 GFLOP") },
+  { label: 'Attention', value: ex.T(ex.mf.full + ex.mf.slide), detail: 'new tokens × context seen', tone: 'primary' },
+  { label: 'At peak (5 PFLOP/s)', value: ex.ms(ex.mf.total / ex.PEAK), tone: 'good' },
+  { label: ("At " + (ex.pct(ex.MFU)) + " of peak"), value: ex.ms(ex.mf.total / (ex.PEAK * ex.MFU)), detail: 'a more realistic share', tone: 'note' },
+]} />
+
+1. **Wait.** The engine looks up the prefix cache and schedules the request into the next step. If another request is mid-prefill, this is where the time goes.
+2. **Forward pass.** All {ex.n(ex.m.uncached_tokens)} new tokens go through 36 layers together and attend to the {ex.n(ex.m.cached_tokens)} cached ones.
+3. **KV written.** Every layer stores the K and V of every new token: about {ex.MiB(ex.kvBytes(ex.m.prompt_tokens))} for the whole prompt (window-aware, 16-bit). A disaggregated server ships this to the decode side, usually layer by layer while later layers still compute.
+4. **First token.** The last position's logits pick the first output token, and decode takes over.
+
+A 30-token prompt costs far less math but not proportionally less time: that near-fixed floor is explained in [the small-prompt floor](#the-small-prompt-floor).
+
+## Why prefill is one big parallel pass
+
+All $$n$$ prompt tokens move through each layer **together**, as an $$n \times 2{,}880$$ matrix:
+
+- each weight matrix is read from memory **once** per layer and used for all $$n$$ tokens: matrix × matrix multiplies (GEMMs);
+- attention computes an $$n \times n$$ score matrix per head (FlashAttention does it tile by tile without storing it; see [kernels](/learn/llm-kernels/)). The causal mask stops each position from seeing later ones, so the parallel pass gives the same result as going one token at a time.
+
+Reusing each weight byte for thousands of tokens is what makes prefill **compute-bound** on a GPU, unlike [decode](/learn/decode-phase/).
+
+## The compute cost, worked out
+
+$$
+\begin{aligned}
+\text{prefill FLOPs} \;\approx\;& 2 \times \text{active non-embedding parameters} \times \text{new tokens} && \text{(linear layers)} \\
+&+ 4 \times \text{query heads} \times \text{head size} \times \textstyle\sum \text{context seen} && \text{(attention, per layer)}
+\end{aligned}
+$$
+
+For gpt-oss-120b ([details](/learn/tokens-and-transformers/)): about **9 GFLOP per token** in linear layers, plus 4 × 64 × 64 = 16,384 FLOPs per token per unit of context per layer. In the 18 **full** layers a causal prompt of $$n$$ tokens sees about $$n^2/2$$ tokens in total; in the 18 **sliding** layers at most 128 per token. Try it:
+
+<PrefillCalc />
+
+What to read from it:
+
+- **Linear cost grows with $$n$$; attention with $$n^2$$.** At 4k tokens attention is about 6% of the work; at 32k about a third; at 131k it dominates.
+- **Real speed is well below spec.** Long prompts typically reach a modest fraction of peak. Part of the gap is real (attention runs in 16-bit, whose peak is half; MoE routing and kernel launches add overhead), part is that peaks are never reached. The share of peak a workload uses is **MFU**, model FLOPs utilization.
+- **Dense models cost far more.** Llama 3.3 70B needs about 140 GFLOP per token, so a 4k prompt is about 570 TFLOP before attention.
+
+### The small-prompt floor
+
+The formula says a 200-token prompt needs under 2 TFLOP: under a millisecond at peak. In practice a short prefill takes tens of milliseconds. For an MoE model a short prompt gives each expert only a handful of tokens, so the step is limited by **reading the weights** (about 61 GB of experts at ~8 TB/s ≈ 7.6 ms), plus fixed per-request overhead (scheduling, kernel launches, sampling). See [Mixture of experts](/learn/mixture-of-experts/#what-it-means-for-short-prompts). Prefill is compute-bound only once a step holds a few thousand tokens.
+
+## TTFT: what the user waits for
+
+$$
+\text{TTFT} \;\approx\; \text{queue wait} + \text{prefill compute} + \text{first token's sampling} + \text{network}
+$$
+
+In a disaggregated server it also includes shipping the KV to the decode side and the first decode step. vLLM exports the parts it can see: `vllm:request_queue_time_seconds`, `vllm:request_prefill_time_seconds` and `vllm:time_to_first_token_seconds`. The user-visible TTFT adds the network and anything in front of the engine.
+
+## Chunked prefill: a 30,000-token prompt in four steps
+
+A 100k-token prompt in one step would occupy the GPU for seconds and need a lot of activation memory. **Chunked prefill** caps the tokens per engine step (vLLM's `max_num_batched_tokens`). Each chunk computes Q, K, V for its tokens, attends to its own tokens **and to the KV of all earlier chunks**, and appends its K and V. The result is identical to one big pass. With a budget of {ex.n(ex.BUDGET)} tokens:
+
+<Walkthrough title={("Chunked prefill of " + (ex.n(ex.long.prompt_tokens)) + " tokens (budget " + (ex.n(ex.BUDGET)) + ")")} caption="FLOPs from the formula above, gpt-oss-120b. Times are at spec-sheet peak; real steps are slower.">
+  {ex.chunks.map((c) => (
+    <WStep title={("" + (c.i) + " · Chunk " + (c.i) + ": tokens " + (ex.n(c.from + 1)) + "–" + (ex.n(c.to)))}>
+      <Bars max={ex.long.prompt_tokens} unit="tokens" ticks={[0, 8192, 16384, 24576, 30000]} rows={ex.chunkBar(c.i)} />
+      <table>
+        <thead><tr><th>New tokens</th><th>Context attended</th><th>Linear</th><th>Attention</th><th>Attention share</th><th>Time at peak</th></tr></thead>
+        <tbody><tr><td>{ex.n(c.tokens)}</td><td>up to {ex.n(c.to)}</td><td>{ex.T(c.flops.lin)}</td><td>{ex.T(c.flops.full + c.flops.slide)}</td><td>{ex.pct(c.attShare)}</td><td>{ex.ms(c.flops.total / ex.PEAK)}</td></tr></tbody>
+      </table>
+      {c.i === 1 && <p>The first chunk attends only to itself. Its K and V go into the cache (blue in the next steps).</p>}
+      {c.i > 1 && c.i < ex.chunks.length && <p>Same {ex.n(ex.BUDGET)} new tokens, but they also attend to the {ex.n(c.from)} cached ones, so attention work rises chunk by chunk while linear work stays flat.</p>}
+      {c.i === ex.chunks.length && <p>The last chunk is the remainder: {ex.n(ex.BUDGET)} × {ex.chunks.length - 1} + {ex.n(c.tokens)} = {ex.n(ex.long.prompt_tokens)}. Fewer new tokens, the longest context.</p>}
+    </WStep>
+  ))}
+</Walkthrough>
+
+In total: {ex.T(ex.longF.total)}, {ex.ms(ex.longF.total / ex.PEAK)} at peak. The cost of chunking: later chunks are slower because they attend to more context, and total work rises slightly. The gain: each step is bounded, so a long prompt cannot freeze the engine.
+
+### Head-of-line blocking
+
+The scheduler fills each step's token budget in arrival order. Short requests that arrive behind a chunked long prompt wait: a 200-token prompt that needs a few milliseconds of compute can wait hundreds of milliseconds while the long prompt's chunks go first, and then finish in the same step as the long prompt's last chunk. Chunking bounds each *step*; it does not let a short request jump the queue. Mitigations are policy: a smaller budget, priority for short prompts, or separate replicas for long prompts ([Batching and scheduling](/learn/batching-and-scheduling/)).
+
+In an aggregated server chunked prefill matters even more: vLLM schedules running decodes first and fills the rest of the step with prefill chunks, so a smaller budget protects decode latency and a larger one improves TTFT ([vLLM optimization guide](https://docs.vllm.ai/en/latest/configuration/optimization.html)).
+
+## Prefix caching cuts the work
+
+Only **uncached** tokens are computed. With chat templates, system prompts and multi-turn conversations, a large share of prompt tokens can come from the prefix cache (vLLM counts them in `vllm:prompt_tokens_by_source_total`). Cached tokens still cost attention, because new tokens attend to them, but no linear-layer work. Mechanism and counters: [KV cache management](/learn/kv-cache-management/).
+
+<Callout tone="note" title="How this shows up when operating a server">
+- Long prompts raise everyone's TTFT on that replica (head-of-line). A latency spike with no hardware signal is often traffic shape, not a GPU problem.
+- A prefill-only server samples one token per request and stops, so its generation-token counter equals its request count.
+</Callout>
+
+## Common misconceptions
+
+- **"Prefill is cheap because it is just reading."** It is most of the FLOPs of a typical chat request: a 2,700-token prompt costs ~25 TFLOP, while generating 300 tokens costs about 3 TFLOP of linear work (but much more memory traffic).
+- **"TTFT is proportional to prompt length."** Only above a few thousand tokens. Below that a near-fixed floor dominates, and cached tokens are nearly free.
+- **"Chunked prefill makes prefill faster."** It makes each step shorter and memory-bounded; total work slightly increases.
+
+## Further reading
+
+- [Sarathi-Serve: taming throughput-latency tradeoff with chunked prefills](https://arxiv.org/abs/2403.02310)
+- [vLLM optimization and tuning](https://docs.vllm.ai/en/latest/configuration/optimization.html) (chunked prefill, `max_num_batched_tokens`)
+- [vLLM metrics](https://docs.vllm.ai/en/latest/usage/metrics.html)
+- [FlashAttention](https://arxiv.org/abs/2205.14135)
+- [DistServe](https://arxiv.org/abs/2401.09670) (why separating prefill and decode helps TTFT and ITL)
+- [AMD Instinct MI355X specifications](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html)

@@ -1,0 +1,66 @@
+---
+/**
+ * Timeline of the amdgpu probe from illustrative kernel-log stamps (see _probe.ts).
+ *   <ProbeGantt />                  all 8 GPUs, 0 to 40 s after kernel start
+ *   <ProbeGantt gpu={0} upto={1} /> one GPU zoomed in; phases after `upto` greyed
+ */
+import { probes, phases, moduleLoaded, fmt } from './_probe';
+interface Props { gpu?: number; upto?: number }
+const { gpu, upto = 99 } = Astro.props;
+const zoom = gpu !== undefined;
+const list = zoom ? [{ p: probes[gpu!], i: gpu! }] : probes.map((p, i) => ({ p, i }));
+const t0 = zoom ? moduleLoaded : 0;
+const t1 = zoom ? probes[gpu!].kfd + 0.15 : 40;
+const x = (t: number) => `${(((t - t0) / (t1 - t0)) * 100).toFixed(2)}%`;
+const w = (a: number, b: number) => `${Math.max(0.4, ((b - a) / (t1 - t0)) * 100).toFixed(2)}%`;
+const ticks = zoom
+  ? [7.5, 8, 8.5, 9, 9.5, 10, 10.5].filter((t) => t < t1)
+  : [0, 5, 10, 15, 20, 25, 30, 35, 40];
+const tone = ['pg-a', 'pg-b', 'pg-c', 'pg-d'];
+---
+
+<figure class="pg">
+  <div class="pg-legend">
+    {phases(probes[0]).map((ph, k) => <span class:list={['pg-key', tone[k], { 'pg-off': zoom && k > upto }]}><i></i>{ph.label}</span>)}
+  </div>
+  <div class="pg-rows">
+    {list.map(({ p, i }) => (
+      <div class="pg-row">
+        <span class="pg-name">GPU {i} <code>{p.bdf}</code></span>
+        <span class="pg-track">
+          {phases(p).map((ph, k) => (
+            <span class:list={['pg-bar', tone[k], { 'pg-off': zoom && k > upto }]} style={`left:${x(ph.from)};width:${w(ph.from, ph.to)}`} title={`${ph.label}: ${fmt.sec(ph.from)} → ${fmt.sec(ph.to)} s`}>
+              {zoom && <em>{fmt.sec(ph.to - ph.from)} s</em>}
+            </span>
+          ))}
+        </span>
+      </div>
+    ))}
+    <div class="pg-row pg-axis">
+      <span class="pg-name">seconds since kernel start</span>
+      <span class="pg-track">{ticks.map((t) => <span class="pg-tick" style={`left:${x(t)}`}>{t}</span>)}</span>
+    </div>
+  </div>
+</figure>
+
+<style>
+  .pg { margin: 8px 0 14px; font-size: 0.8125rem; }
+  .pg-legend { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 8px; }
+  .pg-key { display: inline-flex; align-items: center; gap: 5px; }
+  .pg-key i { width: 12px; height: 12px; border-radius: 3px; background: var(--pg); }
+  .pg-rows { display: grid; gap: 4px; }
+  .pg-row { display: grid; grid-template-columns: 190px 1fr; align-items: center; gap: 8px; }
+  .pg-name { white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .pg-name code { font-size: 0.75rem; }
+  .pg-track { position: relative; height: 22px; border-radius: 6px; background: var(--color-cloud-100); }
+  .pg-bar { position: absolute; top: 2px; bottom: 2px; border-radius: 4px; background: var(--pg); display: flex; align-items: center; justify-content: center; overflow: hidden; }
+  .pg-bar em { font-style: normal; font-size: 0.6875rem; font-weight: 700; color: #fff; white-space: nowrap; }
+  .pg-a { --pg: #64748b; }
+  .pg-b { --pg: #d97706; }
+  .pg-c { --pg: #0891b2; }
+  .pg-d { --pg: #16a34a; }
+  .pg-off { opacity: 0.18; }
+  .pg-axis .pg-track { background: none; height: 16px; border-top: 1px solid var(--color-gray-300); border-radius: 0; }
+  .pg-tick { position: absolute; top: 1px; transform: translateX(-50%); font-size: 0.6875rem; color: var(--color-muted); }
+  @media (max-width: 640px) { .pg-row { grid-template-columns: 1fr; } }
+</style>

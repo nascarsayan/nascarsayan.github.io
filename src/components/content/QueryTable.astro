@@ -1,0 +1,44 @@
+---
+/**
+ * A dataset with preset views, kept simple: a bar with the view picker, search
+ * and a column chooser; the view's question and SQL in one quiet line; then the
+ * table filling the rest of the window. Click a heading to sort; filter under it.
+ *
+ *   <QueryTable id="images" table="images" rowKey="image" rows={data.rows}
+ *     columns={[{ key: 'image', label: 'Image' }, …]} views={[{ id, title, question, cols, where, order }, …]} />
+ *
+ * Views are declarative (lib/query-table.ts), so the SQL text and the filter
+ * that runs come from one spec. The build fails if a view names an unknown
+ * column or matches no rows.
+ */
+import '@/styles/query-table.css';
+import { validate, type Column, type View, type Row } from '@/lib/query-table';
+
+interface Props { id: string; table: string; rowKey: string; columns: Column[]; views: View[]; rows: Row[] }
+const { id, table, rowKey, columns, views, rows } = Astro.props;
+validate({ table, rowKey, columns, views }, rows);
+const payload = JSON.stringify({ table, rowKey, columns, views, rows }).replace(/</g, '\\u003c');
+---
+
+<div class="qt" data-qt-root={id}>
+  <script type="application/json" data-qt-config set:html={payload} />
+  <div class="qt-bar">
+    <button type="button" class="qt-picker" aria-haspopup="listbox" aria-expanded="false">
+      <span class="qt-picker-k">View</span><span class="qt-picker-v"></span><span class="qt-chev" aria-hidden="true"></span>
+    </button>
+    <input class="qt-search" type="search" placeholder="Search all columns" aria-label="Search all columns" />
+    <span class="qt-count" aria-live="polite"></span>
+    <span class="qt-spacer"></span>
+    <button type="button" class="qt-btn qt-cols" aria-haspopup="true" aria-expanded="false">Columns<span class="qt-chev" aria-hidden="true"></span></button>
+  </div>
+  <header class="qt-head">
+    <p class="qt-question"></p>
+    <pre class="qt-sql" aria-label="SQL for this view"><code></code></pre>
+  </header>
+  <div class="qt-tablewrap"><table class="qt-table"><thead></thead><tbody></tbody></table></div>
+</div>
+
+<script>
+  import { initQueryTables } from '@/scripts/query-table';
+  initQueryTables();
+</script>

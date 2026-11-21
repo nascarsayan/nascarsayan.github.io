@@ -1,0 +1,232 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPU memory and interconnects"
+short: "Memory & interconnects"
+description: "Every link a byte can cross, fastest first: HBM inside the GPU, GPU-to-GPU scale-up links (AMD XGMI hive, NVIDIA NVLink and NVSwitch), PCIe to the host and NIC, and RDMA networks between servers (GPUDirect, peer memory). Speeds, worked transfer times, fault domains, and the MI355X hive in example tool output."
+updated: "2026-11-10"
+track: fundamentals
+order: 4
+requires: [what-is-a-gpu]
+eyebrow: "Learn · GPU fundamentals"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import links from './_links.diagram';
+import MoveCalc from './_MoveCalc.astro';
+import Bars from './_Bars.astro';
+import { kv, kvRows, kvTop, kvBytes, kvPerToken, promptTokens } from './_moves';
+
+A GPU computes on data in its own memory. Everything else is a question of **which link a byte has to cross to get there**. Each link is about ten times slower than the one before it, and each is its own fault domain. This page goes down the ladder, from HBM to the data network, with the numbers for AMD MI355X servers and NVIDIA GB300 systems.
+
+## The idea first
+
+**An office analogy.** The GPU is a worker at a desk. Its own **HBM** is the desk: everything on it is in reach at once. A **scale-up link** (XGMI, NVLink) is a colleague's desk in the same room: you can lean over and take a sheet. **PCIe** is the filing cabinet down the corridor (host RAM) and the mail room (the NIC). The **network** is another building: you send a courier. Every step outward is roughly ten times slower, so good programs arrange the work so that the busiest exchanges happen on the desk or between neighbouring desks.
+
+| Link | The question it answers | Analogy |
+| --- | --- | --- |
+| HBM | How fast can the GPU read its own data? | your desk |
+| Scale-up (XGMI, NVLink) | How fast can GPUs that split one model share partial results? | the colleague's desk |
+| PCIe | How fast does data reach host RAM, a disk or the NIC? | the corridor |
+| Scale-out (RDMA over the network) | How fast can a different server get the data? | the courier to another building |
+
+**Where the analogy breaks.** A GPU can *load and store* directly into a neighbour's memory over XGMI or NVLink, as if the other desk were part of its own (a memory fabric, not a message service). And with GPUDirect RDMA the "mail room" (NIC) can pick up straight from the GPU's desk, without the sheet passing through the filing cabinet first. Both are shown in the worked example below.
+
+## The ladder
+
+| Link | Between | AMD (MI355X) | NVIDIA (GB300) | Speed per GPU, one direction, approximate |
+| --- | --- | --- | --- | --- |
+| HBM | GPU and its own memory | HBM3E, 8 stacks | HBM3E | 8 TB/s (both) |
+| Scale-up | GPUs in one server or rack | Infinity Fabric (XGMI), direct full mesh of 8 | NVLink 5 through NVSwitch | AMD 7 × 72 = 504 GB/s; NVIDIA 900 GB/s |
+| CPU–GPU | host memory | PCIe Gen5 x16 | NVLink-C2C to Grace (GB300); PCIe Gen6 x16 (HGX B300) | 64 GB/s; C2C 450 GB/s; Gen6 128 GB/s |
+| Scale-out | servers over the network | 1 × ConnectX-7, 400 Gb/s RoCE | ConnectX-8, 800 Gb/s (NVL72) | 50 GB/s; 100 GB/s |
+
+The NVIDIA numbers are vendor figures stated as bidirectional totals (NVLink 1.8 TB/s, C2C 900 GB/s, PCIe Gen6 256 GB/s); the table halves them so that every row is one direction. AMD's link figure comes from its CDNA 4 white paper: each Infinity Fabric link runs at up to 36 Gb/s per lane on 16 lanes, "72 GB/s in each direction". A network link is quoted in bits: 400 Gb/s ÷ 8 = 50 GB/s.
+
+Time on a link is simply **$$\text{bytes} / \text{bandwidth}$$**. Pick an amount of data and a link; the bars show every link at once (red AMD, green NVIDIA, blue both; click a bar to select it):
+
+<MoveCalc />
+
+## Worked example: one KV cache, every route
+
+The payload disaggregated inference actually moves: the [KV cache](/learn/attention-and-kv-cache/) of one prompt. gpt-oss-120b stores {kv.perToken} per token if every layer keeps every token (the "naive" figure); a {promptTokens.toLocaleString()}-token prompt makes that **{kvBytes.toLocaleString()} bytes, about {kv.bytes}** ({kv.mib} MiB). Follow it from GPU 0 of an MI355X node along each route. Every time below is computed from the ladder figures at 100% of peak.
+
+<Walkthrough title="Moving one 301 MB KV cache from GPU 0" caption="Peak figures; real transfers reach maybe 70–90% of them. The bar grid is logarithmic: each step is 10× longer.">
+  <WStep title="1 · The bytes">
+    <Kpis items={[
+      { label: 'Per token', value: kv.perToken, detail: '2 × 36 layers × 8 KV heads × 64 × 2 B' },
+      { label: 'Prompt', value: ("" + (promptTokens.toLocaleString()) + " tokens") },
+      { label: 'KV cache', value: kv.bytes, detail: ("" + (kv.mib) + " MiB in GPU 0's HBM"), tone: 'primary' },
+    ]} />
+    Prefill has just written this KV cache into GPU 0's HBM. It now has to go somewhere: be read by the next kernel, shared with a peer GPU, or shipped to the decode side. Same bytes, different links.
+  </WStep>
+  <WStep title="2 · Read it from HBM: the baseline">
+    <Bars rows={kvRows('hbm')} top={kvTop} />
+    Reading all {kv.bytes} once at 8 TB/s takes **{kv.hbm}**. That is the cost of staying on the desk. Every other route is measured against it.
+  </WStep>
+  <WStep title="3 · To a neighbour GPU over XGMI">
+    <Bars rows={kvRows('xgmi1', 'xgmi7')} top={kvTop} />
+    To one peer over its single direct link (72 GB/s): **{kv.xgmi1}**, {kv.ratio('xgmi1')}× the HBM read. Split across all 7 peers at once, each link carries 1/7: **{kv.xgmi7}**. This is how tensor-parallel GPUs exchange partial results inside a server, and why that exchange must stay inside the hive.
+  </WStep>
+  <WStep title="4 · To host RAM over PCIe">
+    <Bars rows={kvRows('pcie5')} top={kvTop} />
+    Through GPU 0's PCIe switch and up to its CPU (PCIe Gen5 x16, 64 GB/s): **{kv.pcie5}**. This is what offloading KV to host memory costs, and also the first half of the slow network route in step 6.
+  </WStep>
+  <WStep title="5 · To the decode side, with GPUDirect RDMA">
+    <Bars rows={kvRows('cx7')} top={kvTop} />
+    GPU 0 → PCIe switch → its ConnectX-7 NIC → RoCE network. The NIC reads the bytes straight out of HBM through the GPU's BAR. At 400 Gb/s (50 GB/s): **{kv.nic}**, {kv.ratio('cx7')}× the HBM read, before protocol overhead. In disaggregated serving this is how KV reaches the decode side.
+  </WStep>
+  <WStep title="6 · The same send, bounced through host RAM">
+    <Bars rows={kvRows('cx7', 'bounce')} top={kvTop} />
+    Without GPUDirect, the data is first copied GPU → host RAM ({kv.pcie5}), then host RAM → NIC ({kv.nic}). Done as two whole copies that is **{kv.bounce}**, almost twice as long. Pipelining the two copies hides part of the time, but {kv.pcieBytesBounce} still cross PCIe instead of {kv.bytes}, the bytes pass through the CPU's root complex and RAM, and a CPU thread drives the copy. That is why 8-GPU servers put each GPU and its NIC on one PCIe switch.
+  </WStep>
+  <WStep title="7 · On NVIDIA GB300 NVL72">
+    <Kpis items={[
+      { label: 'ConnectX-8, 800 Gb/s', value: kv.cx8, detail: 'twice a ConnectX-7', tone: 'good' },
+      { label: 'NVLink 5, whole domain', value: (kvBytes / 900e9 * 1e3).toFixed(2) + ' ms', detail: 'any of 72 GPUs in the rack' },
+      { label: 'ConnectX-7 NIC', value: kv.nic, detail: 'for comparison' },
+    ]} />
+    An NVL72 GPU's NIC is twice as fast, and its scale-up domain spans 72 GPUs, so a GPU in another tray of the same rack is reached over NVLink (900 GB/s each way), not over the network.
+  </WStep>
+</Walkthrough>
+
+Watch the same routes as packets on one slice of an MI355X server:
+
+<Diagram spec={links} title="One 8-GPU MI355X server: the routes" caption="Illustrative 8-GPU MI355X server: each GPU shares a PCIe switch with one 400G NIC. The 8 GPUs form one XGMI hive.">
+  <Step title="HBM" focus="g0">The KV cache sits in GPU 0's own HBM: {kv.hbm} to read once.</Step>
+  <Step title="XGMI to the peers" path="g0 => gn">Over the hive's direct links to the other GPUs: {kv.xgmi1} to one, {kv.xgmi7} spread over seven.</Step>
+  <Step title="PCIe to host RAM" path="g0 => sw => cpu">Through the slice's PCIe switch to the CPU and its RAM: {kv.pcie5}.</Step>
+  <Step title="GPUDirect RDMA" path="g0 => sw => nic => net">The NIC reads GPU memory directly and sends it over RoCE: {kv.nic}. Host RAM is never touched.</Step>
+  <Step title="Bounce through host RAM" path="g0 => sw => cpu => sw => nic => net">Without GPUDirect: copy to host RAM, then the NIC reads it from there. Twice over PCIe, {kv.bounce}.</Step>
+</Diagram>
+
+Real transfers reach maybe 70–90% of these peaks. The shape is what matters: crossing the network is two orders of magnitude slower than staying in HBM. Inference engines are designed around that, and so is disaggregated inference, which pays the network cost once per request to move the KV cache.
+
+## HBM: the GPU's memory
+
+HBM is stacked DRAM on the GPU package (see [what a GPU is](/learn/what-is-a-gpu/)). Facts that matter when you run it:
+
+- **Capacity is fixed and shared by everything.** On MI355X the driver reports a little under 288 GiB (about 294,900 MiB). The model's weights, the [KV cache](/learn/attention-and-kv-cache/), activations, communication buffers and the runtime's own overhead all come out of it. Serving engines such as vLLM reserve most of it up front (a "GPU memory utilization" fraction), which is why an inference Pod shows most of HBM in use even when idle.
+- **Bandwidth is the decode speed limit.** 8 TB/s on MI355X and Blackwell Ultra. See [memory and roofline](/learn/gpu-memory-hierarchy/).
+- **Every byte has ECC.** HBM corrects single-bit errors and detects worse ones. An **uncorrectable** error kills the process that touched the memory (AMD marks the data "poisoned"; `amd-smi static` shows `POISON_SCHEMA: ENABLED`). The driver can then **retire** the page so it is never used again. MI355X keeps the retired list in the card's EEPROM; `amd-smi static` shows the limit as `BAD_PAGE_THRESHOLD`. Past the threshold the card should be replaced. `amd-smi bad-pages` lists the retired pages. NVIDIA calls the same idea **row remapping**.
+- **Memory is split by IOD on AMD.** Four stacks sit on each of the two IODs. In the default **NPS1** mode, addresses are interleaved over all 8 stacks, so every access spreads across both IODs. In **NPS2** each half of the GPU uses its local four stacks. See [partitioning](/learn/gpu-partitioning/).
+- **The host can see all of it.** The GPU's PCIe BAR (the address window other devices use) is 512 GiB on MI355X, larger than VRAM. That is what lets a NIC read GPU memory directly (below).
+
+## Scale-up: GPUs in one box or rack
+
+Large models are split across GPUs (**tensor parallelism**: each GPU holds a slice of every layer). The GPUs then exchange partial results at every layer, many times per token. PCIe is far too slow for that, so GPUs get their own fabric.
+
+### AMD: the XGMI hive
+
+Each MI355X has 8 Infinity Fabric links; on an 8-GPU baseboard, 7 go to the other 7 GPUs and 1 is configured as the PCIe link to the host. Every pair of GPUs has its own direct link: a **full mesh**, no switch. AMD calls the set of linked GPUs a **hive**. `amd-smi topology` on an 8-GPU MI355X node shows it (illustrative output: one row of each table; all rows look the same):
+
+```text
+LINK TYPE TABLE:
+             0000:11:00.0 0000:2f:00.0 0000:4d:00.0 ... 0000:e5:00.0
+0000:11:00.0 SELF         XGMI         XGMI         ... XGMI
+HOPS TABLE:
+0000:11:00.0 0            1            1            ... 1
+WEIGHT TABLE:
+0000:11:00.0 0            15           15           ... 15
+NUMA BW TABLE:
+0000:11:00.0 N/A          72000-72000  72000-72000  ... 72000-72000
+CACHE COHERENCY TABLE:
+0000:11:00.0 SELF         C            C            ... C
+```
+
+How to read it: every peer is one hop away over XGMI; the link bandwidth is reported as 72,000 (min–max; the kernel's topology files use MB/s, so 72 GB/s, matching AMD's per-direction figure); links are cache coherent (`C`) and support 64- and 32-bit atomics. The kernel log shows each GPU joining the hive at driver load (a line like `XGMI: Add node 3, hive 0x0123456789abcdef`), and the KFD topology lists a common `hive_id` for all eight.
+
+A hive is also a **fault domain**. Some GPU errors need a reset of every GPU in the hive (AMD's "mode 1" reset). A fault on one GPU can trigger a reset of the whole 8-GPU hive and take every GPU workload on that node down. Partitioning or scheduling cannot isolate GPUs inside a hive from that.
+
+### NVIDIA: NVLink and NVSwitch
+
+NVIDIA GPUs do not wire to each other directly in large systems. Each GPU's NVLinks go to **NVSwitch** chips, which forward traffic at full speed between any two GPUs.
+
+| NVLink generation | GPU architecture | Per GPU, bidirectional | Largest single domain |
+| --- | --- | --- | --- |
+| 4th | Hopper | 900 GB/s | 8 GPUs in one HGPU server |
+| 5th | Blackwell, Blackwell Ultra | 1,800 GB/s (18 links × 100 GB/s) | NVL72: 72 GPUs, 130 TB/s total; up to 576 |
+| 6th | Vera Rubin | 3,000 GB/s | NVL72: 216 TB/s total |
+
+Figures from NVIDIA's NVLink and Blackwell Ultra pages.
+
+- **HGX B300 / DGX B300** (8 GPUs): the NVSwitch chips sit on the baseboard (two of them, per the Fabric Manager guide). The 8 GPUs are one NVLink domain.
+- **GB300 NVL72**: 18 compute trays of 4 GPUs and 9 NVLink switch trays join 72 GPUs into one domain across the rack. A GPU in tray 1 reaches a GPU in tray 18 at full NVLink speed. See [rack-scale GPUs](/learn/rack-scale-gpus/).
+
+Switched fabrics need **control-plane software**. On NVSwitch systems, NVIDIA **Fabric Manager** configures the switches and GPU routing; on Blackwell HGX it works with the **NVLink Subnet Manager** (NVLSM). For drivers before release 620 the Fabric Manager package version must match the driver version exactly. Across nodes of an NVL72, the **IMEX** service lets a process import memory another node's GPU exported, so GPUs in different trays share memory over NVLink.
+
+| | AMD XGMI hive | NVIDIA NVLink domain |
+| --- | --- | --- |
+| Topology | direct full mesh | star through NVSwitch |
+| Size | 8 GPUs (one server) | 8 (HGX) to 72 (NVL72) |
+| Control software | none beyond the driver | Fabric Manager, NVLSM, IMEX |
+| Typical blast radius | one server's hive | one server, or a rack's fabric |
+
+## PCIe: host, NICs and disks
+
+Everything that is not a GPU-to-GPU link goes over PCIe: the CPU copying data, the NIC sending data, NVMe drives loading weights. On a typical 8-GPU MI355X server each GPU has a **dedicated** path: one PCIe Gen5 switch per GPU, shared with one ConnectX-7 NIC (often an NVMe drive too). On a healthy node every link trains at full speed (illustrative output):
+
+```text
+0000:11:00.0 numa=0 link=32.0 GT/s PCIe width=16 max=32.0 GT/s PCIex16   # GPU 0
+rdma0 0000:12:00.0 numa=0 32.0 GT/s PCIe x16                             # its NIC
+```
+
+32 GT/s × 16 lanes is about 63 GB/s each way. A link that trains at a lower speed or width (a bad riser, a dirty connector) silently cuts this; the PCIe replay counter (`pcie_replay_count` in the GPU metrics) rising is often the first sign. How to read the whole tree is in [node topology](/learn/gpu-node-topology/).
+
+## Scale-out: RDMA between servers
+
+Between servers, data travels over the network through NICs using **RDMA** (remote direct memory access): a NIC writes into another machine's memory without the remote CPU copying anything. On Ethernet this is **RoCE** (RDMA over Converged Ethernet). The NICs on such a node report `link_layer Ethernet`, `state ACTIVE`, `rate 400 Gb/sec`.
+
+### GPU memory as an RDMA target
+
+Without help, sending GPU data over the network takes two copies: GPU → host RAM over PCIe, then host RAM → NIC. With **GPUDirect RDMA** (NVIDIA's name) or the equivalent on AMD, the NIC reads and writes **GPU memory directly** through the GPU's BAR. The bytes go GPU → PCIe switch → NIC and never touch host RAM or the CPU.
+
+That needs four things:
+
+1. **A large BAR**, so the whole of HBM is addressable over PCIe (512 GiB on MI355X).
+2. **A short PCIe path.** NVIDIA's GPUDirect RDMA guide says the GPU and NIC "must share the same upstream PCI Express root complex", and performs best under the same switch. That is why 8-GPU servers give each GPU its own NIC on the same switch.
+3. **PCIe settings that allow peer traffic.** PCIe Access Control Services (ACS) can force peer-to-peer packets up to the root complex for IOMMU checks. GPU hosts commonly set `iommu=pt` and adjust ACS (for example with `pci=config_acs=...`) on the kernel command line.
+4. **A kernel path that lets the NIC driver pin GPU memory.** On NVIDIA this is the `nvidia-peermem` module or the Linux **dma-buf** interface (NCCL uses dma-buf by default since 2.13 where supported). On AMD, ROCm supports dma-buf for the same purpose.
+
+Libraries decide whether to use GPUDirect based on distance. NCCL's `NCCL_NET_GDR_LEVEL` uses the same scale as `nvidia-smi topo`: `PIX` (same PCIe switch), `PXB` (through several switches), `PHB` (through the CPU's host bridge, same NUMA node), `SYS` (across the CPU interconnect).
+
+Disaggregated inference depends on exactly this path: the prefill GPU writes the KV cache over RoCE straight into the decode side. [GPU Pod networking](/learn/gpu-pod-networking/) shows how a Pod gets its NIC.
+
+## Scale-up versus scale-out
+
+| | Scale-up | Scale-out |
+| --- | --- | --- |
+| Links | XGMI, NVLink | Ethernet or InfiniBand with RDMA |
+| Reach | one server (AMD), one rack (NVL72) | the whole data centre |
+| Bandwidth per GPU | 0.5–0.9 TB/s each way | 50–100 GB/s |
+| Memory model | load/store to peer memory, coherent on AMD | explicit send/receive or RDMA write |
+| Used for | tensor parallelism inside a layer | pipeline stages, data parallel, KV transfer |
+| Managed by | driver, fabric manager | NICs, switches, network team |
+
+The rule of thumb: put the chattiest split (tensor parallel) inside the scale-up domain, and only the less frequent traffic across the network. NVL72's selling point is a scale-up domain of 72 GPUs instead of 8.
+
+## How this shows up in operations
+
+- **The node is the scale-up boundary on AMD.** A model that needs more than 8 MI355X for tensor parallelism must cross the network, which changes performance completely.
+- **GPU and NIC pairing matters.** The DRA driver publishes `numaNode`, `pciBusID` and `pcieRoot` for every GPU, so a scheduler can keep a Pod's GPU and NIC on the same PCIe root. On the example node in [node topology](/learn/gpu-node-topology/), GPU `0000:a9:00.0` reports `pcieRoot: pci0000:a0`, the same root as NIC `rdma5`.
+- **Fault domains stack up.** An HBM error kills one process; an XGMI or hive fault can reset 8 GPUs; a NIC or switch fault breaks the KV path for that slice; an NVL72 fabric fault affects a rack.
+- **NVIDIA brings new services to run.** Fabric Manager, NVLSM and IMEX must be running and version-matched, or GPUs come up without NVLink.
+
+## Common misconceptions
+
+- "**All GPU memory is equally close.**" Reading a peer GPU's HBM over its one XGMI link is about 100 times slower than local HBM (72 GB/s against 8 TB/s), and one NIC is slower again.
+- "**NVLink and XGMI are networking.**" They are memory fabrics: a GPU can load and store to a peer's memory. They are not routed IP networks.
+- "**RDMA means InfiniBand.**" RoCE is RDMA over Ethernet.
+- "**GPUDirect works on any server.**" It depends on PCIe layout, BAR size, ACS/IOMMU settings and driver modules.
+
+## Further reading
+
+- [AMD CDNA 4 architecture white paper](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf): HBM, Infinity Fabric links, 8-GPU platform (pages 10–14)
+- [amd-smi CLI (topology, bad-pages)](https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html)
+- [NVLink and NVLink Switch](https://www.nvidia.com/en-us/data-center/nvlink/) · [Inside NVIDIA Blackwell Ultra](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/)
+- [NVIDIA Fabric Manager user guide](https://docs.nvidia.com/datacenter/tesla/fabric-manager-user-guide/) · [IMEX service guide](https://docs.nvidia.com/multi-node-nvlink-systems/imex-guide/overview.html)
+- [GPUDirect RDMA](https://docs.nvidia.com/cuda/gpudirect-rdma/index.html) · [NCCL environment variables (P2P and GDR levels)](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#nccl-net-gdr-level)
+- [High Bandwidth Memory](https://en.wikipedia.org/wiki/High_Bandwidth_Memory) · [RoCE](https://en.wikipedia.org/wiki/RDMA_over_Converged_Ethernet) — Wikipedia

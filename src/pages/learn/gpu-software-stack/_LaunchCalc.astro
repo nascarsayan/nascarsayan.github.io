@@ -1,0 +1,76 @@
+---
+/**
+ * Launch-shape calculator: a GEMM of (tokens × 2,880) · (2,880 × N) split into
+ * square output tiles, one workgroup per tile, spread round-robin over the
+ * XCDs of one logical GPU. Tile and workgroup sizes are illustrative choices; a
+ * real BLAS library picks its own.
+ */
+---
+
+<figure class="lc" data-lc>
+  <figcaption class="lc-title">Launch shape calculator</figcaption>
+  <div class="lc-in">
+    <label>Prompt tokens (M)
+      <select data-k="m"><option>128</option><option>512</option><option>1024</option><option selected>4085</option><option>8192</option><option>32768</option></select>
+    </label>
+    <label>Output width (N)
+      <select data-k="n"><option value="4096" selected>4,096 (query projection)</option><option value="512">512 (key or value projection, 8 × 64)</option><option value="2880">2,880 (hidden size)</option></select>
+    </label>
+    <label>Tile (illustrative)
+      <select data-k="t"><option value="128">128 × 128</option><option value="256" selected>256 × 256</option></select>
+    </label>
+    <label>Threads per workgroup
+      <select data-k="w"><option value="256" selected>256 (4 wavefronts)</option><option value="512">512 (8 wavefronts)</option></select>
+    </label>
+    <label>GPU seen by the process
+      <select data-k="x"><option value="8" selected>SPX: 8 XCDs, 256 CUs</option><option value="4">DPX: 4 XCDs, 128 CUs</option><option value="1">CPX: 1 XCD, 32 CUs</option></select>
+    </label>
+  </div>
+  <div class="lc-out">
+    <div><span class="k">Workgroups (tiles)</span><span class="v" data-o="wg"></span></div>
+    <div><span class="k">grid_size_x in the packet</span><span class="v" data-o="grid"></span></div>
+    <div><span class="k">Wavefronts</span><span class="v" data-o="wv"></span></div>
+    <div><span class="k">Workgroups per XCD</span><span class="v" data-o="px"></span></div>
+    <div><span class="k">Workgroups per CU</span><span class="v" data-o="pc"></span></div>
+    <div><span class="k">Useful share of tile area</span><span class="v" data-o="fill"></span></div>
+  </div>
+  <p class="lc-note" data-o="note"></p>
+</figure>
+
+<style>
+  .lc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .lc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .lc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .lc-in label { display: flex; flex-direction: column; gap: 4px; }
+  .lc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .lc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .lc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .lc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .lc-note { margin-top: 8px; font-size: 0.875rem; }
+</style>
+
+<script>
+  const K = 2880, PEAK = 2.5e15, CUS_PER_XCD = 32;
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-lc]')) {
+    const v = (k: string) => Number(fig.querySelector<HTMLSelectElement>(`[data-k=${k}]`)!.value);
+    const o = (k: string) => fig.querySelector<HTMLElement>(`[data-o=${k}]`)!;
+    const n0 = (x: number) => x.toLocaleString('en-US', { maximumFractionDigits: 2 });
+    const update = () => {
+      const m = v('m'), n = v('n'), t = v('t'), w = v('w'), x = v('x');
+      const tm = Math.ceil(m / t), tn = Math.ceil(n / t), wg = tm * tn;
+      const cus = x * CUS_PER_XCD, perCu = wg / cus, rounds = Math.ceil(perCu);
+      const fill = (m * n) / (tm * t * tn * t);
+      o('wg').textContent = `${n0(wg)} (${tm} × ${tn})`;
+      o('grid').textContent = n0(wg * w);
+      o('wv').textContent = n0((wg * w) / 64);
+      o('px').textContent = n0(wg / x);
+      o('pc').textContent = n0(perCu);
+      o('fill').textContent = `${(fill * 100).toFixed(1)}%`;
+      const peakUs = ((2 * m * n * K) / (PEAK * (x / 8))) * 1e6;
+      const idle = perCu < 1 ? `${cus - wg} of ${cus} CUs get no work at all.` : wg % cus ? `${wg % cus} CUs get ${rounds} workgroups and the other ${cus - (wg % cus)} get ${rounds - 1}, so some CUs finish early and wait (in an even spread).` : `Every CU gets exactly ${rounds} (in an even spread).`;
+      o('note').textContent = `${n0(2 * m * n * K / 1e9)} GFLOP; at the BF16 peak of this logical GPU (about ${(2.5 * x / 8).toFixed(2)} PFLOPS, approximate) at least ${peakUs.toFixed(1)} µs. ${idle}`;
+    };
+    fig.querySelectorAll('select').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

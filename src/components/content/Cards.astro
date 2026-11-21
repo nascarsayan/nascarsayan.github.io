@@ -1,0 +1,9 @@
+---
+/** Grid of <Card>s. */
+---
+
+<div class="cards"><slot /></div>
+
+<style>
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; margin: 24px 0; }
+</style>

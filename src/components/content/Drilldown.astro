@@ -1,0 +1,106 @@
+---
+/**
+ * A diagram whose boxes open into their own inside diagram, any number of levels deep.
+ *
+ *   import computer from './_computer.drill';
+ *   <Drilldown tree={computer} id="computer" />
+ *
+ * Boxes listed in a level's `inside` get a magnifier badge. Clicking one (or Enter on
+ * it) opens its inside diagram in a panel below, with dotted lens lines from the box
+ * to the panel; one box per level is open at a time. Each panel has a breadcrumb to
+ * step back up. A level's `about` text shows above its diagram. The toolbar has a map
+ * of every level and Close all. The open boxes are in the URL (#<id>/cpu/core), so a
+ * link opens the same view.
+ * One level object under several box ids of the same level (two XCD boxes that open
+ * the same "inside an XCD") renders one shared panel, which any of those boxes opens.
+ * Tree format: src/diagrams/drilldown.ts. Script: src/scripts/drilldown.ts.
+ */
+import Diagram from './Diagram.astro';
+import Md from './Md.astro';
+import { drillCount, type Drill } from '@/diagrams/drilldown';
+import '@/styles/drilldown.css';
+
+interface Props {
+  tree: Drill;
+  /** Page-unique id; also the URL prefix of each level (#id/cpu/core). */
+  id: string;
+  /** Internal: box ids from the top level to this one. */
+  path?: string[];
+  /** Internal: titles from the top level down to the parent. */
+  trail?: string[];
+}
+const { tree, id, path = [], trail = [] } = Astro.props;
+if (!/^[a-z][a-z0-9-]{0,40}$/.test(id)) throw new Error(`Drilldown id "${id}": lowercase letters, digits and dashes`);
+const depth = path.length;
+const inside = Object.entries(tree.inside ?? {});
+/** One panel per distinct level object; `keys` are the boxes that open it. */
+const panels: { keys: string[]; child: Drill }[] = [];
+for (const [k, child] of inside) {
+  const p = panels.find((x) => x.child === child);
+  if (p) p.keys.push(k); else panels.push({ keys: [k], child });
+}
+const crumbs = [...trail, tree.title];
+const panelId = (p: string[]) => `${id}/${p.join('/')}`;
+
+/** Every level below this one, in reading order, for the map. */
+type Row = { path: string[]; title: string };
+const rows: Row[] = [];
+const walk = (d: Drill, p: string[]) => {
+  const seen = new Set<Drill>();
+  for (const [k, c] of Object.entries(d.inside ?? {})) {
+    if (seen.has(c)) continue; // a shared level is listed once, under its first box
+    seen.add(c);
+    rows.push({ path: [...p, k], title: c.title });
+    walk(c, [...p, k]);
+  }
+};
+if (depth === 0) walk(tree, []);
+---
+
+<div class="dd" id={depth === 0 ? id : undefined} data-dd={depth === 0 ? 'root' : ''} data-depth={depth}>
+  {depth === 0 && (
+    <div class="dd-tools">
+      <span class="dd-hint">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6" /><path d="M15 15l5 5" /></svg>
+        Click a box with this badge to open what is inside it.
+      </span>
+      <details class="dd-map">
+        <summary data-sound-click="popDown">Map · {drillCount(tree)} levels</summary>
+        <ol class="dd-map-list">
+          <li style="--lvl: 0"><button type="button" data-dd-go="">{tree.title}</button></li>
+          {rows.map((r) => <li style={`--lvl: ${r.path.length}`}><button type="button" data-dd-go={r.path.join('/')}>{r.title}</button></li>)}
+        </ol>
+      </details>
+      <button type="button" class="dd-closeall" data-dd-go="" data-sound-click="popDown">Close all</button>
+    </div>
+  )}
+  {tree.about && <Md src={tree.about} class="dd-about" />}
+  <Diagram spec={tree.spec} title={tree.title} caption={tree.caption} opens={inside.map(([k]) => k)} />
+  {panels.map(({ keys: [k, ...more], child }) => (
+    <section class="dd-panel" id={panelId([...path, k])} data-dd-for={[k, ...more].join(' ')} hidden aria-label={child.title}>
+      <div class="dd-head">
+        <nav class="dd-crumbs" aria-label="Levels">
+          {crumbs.map((c, i) => (
+            <Fragment>
+              <button type="button" data-dd-up={i} title={`Back to ${c}`}>{c}</button>
+              <span class="dd-sep" aria-hidden="true">›</span>
+            </Fragment>
+          ))}
+          <span class="dd-here" aria-current="location">{child.title}</span>
+        </nav>
+        <button type="button" class="dd-x" data-dd-up={depth} aria-label={`Close ${child.title}`} title="Close (Esc)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+        </button>
+      </div>
+      <Astro.self tree={child} id={id} path={[...path, k]} trail={crumbs} />
+    </section>
+  ))}
+  {inside.length > 0 && (
+    <svg class="dd-lens" aria-hidden="true"><polygon class="dd-lens-fill" /><line class="dd-lens-line" /><line class="dd-lens-line" /></svg>
+  )}
+</div>
+
+<script>
+  import { initDrilldowns } from '@/scripts/drilldown';
+  initDrilldowns();
+</script>

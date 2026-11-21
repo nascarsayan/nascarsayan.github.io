@@ -1,0 +1,99 @@
+---
+/**
+ * Data-movement calculator: bytes over a chosen link at a chosen efficiency,
+ * plus one bar per link so the ratios are visible. Speeds from ./_moves.ts.
+ */
+import { links, kvBytes } from './_moves';
+const presets = [
+  { label: 'One prompt’s KV (4,085 tokens, ~301 MB)', bytes: kvBytes },
+  { label: '1 GB', bytes: 1e9 },
+  { label: '10 GB (a large KV cache, a weight shard)', bytes: 10e9 },
+  { label: '65 GB (gpt-oss-120b weights)', bytes: 65e9 },
+  { label: '288 GB (a full MI355X)', bytes: 288e9 },
+];
+---
+
+<figure class="mvc" data-mvc={JSON.stringify(links)}>
+  <figcaption class="mvc-title">Data-movement calculator</figcaption>
+  <div class="mvc-in">
+    <label>Data <select data-k="preset">{presets.map((p, i) => <option value={p.bytes} selected={i === 0}>{p.label}</option>)}<option value="custom">Custom…</option></select></label>
+    <label>Custom GB <input data-k="gb" type="number" min="0.001" max="100000" step="any" value="0.301" /></label>
+    <label>Link <select data-k="link">{links.map((l) => <option value={l.id} selected={l.id === 'cx7'}>{l.label} ({l.vendor})</option>)}</select></label>
+    <label>Efficiency <input data-k="eff" type="range" min="50" max="100" step="5" value="100" /> <output data-o="eff"></output></label>
+  </div>
+  <div class="mvc-out">
+    <div><span class="k">Time on the chosen link</span><span class="v" data-o="time"></span></div>
+    <div><span class="k">Versus reading it from HBM</span><span class="v" data-o="ratio"></span></div>
+  </div>
+  <ul class="mvc-bars" data-o="bars" aria-label="Time on every link"></ul>
+  <p class="mvc-src">Peak vendor figures, one direction, approximate. Bars use a log scale: each grid step is 10× longer. Real transfers reach maybe 70–90% of peak; RDMA adds protocol overhead on top.</p>
+</figure>
+
+<style>
+  .mvc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .mvc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .mvc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .mvc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .mvc-in select, .mvc-in input { max-width: 100%; accent-color: var(--color-primary); }
+  .mvc-in input[type='number'] { width: 110px; }
+  .mvc-in output { min-width: 44px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .mvc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .mvc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .mvc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .mvc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .mvc-bars { margin: 14px 0 0; padding: 0; list-style: none; font-size: 0.8125rem; }
+  .mvc-bars :global(li) { display: grid; grid-template-columns: minmax(150px, 220px) 1fr 78px; align-items: center; gap: 8px; margin: 3px 0; cursor: pointer; }
+  .mvc-bars :global(.bar) { height: 14px; border-radius: 999px; background: repeating-linear-gradient(90deg, var(--color-gray-100) 0 calc(25% - 1px), var(--color-gray-300) calc(25% - 1px) 25%); overflow: hidden; }
+  .mvc-bars :global(.bar span) { display: block; height: 100%; border-radius: 999px; background: #94a3b8; }
+  .mvc-bars :global(li.amd .bar span) { background: #e5484d; }
+  .mvc-bars :global(li.nvidia .bar span) { background: #46a758; }
+  .mvc-bars :global(li.both .bar span) { background: #3b82f6; }
+  .mvc-bars :global(li.on) { font-weight: 700; }
+  .mvc-bars :global(li.on .bar) { outline: 2px solid var(--color-primary); outline-offset: 1px; }
+  .mvc-bars :global(.t) { text-align: right; font-variant-numeric: tabular-nums; }
+  .mvc-src { margin-top: 8px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  import { seconds, fmtTime, type Link } from './_moves';
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-mvc]')) {
+    const links: Link[] = JSON.parse(fig.dataset.mvc!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const preset = $<HTMLSelectElement>('[data-k=preset]');
+    const gb = $<HTMLInputElement>('[data-k=gb]');
+    const link = $<HTMLSelectElement>('[data-k=link]');
+    const eff = $<HTMLInputElement>('[data-k=eff]');
+    const bars = $<HTMLUListElement>('[data-o=bars]');
+    const rows = links.map((l) => {
+      const li = document.createElement('li');
+      li.className = l.vendor.toLowerCase();
+      li.title = l.note;
+      li.innerHTML = `<span>${l.label} <small>(${l.gbps.toLocaleString()} GB/s)</small></span><span class="bar"><span></span></span><span class="t"></span>`;
+      li.addEventListener('click', () => { link.value = l.id; update(); });
+      bars.append(li);
+      return li;
+    });
+    const update = () => {
+      if (preset.value !== 'custom') gb.value = String(Number(preset.value) / 1e9);
+      const bytes = Math.max(0, Number(gb.value) || 0) * 1e9;
+      const e = Number(eff.value) / 100;
+      $<HTMLElement>('[data-o=eff]').textContent = `${eff.value}%`;
+      const times = links.map((l) => seconds(bytes, l.gbps, e));
+      const sel = links.findIndex((l) => l.id === link.value);
+      const hbm = times[links.findIndex((l) => l.id === 'hbm')];
+      $<HTMLElement>('[data-o=time]').textContent = fmtTime(times[sel]);
+      $<HTMLElement>('[data-o=ratio]').textContent = `${Math.round(times[sel] / hbm).toLocaleString()}× slower`;
+      // Log scale over 4 decades, anchored at the slowest link.
+      const top = Math.max(...times);
+      rows.forEach((li, i) => {
+        const w = Math.max(2, 100 + 25 * Math.log10(times[i] / top));
+        li.querySelector<HTMLElement>('.bar span')!.style.width = `${w}%`;
+        li.querySelector<HTMLElement>('.t')!.textContent = fmtTime(times[i]);
+        li.classList.toggle('on', i === sel);
+      });
+    };
+    gb.addEventListener('input', () => { preset.value = 'custom'; update(); });
+    [preset, link, eff].forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

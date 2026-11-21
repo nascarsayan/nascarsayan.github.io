@@ -1,0 +1,137 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "KV cache management: pages, prefixes, quantization, offload"
+short: "KV cache management"
+description: "How an inference server stores the KV cache: fixed-size blocks and block tables (PagedAttention), prefix caching by chained block hashes, eviction and preemption when memory runs out, FP8 KV quantization and CPU offload. A step-by-step allocator simulation, a prefix-hit calculator, and the vLLM settings and counters to watch."
+updated: "2026-11-10"
+track: inference
+order: 4
+requires: [attention-and-kv-cache]
+eyebrow: "Learn · LLM inference"
+links:
+  - { label: "vLLM prefix caching design", href: "https://docs.vllm.ai/en/latest/design/prefix_caching.html" }
+  - { label: "PagedAttention paper", href: "https://arxiv.org/abs/2309.06180" }
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Pool from './_Pool.astro';
+import PrefixCalc from './_PrefixCalc.astro';
+import blocks from './_blocks.diagram';
+import * as ex from './_example';
+
+[Attention and the KV cache](/learn/attention-and-kv-cache/) showed what the KV cache is and how big it gets: 36 KiB per token for gpt-oss-120b, about 4 million tokens on one MI355X. This page is about how a server manages that memory. It is close to what an operating system does with RAM: pages, page tables, a page cache keyed by content, eviction, swapping and compression.
+
+## The idea
+
+Think of the KV cache as **ring binders of notes**, one binder per request, in a cabinet of fixed size.
+
+- **Pages, not reserved shelves.** Nobody knows how long an answer will be, so instead of reserving a whole shelf per request, the server hands out **fixed-size pages** (blocks) one at a time as a request grows. Each binder has a **table of contents** (the block table) saying which physical page holds its page 0, 1, 2… Pages can sit anywhere in the cabinet. Question this answers: *how do I fit requests of unknown length without wasting space?*
+- **Shared opening pages.** Many requests start with the same text (chat template, system prompt). The server keeps **one copy** of those pages and lets every binder point at it, with a counter of how many binders use it. Question: *how do I avoid computing the same thing twice?*
+- **Keep finished pages around.** When a request ends, its full pages stay on a shelf, labelled by content, in case the next request starts the same way. When space runs out, the oldest are thrown away first. Question: *what do I drop when the cabinet is full?*
+
+Where the analogy breaks: a photocopied page is the same wherever it sits in a binder. A KV page is not. A token's keys and values depend on **every token before it**, so a page is reusable only if the whole text up to and including it matches, from the first token. That is why the label (hash) of each page includes the label of the page before it.
+
+<Diagram spec={blocks} title="Two sequences sharing a cached prefix" mode="build" caption="Logical blocks map to scattered physical blocks. Both requests start with the same system prompt, so their first block is one physical block with a reference count of 2.">
+  <Step focus="ta" title="Request A">A has 300 tokens: 3 logical blocks of 128.</Step>
+  <Step path="ta => p7" title="Logical 0">A's logical block 0, the system prompt, lives in physical block 7.</Step>
+  <Step path="ta => p2" focus="ta -> p7" title="Logical 1">Logical block 1 is wherever there was room: physical block 2.</Step>
+  <Step path="ta => p19" focus="ta -> p7, ta -> p2" title="Logical 2">The last block is partly full: the only waste for this sequence.</Step>
+  <Step path="tb => p7" focus="tb, ta -> p7, ta -> p2, ta -> p19" title="B shares">B starts with the same system prompt, so its block 0 is the same physical block 7: refcount 2.</Step>
+  <Step path="tb => p4" focus="free, ta -> p7, ta -> p2, ta -> p19, tb -> p7" title="B diverges">B's own tokens get their own block. Everything else in the pool is free or evictable.</Step>
+</Diagram>
+
+## Worked example: a tiny allocator, step by step
+
+The pool below is real code run at build time: 8 physical blocks of 4 tokens (a real server: tens of thousands of blocks of 16–128). Every block number, reference count and hash comes from the simulation. Hashes are the first 6 hex digits of SHA-256 over the parent block's hash and the block's tokens. Blue: in use. Amber: cached, reference count 0, evictable. Dashed: free. Outlined: changed in this step.
+
+<Walkthrough title="Paged KV: allocate, share, free, evict" caption="Toy sizes. Rules as in vLLM's prefix caching design: only full blocks are hashed and reused; freed hashed blocks stay cached; eviction takes the least recently freed; the last prompt token is always computed.">
+  {ex.steps.map((s, i) => (
+    <WStep title={("" + (i + 1) + " · " + (s.title))}>
+      <Pool snap={s} bs={ex.BS} />
+      <p>{s.text}</p>
+    </WStep>
+  ))}
+</Walkthrough>
+
+## Paging: blocks and block tables
+
+**PagedAttention**, introduced by vLLM, borrows virtual memory:
+
+- KV memory is split into fixed-size **blocks**, each holding the K and V of a fixed number of tokens. A common `block_size` is 16 tokens (vLLM's default on many GPUs); this page uses **128 tokens** for gpt-oss-120b.
+- Each sequence has a **block table** mapping logical blocks to whatever physical blocks were free.
+- Blocks are allocated **on demand** and freed when the sequence finishes. Waste is at most one partly filled block per sequence (and per layer group).
+- The attention kernel reads K and V through the block table, the way the MMU walks a page table.
+
+Before paging, servers reserved one contiguous region per request, sized for the maximum output. The [vLLM paper](https://arxiv.org/abs/2309.06180) found that this waste was what limited batch sizes, and that removing it raised throughput 2–4× at the same latency.
+
+For gpt-oss's mixed layers, vLLM keeps **layer groups**: one for the 18 full-attention layers and one for the 18 sliding-window layers, each with its own block table, drawing from one pool of equal-size pages. Sliding-window groups free blocks that fall more than 128 tokens behind ([hybrid KV cache manager](https://docs.vllm.ai/en/latest/design/hybrid_kv_cache_manager.html)). One page holds 128 tokens × 18 layers × 2 KiB = **4.5 MiB**.
+
+vLLM reports these settings in its `vllm:cache_config_info` metric: `block_size`, `num_gpu_blocks`, `cache_dtype` and whether prefix caching is on. For gpt-oss-120b on one MI355X with 128-token pages, roughly 150 GiB of KV memory is about 34,000 pages of 4.5 MiB, or about 4.4 million tokens.
+
+## Prefix caching: reuse by content
+
+1. When a block is full, the server hashes its tokens together with the previous block's hash. The chain means a block's hash identifies the entire prefix up to it. vLLM can use SHA-256 for this (`prefix_caching_hash_algo`).
+2. A new request's prompt is cut into blocks and hashed the same way. The server walks the chain from the start and reuses every block whose hash is present. The first miss ends the reuse.
+3. Only the remaining (uncached) tokens go through [prefill](/learn/prefill-phase/). The last prompt token is always computed, even on a full match, because its output is needed to pick the next token ([vLLM source](https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/kv_cache_manager.py)).
+4. Finished requests' blocks stay cached with reference count 0 and are evicted least-recently-used.
+
+Only **full** blocks are reused, so hits come in multiples of the block size. With 128-token blocks, a 3,873-token prompt whose whole text is cached gets: 3,873 − 1 = 3,872 tokens that could match, 3,872 ÷ 128 = 30.25, so 30 blocks = 3,840 cached and 33 computed. Try other cases (the defaults: a 2,760-token prompt with a 256-token shared start):
+
+<PrefixCalc />
+
+### How much it saves
+
+It depends entirely on traffic. Chat templates, long system prompts, multi-turn conversations and agents re-sending their history all repeat prefixes, and on such traffic it is common for a large share of prompt tokens to come from the cache. vLLM splits the count by source in `vllm:prompt_tokens_by_source_total` (local compute versus local cache hit). A hit is only possible on the replica that already holds the prefix, which is why inference routers try to send the next turn of a conversation to the same replica ("cache-aware" or "sticky" routing).
+
+## When memory runs out: preemption
+
+If a decode server has no free or evictable block for a growing sequence (step 7 of the example, one request later), it must make room. vLLM's default is **preemption by recompute**: it pauses some running requests, frees their blocks, and later recomputes their KV from the tokens. Swapping blocks to CPU memory exists but is not the default in vLLM V1 ([optimization guide](https://docs.vllm.ai/en/latest/configuration/optimization.html)). Preemptions show as `vllm:num_preemptions` and as latency spikes for the victims. Fixes: more KV memory per request (fewer concurrent sequences, smaller `max_num_seqs`, more GPUs, KV quantization). A prefill-only server in a disaggregated setup rarely preempts: it holds each request's KV only until it is sent to the decode side.
+
+## Offload to CPU memory
+
+Host DRAM is much larger than HBM. Servers can keep a second tier of KV blocks in CPU memory: copy blocks out when they would otherwise be evicted, and copy them back on a prefix hit instead of recomputing. A prompt can then be served from three sources at once: blocks still in HBM, blocks loaded back from the CPU tier, and the remaining tokens computed.
+
+The trade-off is copy bandwidth against compute. Copies move whole pages (4.5 MiB each here) over PCIe, at roughly 10–50 GB/s depending on the host, so loading 36 pages (162 MiB) takes on the order of 5–15 ms. That beats recomputing a few thousand tokens of prefill, but it adds to the wait before the forward pass. vLLM exposes offload traffic as counters (`vllm:kv_offload_store_bytes_total`, `vllm:kv_offload_load_bytes_total` with the offloading connector).
+
+## Quantizing the KV cache
+
+The cache can be stored in fewer bits than the model computes in. vLLM supports `--kv-cache-dtype fp8` (and `fp8_e4m3`, which also runs on ROCm; `fp8_e5m2` on CUDA) ([quantized KV cache](https://docs.vllm.ai/en/latest/features/quantization/quantized_kvcache.html)):
+
+| | 16-bit | FP8 |
+| --- | --- | --- |
+| gpt-oss-120b per token (window-aware) | 36 KiB | 18 KiB |
+| Tokens in ~150 GiB | ~4.4 M | ~8.7 M |
+| Bytes decode reads per step | 1× | 0.5× |
+| Accuracy | reference | some loss; per-tensor scales, calibration recommended (scales are 1.0 without it) |
+
+`cache_dtype="auto"` means the model's own type. KV quantization also changes the bytes that cross the wire in disaggregated serving, so both sides must agree on the format.
+
+## KV that leaves the GPU
+
+In a disaggregated server the KV cache does not stay where it was built. The prefill side asks the decode side for a destination, then sends the KV, usually layer by layer over RDMA while the forward pass is still running, so most of the transfer hides behind compute. Open-source examples include vLLM's KV connectors (such as NIXL and LMCache) and the Mooncake transfer engine.
+
+<Callout tone="note" title="How this shows up when operating a server">
+- `vllm:kv_cache_usage_perc` near 0 on a prefill-only server is normal. A value stuck high means KV is not being released, for example because transfers to decode are stalled.
+- A restart empties the prefix cache and CPU tier, so prefill compute (and TTFT) rises until the cache warms up again.
+</Callout>
+
+## Common misconceptions
+
+- **"Prefix caching can reuse any matching text."** Only a matching **prefix**, from token 0, in whole blocks. The same paragraph in the middle of two different prompts is not reused.
+- **"Bigger blocks are always better."** Fewer table entries and better copy efficiency, but coarser hits (try 16 vs 128 in the calculator) and more waste in the last block. This page uses 128; vLLM's examples use 16.
+- **"KV usage 0% means the Pod is idle."** On a prefill Pod it means KV was shipped and freed; look at request counters for load.
+
+## Further reading
+
+- [Efficient memory management for LLM serving with PagedAttention](https://arxiv.org/abs/2309.06180)
+- [vLLM: automatic prefix caching](https://docs.vllm.ai/en/latest/features/automatic_prefix_caching.html) · [prefix caching design](https://docs.vllm.ai/en/latest/design/prefix_caching.html)
+- [vLLM: PagedAttention kernel design](https://docs.vllm.ai/en/latest/design/paged_attention.html)
+- [vLLM: hybrid KV cache manager](https://docs.vllm.ai/en/latest/design/hybrid_kv_cache_manager.html)
+- [vLLM: quantized KV cache](https://docs.vllm.ai/en/latest/features/quantization/quantized_kvcache.html)
+- [vLLM: optimization and tuning](https://docs.vllm.ai/en/latest/configuration/optimization.html) (preemption)
+- [vLLM: metrics](https://docs.vllm.ai/en/latest/usage/metrics.html)
+- [vLLM V1 KV cache manager source](https://github.com/vllm-project/vllm/blob/main/vllm/v1/core/kv_cache_manager.py) (the last token is always recomputed)

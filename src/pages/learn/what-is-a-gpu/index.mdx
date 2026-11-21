@@ -1,0 +1,225 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "What a GPU is"
+short: "What a GPU is"
+description: "The physical picture of a datacenter GPU for a newcomer: chiplets (AMD XCD/IOD, NVIDIA dual die), CUs and SMs, matrix engines, HBM stacks, power and heat, host versus device. AMD MI355X and NVIDIA Blackwell Ultra (GB300) side by side, with illustrative node output."
+updated: "2026-11-10"
+requires: [gpu-execution-model, gpu-memory-hierarchy, gpu-number-formats]
+track: fundamentals
+order: 1
+eyebrow: "Learn · GPU fundamentals"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import chip from './_chip.diagram';
+import ChipZoom from './_ChipZoom.astro';
+import PeakCalc from './_PeakCalc.astro';
+import * as c from './_chip';
+
+A CPU has a few dozen large cores, each fast at one stream of branchy code. A GPU has **thousands of small lanes** that run the same instruction on different numbers at the same time, next to memory that is about ten times faster than server RAM. LLM math is mostly large matrix multiplies, which split into millions of identical small jobs. That is the whole reason LLM prompt processing runs on GPUs.
+
+This page is the physical picture: what is inside the package, what the numbers on a spec sheet mean, and how the GPU sits in a server. Programming details are in [threads and wavefronts](/learn/gpu-execution-model/) and [memory and roofline](/learn/gpu-memory-hierarchy/).
+
+## The idea first
+
+**A CPU is a few master chefs; a GPU is a huge kitchen of line cooks.** A master chef can cook any dish, change plans mid-recipe and work alone. A line cook does one simple step, and a whole row of them does the same step at the same moment: 64 cooks all chop on the same beat. To make 10,000 identical salads, the line wins by far. A matrix multiply is that kind of job: millions of the same multiply-and-add on different numbers.
+
+Every part of the chip answers one question:
+
+| Part (MI355X name) | In the kitchen | The question it answers |
+| --- | --- | --- |
+| **Lane** | one cook's hands | who does one multiply-add on one number? |
+| **SIMD** (16 lanes) and **wavefront** (64 threads) | a row of cooks on one beat | which threads must run the same instruction together? |
+| **Matrix core** | a food processor next to the row | what does a whole small matrix multiply in one step? |
+| **CU** (compute unit) | one kitchen station with its own counter (LDS) | where does one group of threads (a workgroup) run and share scratch space? |
+| **XCD** (compute die) | one kitchen floor | how many stations are built on one piece of silicon? |
+| **IOD + HBM** | the pantry and the corridors | where do the ingredients (weights, KV cache) live and how fast do they arrive? |
+
+**Where the analogy breaks.** Cooks in a row that need to do different things (an `if` that goes both ways) take turns, while the others wait. A station cannot borrow another station's counter. And the kitchen is usually limited by the pantry, not the cooks: for LLM decode the matrix cores wait on HBM most of the time (worked out below).
+
+## Zoom in: package to lane
+
+<Walkthrough title="One MI355X, from the package down to one lane" caption="Counts from AMD's CDNA 4 white paper and example rocminfo output; totals computed. Box layouts are schematic, not the real floorplan.">
+  <WStep title={("1 · The package: " + (c.amd.xcds) + " compute dies on " + (c.amd.iods) + " I/O dies, " + (c.amd.hbmStacks) + " memory stacks")}>
+    <ChipZoom level="package" />
+    <p>Ten dies share one package. The <strong>XCDs</strong> (accelerator complex dies, TSMC N3P) do the math; they sit stacked on top of two <strong>IODs</strong> (I/O dies, TSMC N6) that hold the {c.amd.infinityCacheMB} MB Infinity Cache, the memory controllers and the links to the host and the other GPUs. Beside them, {c.amd.hbmStacks} HBM3E stacks of {c.amd.hbmGBPerStack} GB give {c.hbmGB} GB. We zoom into XCD 0.</p>
+  </WStep>
+  <WStep title={("2 · One XCD: " + (c.amd.cuPhysPerXcd) + " compute units built, " + (c.amd.cuPerXcd) + " enabled")}>
+    <ChipZoom level="xcd" />
+    <p>Each XCD is built with {c.amd.cuPhysPerXcd} CUs; AMD enables {c.amd.cuPerXcd} so that a die with a few defects is still usable. {c.amd.xcds} × {c.amd.cuPerXcd} = <strong>{c.cus} CUs</strong> per GPU ({c.cuPhys} built). The CUs of one XCD share a {c.amd.l2PerXcdMB} MB L2 cache, {c.l2TotalMB} MB across the GPU.</p>
+  </WStep>
+  <WStep title={("3 · One CU: " + (c.amd.simdPerCu) + " SIMDs, " + (c.amd.matrixPerCu) + " matrix cores, " + (c.amd.ldsKB) + " KB of LDS")}>
+    <ChipZoom level="cu" />
+    <p>A CU is the closest thing to a CPU core: it has its own instruction scheduler, registers and caches. It holds {c.amd.simdPerCu} <strong>SIMD</strong> units for ordinary math (activations, softmax, normalisation) and a <strong>matrix core</strong> beside each one for small matrix multiplies. The <strong>LDS</strong> (local data share) is {c.amd.ldsKB} KB of fast scratch memory that the threads of one workgroup share. One CU can keep up to {c.maxWavesPerCu} wavefronts resident and switches between them to hide memory waits.</p>
+  </WStep>
+  <WStep title={("4 · One SIMD: " + (c.amd.lanesPerSimd) + " lanes run a " + (c.amd.wave) + "-thread wavefront in " + (c.cyclesPerWave) + " passes")}>
+    <ChipZoom level="simd" />
+    <p>A <strong>wavefront</strong> is {c.amd.wave} threads that execute the same instruction. The SIMD has {c.amd.lanesPerSimd} lanes, so one instruction for the whole wavefront goes through in {c.cyclesPerWave} passes. A lane is what spec sheets call a "stream processor": {c.cus} × {c.amd.simdPerCu} × {c.amd.lanesPerSimd} = <strong>{c.f(c.lanes)}</strong>. It is not a core: it has no program counter of its own.</p>
+  </WStep>
+  <WStep title="5 · Add it up">
+    <Kpis items={[
+      { label: 'CUs', value: c.f(c.cus), detail: ("" + (c.amd.xcds) + " XCDs × " + (c.amd.cuPerXcd)) },
+      { label: 'Lanes', value: c.f(c.lanes), detail: ("" + (c.f(c.simds)) + " SIMDs × " + (c.amd.lanesPerSimd)) },
+      { label: 'Matrix cores', value: c.f(c.matrixCores), detail: ("" + (c.fp8PerCoreClk.toLocaleString('en-US')) + " FP8 FLOPs per clock each"), tone: 'primary' },
+      { label: 'Threads resident', value: c.f(c.residentLanes), detail: ("" + (c.maxWavesPerCu) + " waves × " + (c.amd.wave) + " × " + (c.cus) + " CUs") },
+      { label: 'Dense FP8 peak', value: ("" + (c.fp8Peak.toFixed(2)) + " PF"), detail: ("" + (c.amd.fp8PerCuPerClk) + " FLOPs/clock/CU × " + (c.cus) + " × " + (c.amd.clockMHz) + " MHz"), tone: 'good' },
+      { label: 'HBM', value: ("" + (c.hbmGB) + " GB"), detail: ("" + (c.f(c.hbmGBs)) + " GB/s = " + (c.hbmBits) + " bits × " + (c.amd.pinGbps) + " Gb/s"), tone: 'note' },
+    ]} />
+    <p>Almost all LLM FLOPs come from the matrix cores; the lanes do the rest. The last tile is the pantry: {c.f(c.hbmGBs)} GB/s sounds huge, but at {c.fp8Peak.toFixed(1)} PFLOPS the matrix cores could do about {c.f(c.ridgeFp8)} FP8 operations for every byte HBM delivers.</p>
+  </WStep>
+  <WStep title="6 · The same zoom on NVIDIA Blackwell Ultra">
+    <table>
+      <thead><tr><th>Level</th><th>AMD MI355X</th><th>NVIDIA Blackwell Ultra (B300, GB300)</th></tr></thead>
+      <tbody>
+        <tr><td>Package</td><td>{c.amd.xcds} XCDs + {c.amd.iods} IODs</td><td>{c.nv.dies} reticle-sized dies joined by NV-HBI (10 TB/s); software sees one GPU</td></tr>
+        <tr><td>Middle level</td><td>XCD: {c.amd.cuPerXcd} CUs + L2</td><td>GPC: {c.nv.gpcs} per GPU, {c.nv.sms / c.nv.gpcs} SMs each</td></tr>
+        <tr><td>Compute block</td><td>CU × {c.cus}</td><td>SM × up to {c.nv.sms}</td></tr>
+        <tr><td>Matrix engines</td><td>{c.amd.matrixPerCu} per CU = {c.f(c.matrixCores)}</td><td>{c.nv.tensorPerSm} Tensor Cores per SM = {c.nvTensor}</td></tr>
+        <tr><td>Lanes</td><td>{c.amd.simdPerCu * c.amd.lanesPerSimd} per CU = {c.f(c.lanes)}</td><td>{c.nv.cudaPerSm} CUDA cores per SM = {c.f(c.nvCuda)}</td></tr>
+        <tr><td>Lockstep group</td><td>wavefront of {c.amd.wave}</td><td>warp of {c.nv.warp}</td></tr>
+        <tr><td>Scratch per block</td><td>LDS {c.amd.ldsKB} KB</td><td>shared memory, plus {c.nv.tmemKB} KB Tensor Memory per SM</td></tr>
+      </tbody>
+    </table>
+    <p>Same shape, different names. NVIDIA notes the enabled SM count varies by product.</p>
+  </WStep>
+</Walkthrough>
+
+## One package, many dies
+
+Why chiplets: a single die cannot grow past the area a lithography machine exposes at once (the **reticle limit**, about 26 × 33 mm, roughly 850 mm²), and large dies have more defects. So vendors build a GPU from several dies on one package. Step through the data paths:
+
+<Diagram spec={chip} title="Inside one MI355X: where the bytes go" caption="From AMD's CDNA 4 white paper. XCDs sit on top of the IODs (3D stacking); HBM stacks sit beside them on the same package.">
+  <Step title="Compute reads memory" path="x0 => c0 => h0">An XCD reads weights: the request goes through its IOD's Infinity Cache and, on a miss, to the HBM stacks. In the default NPS1 mode addresses are spread over all 8 stacks.</Step>
+  <Step title="Across the IODs" path="x0 => c0 => c1 => h1">Half of all addresses live on the other IOD's stacks, so many accesses cross the IOD-to-IOD link. NPS2 mode keeps each half local.</Step>
+  <Step title="Host loads the model" path="cpu => io => c1 => h1">The host writes model weights into HBM over PCIe Gen5 x16, about 64 GB/s each way: done once at startup, not per token.</Step>
+  <Step title="GPU to GPU" path="x1 => c1 => io => peers">For tensor parallelism a GPU exchanges partial results with the 7 others over Infinity Fabric (XGMI), 72 GB/s each way per link.</Step>
+</Diagram>
+
+The chiplet boundaries are also where a GPU can be **split**: AMD's compute partitions follow XCD lines and memory partitions follow IOD lines. See [partitioning](/learn/gpu-partitioning/).
+
+## The spec sheet, side by side
+
+All numbers are vendor peak or spec values, approximate.
+
+| | AMD Instinct MI355X | NVIDIA Blackwell Ultra |
+| --- | --- | --- |
+| Dies | 8 XCD + 2 IOD | 2 |
+| Transistors | 185 billion | 208 billion |
+| Compute blocks | 256 CUs | up to 160 SMs |
+| Matrix engines | 1,024 matrix cores (4 per CU) | 640 Tensor Cores (4 per SM) |
+| Lockstep group | wavefront, 64 lanes | warp, 32 threads |
+| Peak clock | 2,400 MHz | not stated in the sources used here |
+| Memory | 288 GB HBM3E, 8 TB/s, 8,192-bit | 288 GB HBM3E, 8 TB/s, 8,192-bit |
+| Last-level cache | 256 MB Infinity Cache | not compared here |
+| Power | 1,400 W typical board power | up to 1,400 W |
+| Host link | PCIe Gen5 x16 | PCIe Gen6 x16; in GB300 also NVLink-C2C to a Grace CPU (900 GB/s) |
+| GPU-to-GPU | 7 Infinity Fabric links, 72 GB/s each way per link | NVLink 5: 18 links, 1.8 TB/s total both ways |
+| Dense FP8 | 5 PFLOPS | 5 PFLOPS |
+| Dense 4-bit | 10.1 PFLOPS (MXFP4) | 15 PFLOPS (NVFP4) |
+
+The two are close on memory, which is what decode cares about. The 4-bit formats are explained in [number formats](/learn/gpu-number-formats/).
+
+## Reading it on a node
+
+You can read this layout on an MI355X node without any special tool (example output):
+
+```text
+$ rocminfo        # the GPU agent, trimmed
+  Marketing Name:          AMD Instinct MI355X
+  Compute Unit:            256
+  SIMDs per CU:            4
+  Shader Engines:          32
+  Wavefront Size:          64(0x40)
+  Max Waves Per CU:        32(0x20)
+  L2:                      4096(0x1000) KB
+  L3:                      262144(0x40000) KB
+  Max Clock Freq. (MHz):   2400
+```
+
+What to read in it: `Compute Unit 256` and `SIMDs per CU 4` are the zoom above. `L2` is per XCD (4 MB × 8 = 32 MB); `L3` is the 256 MB Infinity Cache. The 32 "shader engines" are the 4 CU arrays in each of the 8 XCDs. The kernel driver exposes the same in `/sys/class/kfd/kfd/topology/nodes/<n>/properties`: `simd_count 1024`, `num_xcc 8`, `lds_size_in_kb 160` and `gfx_target_version 90500` (gfx950, the instruction set name compilers target; see [PTX and AMDGCN ISA](/learn/gpu-isa-ptx/)).
+
+## Memory: HBM stacks
+
+**HBM** (High Bandwidth Memory) is DRAM dies stacked on top of each other and placed millimetres from the compute dies on a silicon base layer. Very wide connections (1,024 bits per stack) at a moderate clock give huge bandwidth: 8 stacks × 1,024 bits × 8 Gb/s per pin ÷ 8 = **8,192 GB/s**. `amd-smi static` on an MI355X node reports exactly that (example output):
+
+```text
+    VRAM:
+        TYPE: HBM3E
+        SIZE: 294896 MB
+        BIT_WIDTH: 8192
+        MAX_BANDWIDTH: 8192 GB/s
+```
+
+For comparison, one CPU socket on the same server has 12 DDR5 channels and roughly 0.5–0.6 TB/s (estimate, not measured). HBM is fast but small and fixed: you cannot add more to a GPU. Model weights plus the [KV cache](/learn/attention-and-kv-cache/) must fit in it. More in [memory and interconnects](/learn/gpu-memory-and-interconnects/).
+
+## Compute versus memory: why the pantry wins
+
+Every generated token reads all the model's weights from HBM. If the math is quick but memory is slow, the GPU waits: that work is **memory-bound**. Work that waits on math is **compute-bound**. Prefill is mostly compute-bound, decode mostly memory-bound. Peak throughput is just the parts multiplied; change the format or the clock and compare it with what HBM can feed:
+
+<PeakCalc />
+
+A worked example: a 70-billion-parameter model in FP8 is 70 GB; at 8 TB/s, reading it once takes at least 8.75 ms, so one sequence can never decode faster than about 114 tokens per second on one such GPU, however many PFLOPS it has. [LLM inference basics](/learn/llm-inference-basics/) explains why this leads to disaggregated inference.
+
+## Power and heat
+
+A 1,400 W part is a heater. MI355X comes in direct-liquid-cooled designs in AMD's white paper; air-cooled variants report the board name `Instinct MI355 AC OAM`. The SMU firmware manages power and clocks all the time (example output):
+
+```text
+$ amd-smi static -g 0     # LIMIT section, trimmed
+        PPT0: SOCKET_POWER_LIMIT: 1400 W
+        SLOWDOWN_HOTSPOT_TEMPERATURE: 100 °C
+        SLOWDOWN_VRAM_TEMPERATURE: 115 °C
+        SHUTDOWN_HOTSPOT_TEMPERATURE: 112 °C
+        SHUTDOWN_VRAM_TEMPERATURE: 125 °C
+$ amd-smi metric -g 0     # an idle moment, trimmed
+        SOCKET_POWER: 250 W
+        GFX_0: CLK: 200 MHz   MAX_CLK: 2400 MHz   DEEP_SLEEP: ENABLED
+        MEM_0: CLK: 2000 MHz
+```
+
+What this means:
+
+- **Throttling is normal.** Above the slowdown temperature or the power limit the GPU lowers its clock. Work gets slower, not wrong. AMD's node problem detector rules (see [GPU metrics](/learn/gpu-metrics/)) flag `AMDGPUJunctionTemperatureHigh` at 100 °C and `AMDGPUMemoryTemperatureHigh` at 95 °C.
+- **Shutdown is a hard stop.** At the shutdown temperature the GPU protects itself; processes die.
+- **Idle is not zero.** About 250 W with almost no work. Eight GPUs idle at about 2 kW per server.
+- **Clocks swing.** About 200 MHz idle, up to 2,400 MHz busy. A single clock reading means little; use averages.
+
+## Host and device
+
+The **host** is the server: CPUs, RAM, disks, NICs. The **device** is the GPU and its HBM. A program runs on the host, copies data to the device, starts **kernels** (functions that run on the GPU), and reads results back. The link between them is PCIe Gen5 x16: about 64 GB/s each way, more than 100 times slower than HBM. Good programs load weights once and keep them on the device.
+
+An example 8-GPU OAM server has 2 AMD EPYC sockets (64 cores each, 256 hardware threads), 2 TiB RAM in 2 NUMA nodes, 8 MI355X and 8 400 Gb/s RDMA NICs. Each GPU hangs off one NUMA node; `amd-smi static` shows GPU 0 on NUMA node 0 with CPU cores 0–63 and 128–191 as local. A process that feeds a GPU from a CPU on a far NUMA node pays extra latency on every copy. [Memory and interconnects](/learn/gpu-memory-and-interconnects/) and [node topology](/learn/gpu-node-topology/) show the layout.
+
+A process "owns" GPU memory while it runs. `amd-smi process` (AMD) or `nvidia-smi` (NVIDIA) lists each process and the VRAM it holds. An inference server Pod typically holds most of the GPU's HBM. How a GPU goes from power-on to running that process is in [boot and firmware](/learn/gpu-boot-and-firmware/).
+
+## How this shows up in operations
+
+- **Kubernetes sees what the driver reports.** AMD node labeller labels on an MI355X node include `amd.com/gpu.cu-count=256`, `amd.com/gpu.simd-count=1024` and `amd.com/gpu.vram=288G`, and each ResourceSlice device carries `computeUnits: 256` and `memory: 294896Mi`. If a number is lower, a partition mode changed or hardware is degraded.
+- **One server is eight GPUs that share fate.** Power, cooling, PCIe switches and the XGMI hive are shared; one bad GPU can take the others down in a reset.
+- **Temperature and power are leading indicators.** A GPU that runs hot or throttles while its neighbours do not is a hardware ticket waiting to happen.
+
+## Common misconceptions
+
+- "**A GPU core is like a CPU core.**" A "stream processor" is one SIMD lane, not a core with its own program counter. The CU or SM is the closest thing to a CPU core.
+- "**More TFLOPS means faster inference.**" Decode is limited by HBM bandwidth.
+- "**GPU memory is like RAM; add more.**" HBM is soldered on the package. Capacity is fixed per GPU model.
+- "**Two dies means two GPUs.**" Blackwell's two dies, and MI355X's eight XCDs in SPX mode, appear as one device to software unless you partition.
+
+## Words to remember
+
+- **GPU, accelerator, device**: used interchangeably here.
+- **VRAM**: the GPU's own memory (HBM on datacenter GPUs).
+- **Kernel**: a function launched on the GPU. Not the Linux kernel; context tells which.
+- **OAM**: the OCP Accelerator Module, the mezzanine form factor MI355X uses; eight sit on one baseboard (UBB).
+- **Driver**: the Linux kernel module that talks to the GPU (`amdgpu`, `nvidia`). See [the software stack](/learn/gpu-software-stack/).
+
+## Further reading
+
+- [AMD CDNA 4 architecture white paper](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf): XCDs, IODs, HBM, partitioning
+- [AMD Instinct MI355X specifications](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html) · [ROCm GPU hardware specifications](https://rocm.docs.amd.com/en/latest/reference/gpu-arch-specs.html)
+- [Inside NVIDIA Blackwell Ultra](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/) · [NVIDIA GB300 NVL72](https://www.nvidia.com/en-us/data-center/gb300-nvl72/)
+- [rocminfo](https://rocm.docs.amd.com/projects/rocminfo/en/latest/) · [amd-smi CLI](https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html)
+- [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/): why LLM math is matrix multiplies

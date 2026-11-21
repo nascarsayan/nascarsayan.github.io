@@ -1,0 +1,50 @@
+---
+/** Row of headline numbers. items: [{ label, value, detail?, tone? }] */
+import './tones.css';
+interface Item { label: string; value: string | number; detail?: string; tone?: 'note' | 'good' | 'warn' | 'risk' | 'neutral' | 'primary' }
+interface Props { items: Item[] }
+const { items } = Astro.props;
+---
+
+<dl class="kpis">
+  {items.map((k) => (
+    <div class:list={['kpi', `tone-${k.tone ?? 'neutral'}`]}>
+      <dt>{k.label}</dt>
+      <dd class="value" data-count>{k.value}</dd>
+      {k.detail && <dd class="detail">{k.detail}</dd>}
+    </div>
+  ))}
+</dl>
+
+<style>
+  .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 24px 0; }
+  .kpi { container-type: inline-size; min-width: 0; padding: 12px 16px; border-radius: 0 var(--radius) var(--radius) 0; background: var(--t-bg); border-left: 3px solid var(--t-fg); }
+  dt { font-size: 0.75rem; letter-spacing: 0.5px; text-transform: uppercase; color: var(--color-muted); }
+  .value { margin: 4px 0 0; font-size: clamp(0.95rem, 14cqi, 1.75rem); white-space: nowrap; overflow: hidden; font-weight: var(--font-weight-medium); line-height: 1.2; color: var(--t-fg); }
+  .tone-neutral .value { color: var(--color-text); }
+  .detail { margin: 4px 0 0; font-size: 0.8125rem; color: var(--color-gray-700); }
+</style>
+
+<script>
+  // Shrink values that overflow their tile (e.g. "7 → 18 of 18"), then give every
+  // value in the row the smallest size, so the tiles read evenly.
+  const fitRow = (row: HTMLElement) => {
+    const values = [...row.querySelectorAll<HTMLElement>('.value')];
+    values.forEach((el) => (el.style.fontSize = ''));
+    let min = Infinity;
+    for (const el of values) {
+      let size = parseFloat(getComputedStyle(el).fontSize);
+      while (el.scrollWidth > el.clientWidth + 1 && size > 12) {
+        size -= 1;
+        el.style.fontSize = `${size}px`;
+      }
+      min = Math.min(min, size);
+    }
+    values.forEach((el) => (el.style.fontSize = `${min}px`));
+  };
+  const rows = [...document.querySelectorAll<HTMLElement>('.kpis')];
+  const ro = new ResizeObserver((entries) => entries.forEach((e) => fitRow(e.target as HTMLElement)));
+  rows.forEach((r) => ro.observe(r));
+  // Count-up changes the text; fit again once the final values are in.
+  addEventListener('load', () => setTimeout(() => rows.forEach(fitRow), 1000));
+</script>

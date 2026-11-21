@@ -1,0 +1,211 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPU memory hierarchy and the roofline"
+short: "Memory & roofline"
+description: "Registers, LDS/shared memory, L1, L2, Infinity Cache and HBM with sizes per level for MI355X, H100 and B200; coalescing and bank conflicts; and the roofline: arithmetic intensity (FLOPs per byte) against ridge points, worked for real kernels and for LLM prefill and decode."
+updated: "2026-11-10"
+track: silicon
+order: 3
+requires: [gpu-execution-model]
+eyebrow: "Learn · Kernels & silicon"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import levels from './_levels.diagram';
+import idea from './_idea.diagram';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import MatRow from '@/components/content/MatRow.astro';
+import Op from '@/components/content/Op.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Roofline from './_Roofline.astro';
+import * as ex from './_example';
+
+A GPU can do arithmetic far faster than it can fetch the numbers to do it on. An MI355X can perform about 600 FP8 operations in the time it takes to read one byte from HBM. Almost every kernel optimization is about **reusing data that is already close** to the math units. This page lists the levels of memory, how big and how far each is, and then gives the one model that predicts whether a kernel is limited by math or by memory: the **roofline**.
+
+## The idea first
+
+**A kitchen with one road to the warehouse.** Picture a kitchen with thousands of fast cooks (the GPU's math units) and one delivery road to a huge warehouse far away (HBM, the GPU's main memory). The cooks can chop faster than the road can bring ingredients. Shelves next to the stove (the caches, LDS and registers) are small but instant. Every speed question on a GPU reduces to: **for each ingredient that comes down the road, how much cooking happens?**
+
+| Piece | Kitchen version | The question it answers |
+| --- | --- | --- |
+| Registers | what each cook holds in their hands | "Is the number I need already here, right now?" |
+| LDS / shared memory | the team's shared table; the team decides what goes on it | "What should my team fetch once and share?" |
+| L1, L2, Infinity Cache | shelves the kitchen restocks by itself with what was used recently | "Did someone fetch this recently?" |
+| HBM | the warehouse: holds everything (288 GB), far away | "How fast can the road deliver?" (~8 TB/s) |
+| Arithmetic intensity | cooking steps per kilogram delivered (FLOPs per byte) | "Is this recipe heavy on cooking or on ingredients?" |
+| Ridge point | the recipe where road and cooks are exactly matched | "Which one will run out first?" |
+
+<Diagram spec={idea} title="Which runs out first: the road or the cooks?" caption="MI355X spec figures, approximate. The exact numbers for real kernels are computed in the roofline explorer below.">
+  <Step title="A salad: little cooking per ingredient" path="store -> shelf -> cook" state={{ store: { tone: 'warn', detail: 'road jammed: 100 % busy' }, cook: { tone: 'muted', detail: 'mostly waiting' } }}>Adding two arrays (`y = a·x + y`) is one quick chop per ingredient: about 0.17 FLOP per byte. The road is the limit; faster cooks would change nothing. This is **memory-bound**, and so is LLM decode.</Step>
+  <Step title="A stew: lots of cooking per ingredient" path="shelf -> cook -> dish" state={{ store: { tone: 'neutral', detail: 'road has spare room' }, cook: { tone: 'good', detail: 'all cooks busy' } }}>A big matrix multiply uses each number thousands of times once it is on the shelf. The cooks are the limit. This is **compute-bound**, and so is LLM prefill.</Step>
+  <Step title="The break-even recipe" focus="store, cook, store -> shelf, shelf -> cook" state={{ store: { detail: '8 TB/s' }, cook: { detail: '2,500 TFLOP/s' } }}>Divide cook speed by road speed: 2,500 × 10¹² ÷ 8 × 10¹² ≈ 310 FLOPs per byte. Recipes below that wait on the road; recipes above it wait on the cooks. That number is the **ridge point**.</Step>
+</Diagram>
+
+**Where the analogy breaks.** The road delivers in fixed crates (128-byte cache lines), so asking for one scattered gram wastes a whole crate. The cooks never stand idle by choice: while one group waits for a delivery, another group cooks ([latency hiding](/learn/gpu-execution-model/#scheduling-and-latency-hiding)). And the kitchen restocks the automatic shelves on its own rules; only the team table (LDS) is under the kernel's control.
+
+## The levels on an MI355X
+
+<Diagram spec={levels} title="Where a load is served" caption="Sizes from the public MI355X specs (the values rocminfo reports) and the ROCm hardware spec table. Press play: each step sends a load one level further out. Click the i on a box for details.">
+  <Step path="reg -> l1" narration={{ l1: 'Hit in the 32 KB L1: the line comes straight back' }}>L1 hit. The data was used recently by this CU. Shortest trip after registers and LDS.</Step>
+  <Step path="reg -> l1 -> l2" narration={{ l2: 'Miss in L1, hit in this XCD’s 4 MB L2' }}>L1 miss, L2 hit. Another workgroup on the same XCD read this line recently.</Step>
+  <Step path="reg -> l1 -> l2 -> mall" narration={{ mall: 'Miss in L2, hit in the 256 MB Infinity Cache' }}>L2 miss, Infinity Cache hit. Shared by all 8 XCDs, so a line another XCD fetched is caught here.</Step>
+  <Step path="reg -> l1 -> l2 -> mall -> hbm" narration={{ hbm: 'Miss everywhere: HBM, hundreds of ns' }}>Miss everywhere: the line comes from HBM. This is the trip every kernel tries to make rare.</Step>
+  <Step path="reg -> lds" narration={{ lds: 'LDS: no tags, no misses, the kernel put the data here' }}>LDS read. No cache lookup at all: the kernel copied the data here earlier and knows it is present.</Step>
+</Diagram>
+
+| Level | MI355X (CDNA4) | H100 SXM (Hopper) | B200 (Blackwell) | Managed by | Visible to |
+| --- | --- | --- | --- | --- | --- |
+| Registers | 512 KB VGPR per CU (128 MB per GPU) | 256 KB per SM (33 MB per GPU) | 256 KB per SM | compiler | one thread (lane) |
+| LDS / shared memory | **160 KB** per CU | up to 228 KB per SM, carved out of a 256 KB L1/shared array | same as H100 (228 of 256 KB) | the kernel, explicitly | one workgroup / block |
+| L1 data cache | 32 KB per CU (vector) + 16 KB scalar per 2 CUs | the rest of the 256 KB array | same | hardware | one CU / SM |
+| L2 | 4 MB per XCD, 32 MB total | 50 MB | 126 MB (NVIDIA tuning guide, GB200) | hardware | one XCD (AMD) / whole GPU |
+| Last-level cache | 256 MB Infinity Cache | — | — | hardware | whole GPU |
+| HBM | 288 GB HBM3E, ~8 TB/s | 80 GB HBM3, ~3.35 TB/s | 180 GB HBM3E, ~8 TB/s | allocator (`hipMalloc`, `cudaMalloc`) | whole GPU, and peers via links |
+
+Sources: MI355X fields as `rocminfo` reports them (per the public specs), ROCm GPU hardware specs, CUDA compute-capability tables, Hopper and Blackwell tuning guides, the Hopper architecture blog, vendor product pages. HBM bandwidths are spec-sheet peaks and therefore approximate; B200 bandwidth is NVIDIA's DGX B200 figure (64 TB/s for 8 GPUs) divided by 8.
+
+Three things stand out:
+
+1. **The register file is the biggest fast memory on the chip.** 128 MB of VGPRs on an MI355X is four times its L2. Keeping a tile in registers is the most effective reuse there is.
+2. **LDS is software-managed.** Nothing is cached in it automatically. A kernel copies data in with `ds_write` (or `global_load_lds` on gfx950), synchronizes with a barrier, and reads it with `ds_read`. That gives exact control, which is why fast kernels use it.
+3. **AMD's L2 is per die.** The 32 CUs of an XCD share 4 MB. Data used by CUs on different XCDs is fetched into each XCD's L2 separately; the 256 MB Infinity Cache sits behind all of them and catches much of that.
+
+Latency grows at each step outward: registers are read every cycle, LDS in tens of cycles, HBM in hundreds of nanoseconds. Vendors do not publish exact latencies; treat those as orders of magnitude. The [execution model page](/learn/gpu-execution-model/#scheduling-and-latency-hiding) shows how resident waves hide them.
+
+## Worked example: one wavefront's load
+
+Follow one instruction, `global_load_dwordx4`, issued by one wave of 64 lanes on an MI355X, and see how many bytes each level must move. All numbers below are computed from the access pattern.
+
+<Walkthrough title="One wave loads data, then reads it from LDS" caption="Cache line 128 B (rocminfo), 64 LDS banks of 4 B (CDNA4 ISA guide). Latency is assumed, not measured.">
+  <WStep title="1 · Coalesced: lane i reads bytes 16i to 16i + 15">
+    <MatRow>
+      <Matrix title="Cache line each lane touches" rows={ex.laneRows} cols={ex.laneCols} data={ex.coalescedLine} digits={0} scale="seq" />
+    </MatRow>
+    Each lane asks for 16 bytes, neighbours ask for neighbouring bytes. The 64 requests merge (**coalesce**) into {ex.coalesced.lines} cache lines: {ex.fmt(ex.coalescedFetched)} bytes fetched, {ex.fmt(ex.coalesced.bytesUsed)} bytes used. 100 % efficiency, one instruction.
+  </WStep>
+  <WStep title="2 · Strided: lane i reads x[32 · i]">
+    <MatRow>
+      <Matrix title="Cache line each lane touches" rows={ex.laneRows} cols={ex.laneCols} data={ex.stridedLine} digits={0} scale="seq" />
+    </MatRow>
+    Now each lane reads one float from a column of a row-major matrix 32 floats wide: addresses 128 bytes apart. Every lane lands in its own line: {ex.strided.lines} lines, {ex.fmt(ex.stridedFetched)} bytes fetched to use {ex.fmt(ex.strided.bytesUsed)}. **{ex.stridedEff} % efficiency.** Same instruction count, {ex.stridedFetched / ex.strided.bytesUsed}× the traffic. Fix: change the data layout, or load rows and transpose in LDS.
+  </WStep>
+  <WStep title="3 · The trip out and back">
+    <Kpis items={[
+      { label: 'Lines requested', value: String(ex.coalesced.lines), detail: '× 128 B, coalesced case' },
+      { label: 'Bytes in flight to fill HBM', value: ("" + (ex.inFlight / 1e6) + " MB"), detail: '8 TB/s × 500 ns (assumed)' },
+      { label: 'Per CU', value: ("" + (ex.fmt(ex.perCU / 1024)) + " KiB"), detail: '÷ 256 CUs' },
+      { label: 'Waves per CU', value: ("~" + (ex.wavesPerCU)), detail: 'each with one 1 KiB load outstanding', tone: 'primary' },
+    ]} />
+    The L1 misses, so the request goes to this XCD's L2, then the Infinity Cache, then HBM (diagram above). The whole GPU moves 1 KiB in about {ex.oneKbPs} ps, but each request waits hundreds of nanoseconds. To keep HBM busy, about {ex.wavesPerCU} waves per CU must have a load like this outstanding at once (Little's law; see [latency hiding](/learn/gpu-execution-model/#scheduling-and-latency-hiding)).
+  </WStep>
+  <WStep title="4 · Into LDS, then a column read: 64-way bank conflict">
+    <MatRow>
+      <Matrix title="LDS bank each lane hits (tile 64 floats wide)" rows={ex.laneRows} cols={ex.laneCols} data={ex.bankNoPad} digits={0} scale="none" note="Lane i reads row i, column 0. Bank = (address ÷ 4) mod 64." />
+    </MatRow>
+    The kernel writes the data to LDS (`ds_write_b128`) so the whole workgroup can reuse it. Then each lane reads **column 0** of a 64 × 64 float tile: lane *i* reads row *i*. Rows are 256 bytes apart, a multiple of 64 banks × 4 B, so all 64 lanes hit **bank 0**. LDS serves one address per bank per pass: {ex.wayNoPad} passes instead of 1.
+  </WStep>
+  <WStep title="5 · Pad each row by one float: no conflict">
+    <MatRow>
+      <Matrix title="LDS bank each lane hits (tile 65 floats wide)" rows={ex.laneRows} cols={ex.laneCols} data={ex.bankPad} digits={0} scale="seq" />
+    </MatRow>
+    Allocate the tile 65 floats wide and use only 64. Row *i* now starts at bank *i*, so the column spreads over all 64 banks: worst bank load {ex.wayPad}, one pass. Kernels either pad like this or **swizzle** (XOR the column index with the row). gfx950 also has transposing LDS reads (`ds_read_b64_tr_b16`) that return matrix fragments in the layout MFMA wants. → [PTX and AMDGCN](/learn/gpu-isa-ptx/)
+  </WStep>
+  <WStep title="6 · Registers: where the reuse pays off">
+    The fragment now sits in VGPRs, read every cycle by the vector and matrix units at no extra cost. Every FLOP done on it here is a FLOP that did not need a new byte from HBM. Counting those FLOPs per byte is exactly the roofline, next.
+  </WStep>
+</Walkthrough>
+
+## The roofline
+
+**Arithmetic intensity** ($$I$$):
+
+$$
+I = \frac{\text{FLOPs performed}}{\text{bytes moved from HBM}}
+$$
+
+A kernel's best possible speed is the smaller of two ceilings:
+
+- memory ceiling: **$$\text{bandwidth} \times I$$**
+- compute ceiling: **peak FLOP/s**
+
+They meet at the **ridge point**, $$I = \text{peak} / \text{bandwidth}$$. Below it the kernel is **memory-bound**: a faster ALU would not help. Above it, it is **compute-bound**: more bandwidth would not help.
+
+### Ridge points
+
+| GPU | Precision (dense, no sparsity) | Peak (spec, approx.) | HBM (approx.) | Ridge point |
+| --- | --- | --- | --- | --- |
+| MI355X | FP16 / BF16 matrix | 2.5 PFLOP/s | 8 TB/s | **~310 FLOP/B** |
+| MI355X | FP8 matrix | 5.0 PFLOP/s | 8 TB/s | **~625 FLOP/B** |
+| MI355X | MXFP4 / MXFP6 matrix | 10.1 PFLOP/s | 8 TB/s | ~1,260 FLOP/B |
+| H100 SXM | FP16 / BF16 Tensor | ~990 TFLOP/s | 3.35 TB/s | ~295 FLOP/B |
+| H100 SXM | FP8 Tensor | ~1,980 TFLOP/s | 3.35 TB/s | ~590 FLOP/B |
+| B200 | FP8 Tensor | ~4.5 PFLOP/s | ~8 TB/s | ~560 FLOP/B |
+
+AMD lists MI355X dense numbers directly. NVIDIA's H100 page lists FP8 as 3,958 TFLOP/s *with sparsity*; dense is half. The B200 FP8 value is NVIDIA's DGX B200 72 PFLOP/s (8 GPUs, sparse) ÷ 8 ÷ 2, so it is derived, not quoted.
+
+The lesson: on every current datacenter GPU a kernel needs a few **hundred** FLOPs per byte from HBM before the matrix cores become the limit. Lower precision moves the ridge **up**: FP8 doubles peak FLOPs, so the same kernel must reuse data twice as much to stay compute-bound.
+
+<Callout tone="note" title="Sparsity numbers">
+"With sparsity" figures assume 2:4 structured sparsity (two of every four weights are zero). LLM serving almost never uses it. Compare dense to dense.
+</Callout>
+
+### Try it
+
+Pick a kernel and a GPU. The red dot sits at the kernel's intensity; its height is the best speed the roofline allows. The Q/K/V presets use gpt-oss-120b's projection shape ($$K = 2{,}880$$ in, $$N = 5{,}120$$ out, published config).
+
+<Roofline />
+
+What to notice:
+
+- **Element-wise add** sits at the far left (about 0.17 FLOP/B in BF16, 1 FLOP per 6 bytes). Activations, residual adds and norms are always memory-bound; the fix is to **fuse** them into a neighbouring kernel so their data skips a trip to HBM.
+- **Decode, 1 sequence**: $$M = 1$$, so each weight is used once. Intensity $$\approx 2 / \text{bytes per weight}$$. Batch 64 moves it about 64× right, still below the ridge.
+- **Prefill** and the **$$8{,}192^3$$ square GEMM** sit far right: compute-bound, *if* the kernel achieves near-minimum traffic. That is what [tiling](/learn/gemm-tiling/) is for.
+- Switch FP8 → MXFP4 on MI355X: the dot moves right (fewer bytes), but the ridge moves right too (more FLOP/s).
+
+### Apply it to an LLM
+
+A linear layer with weight matrix $$W$$ does 2 FLOPs per weight per token. If $$T$$ tokens go through it together and each weight is stored in $$b$$ bytes, then $$I \approx 2T/b$$ (activations are small next to weights here).
+
+gpt-oss-120b stores its expert weights in **MXFP4**: 4-bit values plus one 8-bit scale per 32 values, about 0.53 bytes per weight (format arithmetic; published config says `quant_method: mxfp4`). The comparison point is the FP8 ridge, about 625, assuming 8-bit activations (a "w4a8" checkpoint; see [tokens and transformers](/learn/tokens-and-transformers/)).
+
+| Phase (dense weights: attention, shared layers) | Tokens per weight read ($$T$$) | $$I \approx 2T/0.53$$ | Against the ~625 ridge |
+| --- | --- | --- | --- |
+| Decode, 1 sequence | 1 | ~4 | **memory-bound**, ~150× below |
+| Decode, batch 64 | 64 | ~240 | still memory-bound |
+| Prefill, one 4,000-token prompt | 4,000 | ~15,000 | **compute-bound** |
+| Prefill, same prompt, MoE expert weights (4 of 128 experts per token) | ~125 | ~470 | near the ridge, below it |
+
+Mixture-of-experts makes decode worse. gpt-oss-120b has 128 experts and routes each token to 4 (published config). A decode batch of 64 tokens makes 256 expert assignments over 128 experts: about **2 tokens per expert weight read**, not 64. A 4,000-token prefill gives about 125 tokens per expert. → [LLM kernels](/learn/llm-kernels/)
+
+Attention in decode cannot be fixed by batching at all. Each sequence reads its own KV cache. For gpt-oss (64 query heads sharing 8 KV heads of size 64, 16-bit KV), each cached token costs 2,048 bytes of K and V per layer and yields about 16,000 FLOPs ($$Q \cdot K$$ and $$P \cdot V$$ for 64 heads): **$$I \approx 8$$ FLOP/B**, whatever the batch size.
+
+A rough upper bound: one decode step of gpt-oss-120b reads its ~5.1 B active parameters (published figure) at ~0.53 B each, about 2.7 GB. At 8 TB/s that is ~0.34 ms, so no more than ~3,000 steps per second for one sequence on one MI355X, before counting attention, KV reads or any overhead. (Order-of-magnitude estimate; attention weights are not MXFP4 and real kernels do not hit peak bandwidth.)
+
+So: **prefill wants FLOPs, decode wants bandwidth.** That is the root of disaggregated inference: running the two phases on hardware suited to each.
+
+## Common misconceptions
+
+- **"More HBM capacity makes it faster."** Capacity decides what fits (weights + KV cache). Speed of decode follows bandwidth, not capacity.
+- **"Caches will handle reuse."** L2 and Infinity Cache help, but LLM weights (tens of GB) never fit. Reuse has to be designed into the kernel through tiling and batching.
+- **"Peak TFLOPS predicts speed."** Only for kernels above the ridge. Most of a decode step sits far below it.
+- **"FP4 makes everything 4× faster."** It cuts bytes per weight 4× versus BF16, which helps memory-bound decode almost 4×. Compute-bound prefill gains only where FP4 matrix instructions are used end to end.
+
+## How this shows up in operations
+
+- **HBM used is not HBM busy.** A serving Pod holding most of an MI355X's HBM says nothing about bandwidth use. Memory-bandwidth utilization comes from profiler counters, not `amd-smi` memory usage. → [GPU metrics](/learn/gpu-metrics/)
+- **Partition modes change the cache picture.** Splitting an MI355X into smaller compute partitions gives each partition fewer XCDs and their L2s. → [GPU partitioning](/learn/gpu-partitioning/)
+- **HBM errors are memory-hierarchy events.** ECC errors and retired pages are reported per HBM stack/page. → [GPU failures](/learn/gpu-failures/)
+
+## Further reading
+
+- [ROCm GPU hardware specifications](https://rocm.docs.amd.com/en/latest/reference/gpu-arch-specs.html): LDS, L1, L2, Infinity Cache, VGPR file per AMD GPU
+- [AMD MI300 series microarchitecture](https://rocm.docs.amd.com/en/latest/reference/gpu-arch/mi300.html): XCD, L2, Infinity Cache layout (same structure as MI355X)
+- [AMD CDNA4 ISA reference guide (PDF)](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf): LDS banks and memory instructions
+- [AMD MI355X specifications](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html) · [NVIDIA H100](https://www.nvidia.com/en-us/data-center/h100/) · [NVIDIA DGX B200](https://www.nvidia.com/en-us/data-center/dgx-b200/)
+- CUDA compute capabilities: [memory per SM](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html#compute-capabilities-table-memory-information-per-compute-capability) · [shared-memory carve-outs](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html#compute-capabilities-table-shared-memory-capacity-per-compute-capability)
+- [Hopper tuning guide](https://docs.nvidia.com/cuda/hopper-tuning-guide/index.html) · [Blackwell tuning guide](https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html): L2 sizes, shared memory
+- [Roofline model](https://en.wikipedia.org/wiki/Roofline_model) (Wikipedia)
+- [gpt-oss-120b config](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json): experts, heads, MXFP4

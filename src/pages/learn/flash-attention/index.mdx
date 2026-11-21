@@ -1,0 +1,233 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "FlashAttention and paged attention: attention as GPU kernels"
+short: "FlashAttention & paged attn"
+description: "Why naive attention is memory-bound, how FlashAttention computes exact attention tile by tile with the online softmax (worked numeric example), how the kernel uses LDS and matrix cores, and how decode-time paged attention differs: one query per sequence, KV scattered in blocks, GQA reuse, split-KV for long contexts."
+updated: "2026-11-10"
+track: silicon
+order: 5
+requires: [gemm-tiling, attention-and-kv-cache]
+eyebrow: "Learn · Kernels & silicon"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import MatRow from '@/components/content/MatRow.astro';
+import Op from '@/components/content/Op.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import HbmCalc from './_HbmCalc.astro';
+import loop from './_loop.diagram';
+import paged from './_paged.diagram';
+import idea from './_idea.diagram';
+import * as ex from './_example';
+
+[Attention and the KV cache](/learn/attention-and-kv-cache/) explains *what* attention computes. This page is about *how* GPU kernels compute it fast. Attention is two matrix multiplies with a softmax in between. The hard part is not the math. It is the size of the matrix in the middle.
+
+## The idea first
+
+**What FlashAttention is for.** Attention compares every token with every earlier token. For a 4,000-token prompt that is a 4,000 × 4,000 sheet of scores per head. The math on that sheet is cheap for a GPU; *writing the sheet to memory and reading it back* is not. FlashAttention computes the same answer without ever writing the sheet down.
+
+**The analogy: a desk and a warehouse.** HBM is a big warehouse, far away. The chip's LDS and registers are a small desk, close by. Naive attention fills the warehouse with the whole score sheet, then walks back and forth to read it. FlashAttention keeps a block of questions (queries) on the desk, has the warehouse send the keys and values over one block at a time, and keeps only **three running notes** per question:
+
+| Note | What it means | The question it answers |
+| --- | --- | --- |
+| **m** | the best match score seen so far | "What is my reference point?" (softmax needs the row's max) |
+| **l** | the total weight of everything seen so far | "What do I divide by at the end?" (softmax's denominator) |
+| **o** | the weighted blend of values seen so far | "What is my answer so far?" (the numerator) |
+
+When a better match shows up, the old notes were written relative to the old best, so they are scaled down once (multiply by exp(old m − new m)) and the new block is added. Like converting a running total into a new currency: one multiply, no need to recount what came before.
+
+<Diagram spec={idea} title="Desk, warehouse, three notes" caption="S and P exist only one small tile at a time, on the desk.">
+  <Step title="Questions on the desk" focus="desk">A workgroup copies a block of query rows (for example 128) onto the chip once.</Step>
+  <Step title="One block of keys and values at a time" focus="hbm, desk, hbm -> desk" path="desk -> hbm">It asks HBM for the next K and V block (for example 64 keys) and scores its queries against them, right there in registers.</Step>
+  <Step title="Update the notes, throw the scores away" focus="desk, notes, desk -> notes">The block's scores update m, l and o and are then discarded. The next block overwrites them.</Step>
+  <Step title="What naive attention does instead" focus="s, desk -> s">Naive attention writes the whole T × T score sheet (and then the weight sheet P) to HBM and reads both back. For 64 heads and 4,000 tokens that is gigabytes per layer.</Step>
+  <Step title="Write the answer once" focus="notes, out, notes -> out">After the last block: answer = o ÷ l, written to HBM once.</Step>
+</Diagram>
+
+**Where the analogy breaks.** The desk is tiny (LDS is 160 KB per CU on MI355X), so block sizes are a tuning trade-off, not a free choice. And the result is not an estimate: the running notes give the exact same answer as the full sheet (checked with numbers below).
+
+## The naive version and its problem
+
+For one head, with $$T$$ tokens and head size $$d$$:
+
+1. $$S = Q \cdot K^\top / \sqrt{d}$$. $$Q$$ and $$K$$ are $$T \times d$$, so **$$S$$ is $$T \times T$$**.
+2. $$P = \operatorname{softmax}(S)$$, row by row, with future positions masked (causal).
+3. $$O = P \cdot V$$, $$T \times d$$.
+
+Take a 4,000-token prompt and gpt-oss-120b's 64 query heads (published config). One head's S in FP32 is 4,000 × 4,000 × 4 B = **64 MB**; all heads of one layer, **4 GB**. A naive implementation writes S to HBM, reads it back for the softmax, writes P, and reads P again for $$P \cdot V$$. That traffic dwarfs the $$4 \times T^2 \times d$$ FLOPs of the two products, so naive attention is memory-bound and its memory use grows with $$T^2$$. Move the sliders to see by how much:
+
+<HbmCalc />
+
+Read the FLOP-per-byte tiles. FlashAttention's intensity stays near the query block size times the GQA group (at most 128 × 8 = 1,024; the Q and O traffic pull it a little lower), whatever the prompt length: each K/V byte it reads is used by every query row of the block and every query head of the group. Naive attention's intensity stays in the tens (about $$d/3$$) because its $$T \times T$$ sheets grow as fast as the math.
+
+## FlashAttention: never store S
+
+**FlashAttention** (Dao et al., 2022) computes exact attention without ever writing S or P to HBM. A workgroup takes a block of query rows, keeps them on chip, and streams K and V through LDS one block at a time. For each K/V block it computes a tile of S in registers, turns it into a tile of P, multiplies by V, and accumulates into O. The $$T \times T$$ matrix exists only one tile at a time.
+
+The obstacle is the softmax. Each row of $$P$$ is $$\exp(s_i - \max) / \sum_j \exp(s_j - \max)$$, and the max and the sum run over the **whole row**, which you have not seen yet when you process the first block.
+
+### The online softmax
+
+The trick (Milakov and Gimelshein, 2018, "online normalizer calculation") is the three running notes from [the idea first](#the-idea-first). Per query row and per K/V block:
+
+```text
+m_new = max(m, max_j s_j)
+scale = exp(m - m_new)                       # shrink old terms to the new reference
+l     = l * scale + sum_j exp(s_j - m_new)
+o     = o * scale + sum_j exp(s_j - m_new) * v_j
+m     = m_new
+# after the last block: output = o / l
+```
+
+### Worked example: one query row, three blocks
+
+The same toy model as the [attention walkthrough](/learn/attention-and-kv-cache/#worked-example-four-tokens-real-numbers) ($$d = 4$$, one head, tokens "The GPU is fast ! ."). We follow the query of the last token "." through its 6 keys, 2 keys per block. Every number is computed at build time.
+
+<Walkthrough title="Online softmax for the query of “.”" caption="A real kernel does the same with 64 to 128 keys per block, 64 to 128 query rows at once, and d = 64 or 128. The blocks of S and P live in registers only.">
+  <WStep title="1 · What naive attention would store">
+    <MatRow>
+      <Matrix title="S = Q·Kᵀ ÷ √4, causal (6 × 6)" rows={ex.tokens} cols={ex.tokens} data={ex.S} scale="seq" corner="query ↓ key →" highlight={{ rows: [5] }} />
+    </MatRow>
+    Naive attention writes this whole matrix to HBM, then reads it back. FlashAttention cuts it into tiles (here 2 × 2), computes one tile at a time in registers, and skips the tiles above the diagonal. We follow the outlined row: q<sub>“.”</sub> = [{ex.q.join(', ')}] against all six keys, two keys at a time.
+  </WStep>
+  {ex.run.steps.map((st, b) => (
+    <WStep title={("" + (b + 2) + " · Block " + (b + 1) + ": keys “" + (st.keys.join('”, “')) + "”" + (b === 0 ? '' : st.scale < 0.9999 ? ' (new max: rescale)' : ' (max unchanged)'))}>
+      <MatRow>
+        <Matrix title="Scores s (this block)" rows={['.']} cols={st.keys} data={ex.row(st.s)} scale="seq" />
+        <Op>→</Op>
+        <Matrix title={("p = exp(s − m), m = " + (ex.fmt(st.mNew, 3)))} rows={['.']} cols={st.keys} data={ex.row(st.p, 3)} digits={3} scale="seq" />
+        <Op>×</Op>
+        <Matrix title="V block" rows={st.keys} cols={ex.dims} data={ex.V.slice(b * 2, b * 2 + 2)} scale="div" />
+      </MatRow>
+      <MatRow>
+        {b > 0 && <><Matrix title={("o before (× " + (ex.fmt(st.scale, 3)) + ")")} rows={['o']} cols={ex.dims} data={ex.row(st.oOld, 3)} digits={3} scale="div" /><Op>→</Op></>}
+        <Matrix title="o (running, not yet divided)" rows={['o']} cols={ex.dims} data={ex.row(st.o, 3)} digits={3} scale="div" highlight={{ rows: [0] }} />
+        <Matrix title="o ÷ l so far" rows={['.']} cols={ex.dims} data={ex.row(st.out)} scale="div" />
+      </MatRow>
+      <Kpis items={[
+        { label: 'running max m', value: b === 0 ? ("−∞ → " + (ex.fmt(st.mNew, 3))) : ("" + (ex.fmt(st.mOld, 3)) + " → " + (ex.fmt(st.mNew, 3))), tone: b > 0 && st.scale < 0.9999 ? 'warn' : 'neutral' },
+        { label: 'rescale old by', value: b === 0 ? 'nothing yet' : ex.fmt(st.scale, 3), tone: b > 0 && st.scale < 0.9999 ? 'warn' : 'neutral' },
+        { label: 'running sum l', value: ex.fmt(st.l, 3), tone: 'primary' },
+      ]} />
+      {b === 0 && <p>The first block sets m to its larger score, {ex.fmt(st.mNew, 3)}. p = {ex.pText(st)}; {ex.lText(st)}. o is p times the two value rows. If the row ended here, o ÷ l would already be the right answer for these two keys.</p>}
+      {b > 0 && st.scale < 0.9999 && <p>Key “fast” scores {ex.fmt(st.s[1], 3)}, above the old max {ex.fmt(st.mOld, 3)}. Everything accumulated so far was computed relative to the old max, so l and o are multiplied by exp({ex.fmt(st.mOld, 3)} − {ex.fmt(st.mNew, 3)}) = {ex.fmt(st.scale, 3)} before the new terms are added: {ex.lText(st)}. This one multiply is the whole trick: no earlier score has to be revisited.</p>}
+      {b > 0 && st.scale >= 0.9999 && <p>Both scores are below m = {ex.fmt(st.mNew, 3)}, so the scale is exp(0) = 1 and the block just adds its terms: {ex.lText(st)}. This was the last block.</p>}
+    </WStep>
+  ))}
+  <WStep title="5 · Divide once, and check against plain softmax">
+    <MatRow>
+      <Matrix title="Flash: o ÷ l" rows={['.']} cols={ex.dims} data={ex.row(ex.run.out, 3)} digits={3} scale="div" />
+      <Op>=</Op>
+      <Matrix title="Plain: softmax(s) · V" rows={['.']} cols={ex.dims} data={ex.row(ex.plain, 3)} digits={3} scale="div" />
+    </MatRow>
+    <MatRow>
+      <Matrix title="Plain softmax weights (the row naive attention stores as P)" rows={['.']} cols={ex.tokens} data={ex.row(ex.weights)} scale="seq" />
+    </MatRow>
+    One division at the end gives the output. It matches the textbook result to within {ex.maxDiff.toExponential(0)} (floating-point rounding), and the weights are the same row as for “.” in the attention walkthrough. The result is **exact**, not an approximation, and the full row of weights was never stored. Subtracting the running max also keeps exp() from overflowing, which matters in FP16 and BF16.
+  </WStep>
+  <WStep title="6 · Split-KV: two workgroups, then merge">
+    <MatRow>
+      <Matrix title="Workgroup 1: keys 1–3" note={("m₁ = " + (ex.fmt(ex.half1.m, 3)) + ", l₁ = " + (ex.fmt(ex.half1.l, 3)))} rows={['o₁']} cols={ex.dims} data={ex.row(ex.half1.o, 3)} digits={3} scale="div" />
+      <Matrix title="Workgroup 2: keys 4–6" note={("m₂ = " + (ex.fmt(ex.half2.m, 3)) + ", l₂ = " + (ex.fmt(ex.half2.l, 3)))} rows={['o₂']} cols={ex.dims} data={ex.row(ex.half2.o, 3)} digits={3} scale="div" />
+      <Op>→</Op>
+      <Matrix title="Merged: (a₁·o₁ + a₂·o₂) ÷ l" rows={['.']} cols={ex.dims} data={ex.row(ex.mergeOut, 3)} digits={3} scale="div" />
+    </MatRow>
+    In decode there is one query row, so one workgroup per sequence would leave most CUs idle. **Split-KV** gives each half of the keys to its own workgroup. Each returns its own (m, l, o). A small merge kernel rescales both to the larger max ({ex.fmt(ex.merge.m, 3)}: a₁ = {ex.fmt(ex.merge.a1, 3)}, a₂ = {ex.fmt(ex.merge.a2, 3)}), adds them (l = {ex.fmt(ex.merge.l, 3)}) and divides. Same answer, the same rescaling as step 3.
+  </WStep>
+</Walkthrough>
+
+### The kernel
+
+<Diagram spec={loop} title="FlashAttention forward, one workgroup" caption="Block sizes are typical examples. S and P never leave registers. Step through the messages with the player." autoSteps />
+
+- **Grid:** one workgroup per (query block, head, sequence). A 4,000-token prompt with 128-row query blocks and 64 heads gives 32 × 64 = 2,048 workgroups: plenty for 256 CUs.
+- **Two GEMMs per K/V block** run on the matrix cores (`v_mfma_*` on AMD, `mma` / `wgmma` / `tcgen05.mma` on NVIDIA). The softmax steps (max, exp, scale) run on the ordinary vector ALUs, which are many times slower per FLOP than matrix cores. Keeping that part small and overlapped is most of the tuning work.
+- **Causal masking** skips K/V blocks entirely above the diagonal: roughly half the work for prefill.
+- **Grouped-query attention (GQA):** gpt-oss has 64 query heads but only 8 KV heads, so 8 query heads read the same K and V. Kernels load a K/V block once and use it for all 8.
+- **Sliding window:** gpt-oss alternates `sliding_attention` layers (window 128 tokens) with `full_attention` layers (published config). In sliding layers each query only visits the last 128 keys, so the K/V loop is a few blocks long however long the prompt is.
+
+HBM traffic is now roughly: read Q once, read K and V once per query block, write O once. Prefill attention becomes compute-bound for long prompts, like a GEMM.
+
+### Generations
+
+| Version | What changed (from the papers) |
+| --- | --- |
+| FlashAttention (2022) | IO-aware tiling; S never written to HBM; memory linear in T |
+| FlashAttention-2 (2023) | fewer non-matmul FLOPs; one head split across thread blocks; better work split between warps. About 2× FlashAttention: 50–73 % of A100 peak, up from 25–40 % |
+| FlashAttention-3 (2024) | Hopper-specific: asynchronous Tensor Cores and TMA, warp specialization, softmax interleaved with matmul, FP8. 1.5–2× FlashAttention-2 on H100 |
+
+On AMD, FlashAttention-style kernels come from Composable Kernel (CK), AITER and Triton. vLLM picks one per platform; see the backend list below.
+
+<Callout tone="note" title="Misconception: FlashAttention is an approximation">
+It computes the same result as the textbook formula, up to floating-point rounding. It is faster because it moves less data, not because it computes less.
+</Callout>
+
+## Decode: paged attention
+
+In decode each sequence brings **one** new query token per step, and its keys and values sit in the KV cache. Two things change.
+
+**1. The shape is a matrix-vector product.** Per head, $$q$$ is $$1 \times d$$ and $$K$$ is $$n \times d$$ for $$n$$ cached tokens. There is no reuse of K or V within a sequence: each cached byte is used once per step. For gpt-oss with 16-bit KV, each cached token is 2 × 8 KV heads × 64 × 2 B = 2,048 bytes per layer and yields about 16,000 FLOPs across the 64 query heads: **≈8 FLOP/B**, far below any ridge point. Decode attention speed is set by how fast the kernel streams the KV cache from HBM. → [Roofline](/learn/gpu-memory-hierarchy/#apply-it-to-an-llm)
+
+**2. The KV cache is paged.** vLLM stores K and V in fixed-size **blocks** (for example 16 tokens) scattered across HBM, with a **block table** per sequence that lists its block numbers in order, like a page table (PagedAttention, Kwon et al., 2023). The attention kernel follows the table:
+
+```text
+// Illustrative inner loop of a paged decode kernel, one workgroup = one (sequence, KV head)
+for (logical_block = 0; logical_block < num_blocks(seq); logical_block++) {
+  phys  = block_table[seq][logical_block];          // indirection, like a page table
+  K_blk = key_cache[phys][kv_head];                  // e.g. 16 tokens x 64 dims
+  V_blk = value_cache[phys][kv_head];
+  s     = q[8 query heads] . K_blk^T / sqrt(d);      // GQA: 8 queries share this K
+  online-softmax update of (m, l, o) with s and V_blk
+}
+out[seq][8 query heads] = o / l
+```
+
+<Diagram spec={paged} title="One paged decode workgroup reading its sequence's KV">
+  <Step focus="wg, bt" path="wg -> bt">The workgroup handles sequence A and KV head 0, so it holds the queries of the 8 query heads in that GQA group. It first reads the sequence's block table: logical blocks 0, 1, 2 live in physical blocks 7, 2 and 9.</Step>
+  <Step focus="wg, p7" path="wg -> p7">Physical block 7: K and V of tokens 0–15 for this KV head (16 × 64 × 2 B = 2 KiB each). Scores for all 8 queries, then the online-softmax update of m, l, o.</Step>
+  <Step focus="wg, p2" path="wg -> p2">Block 2, tokens 16–31. The blocks are not adjacent in memory; only the table knows the order. Each byte is used once per step, by 8 query heads.</Step>
+  <Step focus="wg, p9" path="wg -> p9">Block 9, the partly filled last block (9 of 16 slots). The kernel masks the unused slots. Block 4 belongs to another sequence and is never touched.</Step>
+  <Step focus="wg, out" path="wg => out">Divide o by l for each of the 8 query heads and write the output. With split-KV, several workgroups each take some blocks and a merge kernel combines them (step 6 above).</Step>
+</Diagram>
+
+### Too few workgroups: split-KV
+
+One workgroup per (sequence, KV head) gives a batch of 4 sequences × 8 KV heads = **32 workgroups** for 256 CUs. Long contexts make each of those workgroups long and the GPU mostly idle. **Split-KV** (also called Flash-Decoding) splits each sequence's KV cache into chunks, runs one workgroup per chunk, and then a small reduction kernel combines the partial (m, l, o) triples, using the same rescaling as the online softmax (step 6 of the walkthrough). This is the attention version of [split-K](/learn/gemm-tiling/#when-there-are-not-enough-tiles).
+
+### Mixed batches
+
+Servers like vLLM V1 batch prefill chunks and decode tokens from different requests into one step. Their attention backends therefore take a **variable number of query tokens per sequence** (thousands for a prefill chunk, one for a decode) over the same paged KV cache, and pick tiling per sequence inside one launch.
+
+## vLLM attention backends
+
+vLLM chooses a backend at start-up and logs the choice (`Using %s backend out of potential backends: ...`, or `selected via --attention-backend`). Current vLLM source registers, among others:
+
+| Backend | Platform | Kernel source |
+| --- | --- | --- |
+| `FLASH_ATTN` | NVIDIA | FlashAttention 2/3 |
+| `FLASHINFER` | NVIDIA | FlashInfer |
+| `TRITON_ATTN` | both | Triton |
+| `ROCM_ATTN` | AMD | vLLM's ROCm kernels |
+| `ROCM_AITER_FA` | AMD | AITER FlashAttention |
+
+Which backend a server uses is printed in its start-up log; backend names change between vLLM versions.
+
+## How this shows up in operations
+
+- **Long prompts cost quadratically in prefill attention, linearly in KV memory.** TTFT for a 32k-token prompt is dominated by attention far more than for a 4k prompt. → [Prefill](/learn/prefill-phase/)
+- **KV-cache block size and layout are part of the contract** between prefill and decode in disaggregated serving: the KV transfer must reorder blocks into the decode side's layout.
+- **Backend choice is a start-up decision.** A different image, vLLM version or environment variable can switch the attention backend and change speed with no code change.
+
+## Further reading
+
+- [FlashAttention (arXiv 2205.14135)](https://arxiv.org/abs/2205.14135) · [FlashAttention-2 (2307.08691)](https://arxiv.org/abs/2307.08691) · [FlashAttention-3 (2407.08608)](https://arxiv.org/abs/2407.08608)
+- [Online normalizer calculation for softmax (arXiv 1805.02867)](https://arxiv.org/abs/1805.02867)
+- [PagedAttention / vLLM paper (arXiv 2309.06180)](https://arxiv.org/abs/2309.06180)
+- [Flash-Decoding for long-context inference](https://crfm.stanford.edu/2023/10/12/flashdecoding.html) (Stanford CRFM)
+- [flash-attention repository](https://github.com/Dao-AILab/flash-attention) · [Composable Kernel](https://github.com/ROCm/composable_kernel) · [AITER](https://github.com/ROCm/aiter)
+- [vLLM attention backends (source)](https://github.com/vllm-project/vllm/tree/main/vllm/v1/attention/backends)
+- [gpt-oss-120b config](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json): heads, KV heads, sliding window

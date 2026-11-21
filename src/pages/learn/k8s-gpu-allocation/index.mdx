@@ -1,0 +1,263 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "How Kubernetes hands out GPUs: device plugins and DRA"
+short: "GPU allocation in k8s"
+description: "The two allocation models side by side: the device plugin API (a count per node, the kubelet picks the device) and Dynamic Resource Allocation (named devices with attributes, the scheduler picks). How each one works step by step, why a cluster should run one model per GPU, and how to read the result on a sample cluster."
+updated: "2026-11-10"
+track: kubernetes
+order: 1
+requires: [gpu-software-stack]
+eyebrow: "Learn · GPUs in Kubernetes"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Yaml from './_Yaml.astro';
+import dra from './_dra.diagram';
+import life from './_life.diagram';
+import idea from './_idea.diagram';
+import plugin from './_plugin.diagram';
+import * as c from './_sample';
+
+## The idea
+
+Kubernetes has no built-in idea of a GPU. A GPU is a PCIe card with a kernel driver (`amdgpu` for AMD Instinct) and a few character device files under `/dev`. A container can use one only if those files exist inside the container and no other container is using that card. So something has to answer four questions: **what GPUs exist, what does this Pod need, which GPU does it get, and how do the device files get into its container?**
+
+Think of a theatre with reserved seats:
+
+- The **seat map** lists every seat with its row and its view. In Kubernetes this is the **ResourceSlice**: each node's DRA driver lists its 8 GPUs by name, with attributes such as NUMA node and PCI address.
+- A **booking** says "one seat, stalls". This is the **ResourceClaim**: "one device of class `gpu.amd.com`".
+- The **box office** picks a free seat that matches, and prints it on the ticket *before* you travel. This is the **scheduler**: it writes "`gpu-5-132` on `gpu-node-1`" into the claim's status, then binds the Pod to that node.
+- The **usher** walks you to that exact seat. This is the **kubelet** with the **DRA driver**: they turn the claim into device files in the container, through a small file format called [CDI](/learn/cdi-device-injection/).
+
+<Diagram spec={idea} title="Four questions, four pieces" mode="build">
+  <Step focus="inv">What exists? The driver publishes the seat map: one ResourceSlice per node, one entry per GPU.</Step>
+  <Step focus="req">What do I need? Each Pod gets a booking: a ResourceClaim for one GPU.</Step>
+  <Step focus="pick, inv -> pick, req -> pick">Which one, and where? The scheduler matches bookings to free seats and writes the answer into the claim.</Step>
+  <Step focus="hand, pick -> hand">How do I get it? On the chosen node, the kubelet and the driver put that GPU's device files into the container.</Step>
+</Diagram>
+
+Where the analogy breaks: a Pod does not book its own ticket. A **template** in the Deployment stamps out one claim per Pod, and the claim dies with the Pod. Several containers can sit in the same "seat" by naming the same claim. And the seat map says nothing about whether a seat is broken: a dead GPU stays listed unless something removes or taints it.
+
+The older model, the **device plugin**, is a car park with a sign "8 spaces free". The scheduler only sees the number. The attendant at the gate (the kubelet on the node) picks a space when you arrive, and nobody upstairs knows which one you got. The sample cluster on this page uses the theatre (DRA) for GPUs, and still uses the car park for RDMA NICs.
+
+## Worked example: one prefill Pod's life
+
+Follow one Pod in a sample cluster: `…-5f7d8c9b6-p4x7k` of the Deployment <code>{c.deploy}</code>, from "12 replicas wanted" to a container holding GPU <code>{c.device}</code>. Every object below is trimmed to the fields that matter; names are illustrative. First the moving parts, then each object as it changes.
+
+<Diagram spec={life} title="Who talks to whom (press play)">
+  <Step path="rsc => api" title="1 · Pod created">The ReplicaSet controller sees 12 wanted, fewer running, and creates Pod …-p4x7k. It is Pending: no node yet.</Step>
+  <Step path="rcc => api" title="2 · Claim created">The resourceclaim controller sees the Pod's spec.resourceClaims entry and creates a ResourceClaim from the template, owned by the Pod.</Step>
+  <Step path="sched -> api" title="3 · Allocate and bind" narration={{ api: 'Claim status: gpu-5-132 on gpu-node-1; Pod bound to that node' }}>The scheduler reads the ResourceSlices, finds a free GPU on a node that passes affinity, writes the allocation into the claim, then binds the Pod.</Step>
+  <Step path="kubelet -> api" title="4 · kubelet picks it up">The kubelet on gpu-node-1 sees a Pod bound to its node, and reads the claim it references.</Step>
+  <Step path="kubelet -> drv" title="5 · Prepare" narration={{ drv: 'Writes the CDI file, returns 2 CDI device IDs' }}>The kubelet calls the driver's NodePrepareResources over a Unix socket. The driver writes a CDI spec file and answers with CDI device IDs.</Step>
+  <Step path="kubelet -> ctrd => ctr" title="6 · Start the container">The kubelet asks containerd to create the container and passes the CDI IDs. containerd reads the CDI file and adds /dev/kfd, /dev/dri/card5 and /dev/dri/renderD132.</Step>
+</Diagram>
+
+<Walkthrough title={("Pod …-p4x7k gets " + (c.device))} caption="Illustrative example output in the shape of kubectl get -o yaml, /var/run/cdi and the kubelet and containerd journals on gpu-node-1. The node's clock reads at least 1 s behind the API server's, so only compare times from the same clock.">
+  <WStep title="1 · The Deployment asks for 12 replicas, each with a GPU claim">
+    <Yaml lang="yaml" code={c.podYamlDra} />
+    The Pod template does not say "1 GPU" in `resources.limits`. It names a Pod-level claim `gpu` built from the template <code>{c.template}</code>, and the container opts in with `resources.claims: [{name: gpu}]`. The RDMA NIC is still a plain counted resource (`rdma/hca_devices`); that is the device plugin model.
+  </WStep>
+  <WStep title="2 · The template: “one AMD GPU, any one”">
+    <Yaml lang="yaml" code={c.templateYaml} />
+    A `ResourceClaimTemplate` is a cookie cutter, not a claim. It holds no GPU. `deviceClassName: gpu.amd.com` refers to a DeviceClass whose CEL selector is `device.driver == 'gpu.amd.com'`, so any device the AMD driver publishes qualifies. `ExactCount` with `count: 1` asks for exactly one.
+  </WStep>
+  <WStep title="3 · Pod created, claim stamped out (Pending)">
+    <Yaml lang="yaml" code={c.claimYamlNew} />
+    At 10:12:00 (API clock) the ReplicaSet controller creates the Pod, and in the same second the resourceclaim controller in kube-controller-manager creates this claim. Its name is `<pod name>-<claim name in the Pod>-<random>`, it is owned by the Pod, and its status is empty: nothing is allocated, and the Pod has no node. The scheduler will not place the Pod until the claim exists.
+  </WStep>
+  <WStep title="4 · The scheduler picks gpu-5-132 and writes it down">
+    <Matrix title="GPUs held in the sample cluster (1 = in a claim)" rows={c.gpuNodes} cols={c.deviceNames} data={c.usageGrid} scale="seq" digits={0} corner="node ↓ device →" highlight={{ cells: [[0, c.deviceNames.indexOf(c.device)]] }} note={("" + (c.usedGpus) + " of " + (c.totalGpus) + " GPUs held; outlined: this Pod's GPU.")} />
+    <Yaml lang="yaml" code={c.claimStatusYaml} />
+    The scheduler's `DynamicResources` plugin filters nodes: the node must have the `example.com/gpu-node` label (Pod affinity) and an unallocated device in its ResourceSlice that matches the class. It chose <code>{c.device}</code> in pool <code>{c.node}</code>. In `PreBind` it wrote `allocation` (which device, plus a `nodeSelector` pinning the claim to that node) and `reservedFor` (this Pod's UID). Only then did it bind the Pod. `PodScheduled=True` at 10:12:00. The choice is now in the API: anyone can see which Pod holds which GPU.
+  </WStep>
+  <WStep title="5 · kubelet → driver: NodePrepareResources">
+    <Yaml lang="json" code={c.driverCheckpoint} />
+    The kubelet on <code>{c.node}</code> sees the bound Pod and calls the AMD driver over `/var/lib/kubelet/plugins/gpu.amd.com/dra.sock` with the claim's UID. The driver looks up <code>{c.device}</code> (PCI `0000:8b:00.0`, NUMA node 1), records it in its own checkpoint (above) and returns two CDI device IDs: a `common` entry for every claim and one for this claim and device.
+  </WStep>
+  <WStep title="6 · The driver's CDI file">
+    <Yaml lang="yaml" code={c.cdiYaml} />
+    CDI (Container Device Interface) is a JSON/YAML format that says "to give a container device X, make these edits". This file says: add three character devices. The device name <code>{c.device}</code> encodes the two DRM minor numbers: **{c.parseDeviceName(c.device).card}** and **{c.parseDeviceName(c.device).render}**. `/dev/kfd` is the ROCm compute interface, one per node, shared by all GPUs.
+  </WStep>
+  <WStep title="7 · containerd builds the container">
+    <Yaml lang="yaml" code={c.cdiCommonYaml} />
+    The kubelet passes the two CDI IDs in the CRI `CreateContainer` call. containerd (`enable_cdi = true`, `cdi_spec_dirs = ['/etc/cdi', '/var/run/cdi']`) finds both entries, applies their edits to the OCI spec, and runc creates the device nodes and the device cgroup rules. On the node clock: sandbox at 10:11:58.900, init container done at 10:11:59, `prefill` started at 10:12:00.
+  </WStep>
+  <WStep title="8 · Inside the container: one GPU, nothing else">
+    <Yaml lang="text" code={c.containerView} />
+    The host has 9 card and 8 render nodes under `/dev/dri` (8 GPUs, plus `card0` for the BMC's VGA chip); the container sees one of each. ROCm in the container can open only that GPU. The kubelet logged `podStartE2EDuration="1.1s"` (skewed by the clock offset; the real figure is a few seconds). The Pod turned Ready at 10:16:00, **{c.loadText}** later: that is model loading, not Kubernetes.
+  </WStep>
+</Walkthrough>
+
+When the Pod is deleted the path runs backwards: the kubelet calls `NodeUnprepareResources` (the driver deletes the CDI file), the resourceclaim controller removes the Pod from `reservedFor`, and then deletes the claim. <code>{c.device}</code> is free again, and the replacement Pod gets a new claim, possibly for another GPU on another node.
+
+## Model 1: device plugins
+
+The **device plugin API** is the older model: beta in Kubernetes 1.10, GA in 1.26, gRPC API version `v1beta1`. It treats devices like CPU or memory: a node has $$N$$ units of an **extended resource**, and Pods ask for a count.
+
+### How it works, step by step
+
+<Diagram spec={plugin} title="Device plugin: a count goes up, the kubelet picks the device" autoSteps />
+
+- **Register and advertise.** The plugin opens its own gRPC socket under `/var/lib/kubelet/device-plugins/`, calls `Register` on `kubelet.sock` in the same directory, then streams device IDs with a `Healthy`/`Unhealthy` flag over `ListAndWatch`. The kubelet publishes the healthy count in `status.allocatable`.
+- **Schedule by count.** A Pod sets `resources.limits: {amd.com/gpu: 1}` (whole integers, no overcommit). The scheduler finds a node where `allocatable − already requested ≥ 1`. It does **not** pick a device.
+- **Allocate on the node.** At admission the kubelet's device manager picks free IDs (optionally asking `GetPreferredAllocation` for a topology-friendly set) and calls `Allocate`. The answer is device nodes, mounts, env vars, annotations or CDI names.
+- **Record locally.** The choice lives only in `kubelet_internal_checkpoint`. Tools ask the kubelet's **PodResources API** (`List`, `GetAllocatableResources`) over a local socket.
+
+The plugin must register again when the kubelet restarts (the socket is recreated). An unhealthy device lowers allocatable; running Pods are not touched.
+
+### The same API for RDMA NICs
+
+A cluster that uses DRA for GPUs often still runs a device plugin on every GPU node, for RDMA NICs. The files on `gpu-node-1`:
+
+```text
+/var/lib/kubelet/device-plugins/
+  kubelet.sock                   # kubelet registration endpoint
+  hca_devices.sock               # the RDMA shared device plugin
+  kubelet_internal_checkpoint    # which Pod got which device IDs
+```
+
+The node advertises `rdma/hca_devices: 1k` in `status.allocatable`, and each prefill container asks for `rdma/hca_devices: "1"`. That is the device plugin model in action. See [GPU Pod networking](/learn/gpu-pod-networking/).
+
+### Limits of a count
+
+- **No properties.** `amd.com/gpu: 1` cannot say "with at least 192 GiB of memory" or "on the same PCIe root as NIC 3". Node labels are a workaround, but they describe the whole node, not one GPU.
+- **The scheduler is blind.** It knows how many GPUs a node has free, not which ones. Topology choices happen late, on the node, after placement.
+- **No cluster-wide record.** Which Pod has which GPU is local kubelet state. Fault handling ("which Pod uses the GPU at PCI `0000:8b:00.0`?") needs a per-node query.
+- **Partitions are awkward.** A partitioned MI355X (for example CPX mode, several logical GPUs per card) needs another resource name or a different count per node. See [GPU partitioning](/learn/gpu-partitioning/).
+- **No sharing model.** Time-slicing tricks advertise one GPU as several fake IDs.
+
+## Model 2: Dynamic Resource Allocation
+
+**DRA** is the API group `resource.k8s.io`. Version `v1` is **stable since Kubernetes 1.34** and on by default. A 1.35 cluster serves only `resource.k8s.io/v1`:
+
+```shell
+$ kubectl api-resources --api-group=resource.k8s.io
+NAME                     APIVERSION           NAMESPACED   KIND
+deviceclasses            resource.k8s.io/v1   false        DeviceClass
+resourceclaims           resource.k8s.io/v1   true         ResourceClaim
+resourceclaimtemplates   resource.k8s.io/v1   true         ResourceClaimTemplate
+resourceslices           resource.k8s.io/v1   false        ResourceSlice
+```
+
+DRA borrows the shape of storage: a **DeviceClass** is like a StorageClass, a **ResourceClaim** is like a PersistentVolumeClaim, and a **ResourceSlice** is the inventory a driver publishes. The difference from storage is that the scheduler itself does the matching; there is no external provisioner.
+
+<Diagram spec={dra} title="DRA objects and who writes them">
+  <Step path="drv => slice" title="Publish">The driver on each node writes its ResourceSlice: 8 named GPUs with attributes.</Step>
+  <Step path="tmpl => claim" title="Stamp">The resourceclaim controller creates one claim per Pod from the template.</Step>
+  <Step focus="pod, pod -> claim" title="Reference">The Pod lists the claim in spec.resourceClaims; the container names it in resources.claims.</Step>
+  <Step path="sched => claim" focus="slice, class, sched -> slice, sched -> class" title="Allocate">The scheduler reads slices and the class, then writes the chosen device into the claim's status.</Step>
+</Diagram>
+
+### How it works, in one line per step
+
+The worked example above shows each step with example objects. In short: the driver **publishes** a ResourceSlice per node; a DeviceClass **classifies** devices with CEL; the resourceclaim controller **stamps** a claim per Pod from the template; the scheduler **allocates** (it holds the device in memory in `Reserve` so two Pods in flight cannot take the same GPU, then writes `status.allocation` and `reservedFor` in `PreBind`, then binds); the kubelet has the driver **prepare** it (CDI); on Pod exit the kubelet **unprepares** and the claim is **released** and deleted. Details: [DRA objects in detail](/learn/dra-objects/), [DRA on the node](/learn/dra-on-the-node/), [CDI](/learn/cdi-device-injection/).
+
+## Device plugin or DRA: what changes
+
+Pick a model to see the same prefill Pod under it: what the Pod asks for, what the scheduler can see, and where the answer ends up.
+
+<Explorer id="model" options={[{ key: 'model', label: 'Allocation model', default: 'dra', values: [{ value: 'plugin', label: 'Device plugin (amd.com/gpu)' }, { value: 'dra', label: 'DRA (gpu.amd.com)' }] }]} variants={[{ match: { model: 'plugin' }, id: 'm-plugin' }, { match: { model: 'dra' }, id: 'm-dra' }]}>
+  <Variant id="m-plugin">
+    **The Pod asks for a count** (hypothetical: the sample cluster's AMD device plugin is off):
+    <Yaml lang="yaml" code={c.podYamlPlugin} />
+    **The scheduler knows one number per node** (Node `status.allocatable`):
+    <Yaml lang="text" code={c.gpuNodes.slice(0, 3).map((n) => ("" + (n) + "  amd.com/gpu: 8   allocated: " + (c.usedOn(n).length) + "   free: " + (8 - c.usedOn(n).length))).join('\n') + '\n…'} />
+    It picks a node with free ≥ 1. **Who picks the GPU:** the kubelet's device manager, after binding. **Where the answer lives:** `/var/lib/kubelet/device-plugins/kubelet_internal_checkpoint` on that node; ask the PodResources API on the node to learn it. "Which Pod has the GPU at `0000:8b:00.0`?" needs a per-node query.
+  </Variant>
+  <Variant id="m-dra">
+    **The Pod names a claim** built from a template:
+    <Yaml lang="yaml" code={c.podYamlDra.split('\n').slice(0, 9).join('\n')} />
+    **The scheduler knows every device by name**, with attributes (ResourceSlice of {c.node}):
+    <Yaml lang="text" code={c.gpus.map((g) => ("" + (g.name.padEnd(11)) + " pci " + (g.pci) + "  numa " + (g.numa) + "  " + (c.usedOn(c.node).includes(g.name) ? 'allocated' : 'free'))).join('\n')} />
+    It picks a node *and* a device before binding. **Who picks the GPU:** the scheduler. **Where the answer lives:** `ResourceClaim.status.allocation` in the API: `kubectl get resourceclaims -A` answers "who holds what" for the whole cluster.
+  </Variant>
+</Explorer>
+
+## Side by side
+
+| | Device plugin | DRA |
+| --- | --- | --- |
+| Pod asks for | `resources.limits: {amd.com/gpu: 1}` | `spec.resourceClaims` → claim for 1 device of class `gpu.amd.com` |
+| Capacity lives in | Node `status.allocatable` | `ResourceSlice` objects; nothing on the Node |
+| Unit | integer count | named device with attributes and capacities |
+| Who picks the device | kubelet, after scheduling | scheduler, before binding |
+| Record of the choice | kubelet checkpoint file on the node | `ResourceClaim.status.allocation` in the API |
+| Device-level selection | none (node labels only) | CEL on attributes; constraints across devices |
+| Several containers or Pods share one device | no | yes, by referencing the same claim |
+| Node agent API | `Register`, `ListAndWatch`, `Allocate`, `GetPreferredAllocation`, `PreStartContainer` | registration, `NodePrepareResources`, `NodeUnprepareResources` |
+| How devices enter the container | `Allocate` response (device nodes, mounts, env, or CDI names) | CDI device IDs |
+| GA in | 1.26 | 1.34 |
+
+<Callout tone="warn" title="Never both for the same GPUs">
+A device plugin and a DRA driver do not know about each other. If both advertise the same 8 GPUs, the scheduler can give GPU 3 to one Pod through `amd.com/gpu` and to another through a claim. The AMD operator rejects a `DeviceConfig` with both enabled, but only at reconcile time; `kubectl apply` still succeeds.
+</Callout>
+
+## A typical DRA-only setup
+
+- **DRA only.** The AMD device plugin is off in the operator's `DeviceConfig` (`devicePlugin.enableDevicePlugin: false`) and the DRA driver is on (`draDriver.enable: true`). See [GPU operators](/learn/gpu-operators/).
+- **Whole GPUs, exclusive.** GPUs run in SPX/NPS1 mode, so each card is one device. No partitions, no sharing. A request that cannot be met stays Pending.
+- **One claim per Pod.** Deployments use a `ResourceClaimTemplate` with `allocationMode: ExactCount`, `count: 1`. Up to 8 replicas share an MI355X node, one per GPU. Nothing spreads them across nodes unless you add topology spread constraints or anti-affinity; without them, one node failure can take out many replicas at once.
+- **Placement.** A Pod that requires only a GPU-node label plus a claim can land on any GPU node. Restricting a namespace to its own nodes takes extra affinity or an admission policy.
+- **The driver is part of the platform.** The DRA driver is a DaemonSet the cluster operator deploys and upgrades. If it is down on a node, no new GPU Pod can start there; running Pods keep their GPUs. A readiness gate can check that it is registered before the node takes GPU work.
+- **Allocated is not ready.** A claim in state `allocated,reserved` says the GPU is assigned, not that the workload is up. The application's readiness probe owns that.
+
+### The sample cluster in numbers
+
+<Kpis items={[
+  { label: 'GPU nodes', value: c.gpuNodes.length, detail: '8 MI355X each' },
+  { label: 'GPUs published', value: c.totalGpus, detail: ("" + (c.gpuNodes.length) + " ResourceSlices") },
+  { label: 'GPUs in claims', value: c.usedGpus, detail: ("" + (c.targetCount) + " large-model + " + (c.draftCount) + " small-model Pods"), tone: 'primary' },
+  { label: 'Free', value: c.totalGpus - c.usedGpus, detail: 'only where affinity allows', tone: 'good' },
+]} />
+
+The heatmap in step 4 of the worked example is this table drawn as a grid: every claim's `status.allocation.devices.results[]` gives a pool (node) and a device. Each generated claim is named `<pod-name>-<claim-name-in-pod>-<random>`, so the holder is readable from the claim name.
+
+```shell
+$ kubectl get resourceclaims -A
+NAMESPACE   NAME                                          STATE
+gpu-demo    llm-prefill-5f7d8c9b6-p4x7k-gpu-z8k3q         allocated,reserved
+gpu-demo    llm-prefill-small-6c8d9f7b5-r2m9t-gpu-h5n2w   allocated,reserved
+…
+```
+
+The node side shows no GPU capacity at all:
+
+```shell
+$ kubectl get node gpu-node-1 -o jsonpath='{.status.allocatable}'
+{"cpu":"256","memory":"2113929216Ki","pods":"110","rdma/hca_devices":"1k", …}
+```
+
+Free GPUs per node must be computed: devices in the node's slice minus devices named in claims for that pool.
+
+```shell
+# GPUs in use on one node
+kubectl get resourceclaims -A -o json | jq -r '.items[].status.allocation.devices.results[]? | select(.pool=="gpu-node-1") | .device'
+```
+
+On <code>{c.node}</code> this lists {c.usedOn(c.node).map((d) => ("" + (d))).join(' and ')}: {c.usedOn(c.node).length} of 8 used, {c.freeOn(c.node).length} free.
+
+## Misconceptions
+
+- **"No `amd.com/gpu` on the node means the GPUs are missing."** No. Under DRA, capacity is only in ResourceSlices. Check `kubectl get resourceslices --field-selector spec.nodeName=<node>`.
+- **"DRA is alpha."** The core API is GA since 1.34. Some *features* on top (device taints, partitionable devices, consumable capacity) are still alpha in 1.35. See [DRA objects in detail](/learn/dra-objects/#feature-gates-in-kubernetes-135).
+- **"The claim belongs to the Deployment."** A template-generated claim is owned by one Pod. When the Pod is deleted, its claim goes too, and a replacement Pod gets a new claim, possibly for a different GPU on a different node.
+- **"DRA gives the scheduler GPU health."** Not by itself. A dead GPU stays in the ResourceSlice unless the driver removes it or something taints it.
+
+## NVIDIA
+
+NVIDIA has both models too. The **NVIDIA device plugin** advertises `nvidia.com/gpu` and is managed by the GPU Operator's `ClusterPolicy`. The **NVIDIA DRA driver** publishes devices of driver `gpu.nvidia.com` (plus `mig.nvidia.com` for MIG slices) and adds the `ComputeDomain` API for multi-node NVLink. In current operator releases it is managed by a separate `GPUCluster` resource, and a cluster has either a `ClusterPolicy` or a `GPUCluster`, not both. See [GPU operators](/learn/gpu-operators/) and [rack-scale GPUs](/learn/rack-scale-gpus/).
+
+## Further reading
+
+- [Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/) · [How DRA works](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/how-dra-works/) — Kubernetes docs
+- [Device plugins](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/) · [Monitoring device plugin resources (PodResources API)](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/#monitoring-device-plugin-resources) — Kubernetes docs
+- [AMD GPU DRA driver](https://github.com/ROCm/k8s-gpu-dra-driver) · [AMD operator DRA guide](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/dra/dra-driver.html)
+- [NVIDIA GPU DRA driver](https://github.com/NVIDIA/k8s-dra-driver-gpu) · [NVIDIA operator DRA guide](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html)

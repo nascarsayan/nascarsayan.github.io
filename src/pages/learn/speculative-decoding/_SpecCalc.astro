@@ -1,0 +1,90 @@
+---
+/**
+ * Page-local speedup calculator: acceptance rate α, draft length k and draft
+ * cost c → expected tokens per round E, round cost, speedup S, with a chart
+ * of S against k (1–12). Formula from Leviathan et al. 2022.
+ */
+---
+
+<figure class="sc" data-sc>
+  <figcaption class="sc-title">Speedup calculator</figcaption>
+  <div class="sc-in">
+    <label>Acceptance rate α <input data-k="a" type="range" min="0.3" max="0.95" step="0.01" value="0.8" /> <output data-o="a"></output></label>
+    <label>Draft length k <input data-k="k" type="range" min="1" max="12" step="1" value="4" /> <output data-o="k"></output></label>
+    <label>Draft step cost c (÷ target step) <input data-k="c" type="range" min="0" max="0.3" step="0.01" value="0.05" /> <output data-o="c"></output></label>
+  </div>
+  <div class="sc-out">
+    <div><span class="k">Tokens per round E</span><span class="v" data-o="E"></span></div>
+    <div><span class="k">Round cost, in target steps</span><span class="v" data-o="cost"></span></div>
+    <div><span class="k">Speedup S</span><span class="v" data-o="S"></span></div>
+    <div><span class="k">Best k for this α and c</span><span class="v" data-o="best"></span></div>
+  </div>
+  <svg viewBox="0 0 560 205" class="sc-chart" role="img" aria-label="Speedup against draft length">
+    <g data-o="grid"></g>
+    <polyline data-o="line" fill="none" stroke="var(--color-primary)" stroke-width="2.5" />
+    <g data-o="dots"></g>
+    <text x="295" y="200" text-anchor="middle" class="ax">draft length k</text>
+    <text x="12" y="90" text-anchor="middle" class="ax" transform="rotate(-90 12 90)">speedup S</text>
+  </svg>
+  <p class="sc-note" data-o="note"></p>
+  <p class="sc-src">E = (1 − α<sup>k+1</sup>) / (1 − α); cost = k·c + 1; S = E / cost. Assumes the same α at every position and that verifying k + 1 positions costs one target step (true while decode is bandwidth-bound). Real gains are lower: sampling, scheduling and KV bookkeeping cost time too.</p>
+</figure>
+
+<style>
+  .sc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .sc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .sc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .sc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .sc-in input { accent-color: var(--color-primary); }
+  .sc-in output { min-width: 40px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .sc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .sc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .sc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .sc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .sc-chart { width: 100%; max-width: 560px; height: auto; margin-top: 12px; font-family: var(--font-sans, system-ui); }
+  .sc-chart :global(.ax), .sc-chart :global(.tk) { font-size: 10px; fill: var(--color-muted); }
+  .sc-note { margin-top: 6px; font-size: 0.875rem; }
+  .sc-src { margin-top: 2px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const NS = 'http://www.w3.org/2000/svg';
+  const E = (a: number, k: number) => (1 - a ** (k + 1)) / (1 - a);
+  const S = (a: number, k: number, c: number) => E(a, k) / (k * c + 1);
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-sc]')) {
+    const $ = (s: string) => fig.querySelector<HTMLInputElement>(`[data-k=${s}]`)!;
+    const o = (s: string) => fig.querySelector<SVGElement & HTMLElement>(`[data-o=${s}]`)!;
+    const X = (k: number) => 50 + ((k - 1) / 11) * 490, Y = (s: number, max: number) => 165 - (s / max) * 150;
+    const el = (tag: string, attrs: Record<string, string | number>, text?: string) => {
+      const e = document.createElementNS(NS, tag);
+      for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, String(v));
+      if (text) e.textContent = text;
+      return e;
+    };
+    const update = () => {
+      const a = Number($('a').value), k = Number($('k').value), c = Number($('c').value);
+      o('a').textContent = a.toFixed(2); o('k').textContent = String(k); o('c').textContent = c.toFixed(2);
+      const e = E(a, k), cost = k * c + 1, s = e / cost;
+      o('E').textContent = e.toFixed(2); o('cost').textContent = cost.toFixed(2); o('S').textContent = `${s.toFixed(2)}×`;
+      const ks = [...Array(12).keys()].map((i) => i + 1);
+      const ss = ks.map((kk) => S(a, kk, c));
+      const best = ks[ss.indexOf(Math.max(...ss))];
+      o('best').textContent = `k = ${best} (${Math.max(...ss).toFixed(2)}×)`;
+      const max = Math.max(2, Math.ceil(Math.max(...ss)));
+      const grid = o('grid'); grid.replaceChildren();
+      for (let v = 0; v <= max; v++) {
+        grid.append(el('line', { x1: 50, x2: 540, y1: Y(v, max), y2: Y(v, max), stroke: v === 1 ? '#9ca3af' : 'var(--color-gray-100)', 'stroke-dasharray': v === 1 ? '4 3' : '' }));
+        grid.append(el('text', { x: 42, y: Y(v, max) + 3, 'text-anchor': 'end', class: 'tk' }, `${v}×`));
+      }
+      ks.forEach((kk) => grid.append(el('text', { x: X(kk), y: 178, 'text-anchor': 'middle', class: 'tk' }, String(kk))));
+      o('line').setAttribute('points', ks.map((kk, i) => `${X(kk)},${Y(ss[i], max)}`).join(' '));
+      const dots = o('dots'); dots.replaceChildren();
+      ks.forEach((kk, i) => dots.append(el('circle', { cx: X(kk), cy: Y(ss[i], max), r: kk === k ? 6 : 3, fill: kk === k ? 'var(--color-primary)' : '#94a3b8' })));
+      o('note').textContent = s < 1
+        ? `Slower than plain decoding: each round costs ${cost.toFixed(2)} target steps but yields only ${e.toFixed(2)} tokens.`
+        : `Each round costs ${cost.toFixed(2)} target steps and yields ${e.toFixed(2)} tokens on average, so ${s.toFixed(2)}× the tokens per unit of time. The chance that all ${k} guesses survive is α^${k} = ${(a ** k * 100).toFixed(0)}%.`;
+    };
+    fig.querySelectorAll('input').forEach((i) => i.addEventListener('input', update));
+    update();
+  }
+</script>

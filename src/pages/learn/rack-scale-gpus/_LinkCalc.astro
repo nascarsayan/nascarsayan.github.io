@@ -1,0 +1,53 @@
+---
+/** Page-local: time to move N GB over one GPU's scale-up link versus its scale-out NIC (ideal line rate). */
+import { links } from './_rack';
+---
+
+<figure class="lc" data-links={JSON.stringify(links)}>
+  <figcaption class="lc-title">Transfer time: fabric versus NIC</figcaption>
+  <label class="lc-in">Data to move <input data-k="gb" type="range" min="0" max="8" step="1" value="3" /> <output data-o="gb"></output></label>
+  <div class="lc-bars" data-o="bars"></div>
+  <p class="lc-note">Ideal: size ÷ line rate, one direction, no protocol overhead or congestion. Real transfers are slower. Scale-up numbers need both ends in the same rack (same NVLink or UALink domain).</p>
+</figure>
+
+<style>
+  .lc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .lc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .lc-in { display: flex; align-items: center; gap: 8px; font-size: 0.875rem; }
+  .lc-in input { accent-color: var(--color-primary); }
+  .lc-in output { font-weight: 600; font-variant-numeric: tabular-nums; }
+  .lc-bars { display: flex; flex-direction: column; gap: 6px; margin-top: 12px; }
+  .lc-bars :global(.row) { display: grid; grid-template-columns: minmax(200px, 42%) 1fr 80px; align-items: center; gap: 10px; font-size: 0.8125rem; }
+  .lc-bars :global(.bar) { height: 14px; border-radius: 999px; background: var(--color-gray-100); overflow: hidden; }
+  .lc-bars :global(.bar span) { display: block; height: 100%; border-radius: 999px; }
+  .lc-bars :global(.up span) { background: var(--color-success); }
+  .lc-bars :global(.out span) { background: var(--color-primary); }
+  .lc-bars :global(.t) { text-align: right; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .lc-note { margin-top: 8px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const GB = [0.1, 1, 5, 10, 50, 100, 250, 500, 1000];
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-links]')) {
+    const links = JSON.parse(fig.dataset.links!) as { label: string; GBps: number; kind: string }[];
+    const input = fig.querySelector<HTMLInputElement>('[data-k=gb]')!;
+    const out = fig.querySelector<HTMLElement>('[data-o=gb]')!;
+    const bars = fig.querySelector<HTMLElement>('[data-o=bars]')!;
+    const fmt = (s: number) => (s >= 1 ? `${s.toFixed(1)} s` : `${(s * 1000).toFixed(s < 0.01 ? 2 : 0)} ms`);
+    const update = () => {
+      const gb = GB[Number(input.value)];
+      out.textContent = `${gb} GB`;
+      const max = Math.max(...links.map((l) => gb / l.GBps));
+      bars.replaceChildren(...links.map((l) => {
+        const t = gb / l.GBps;
+        const row = document.createElement('div'); row.className = 'row';
+        const name = document.createElement('span'); name.textContent = `${l.label} · ${l.kind}`;
+        const bar = document.createElement('span'); bar.className = `bar ${l.kind === 'scale-up' ? 'up' : 'out'}`;
+        const fill = document.createElement('span'); fill.style.width = `${Math.max(1, (100 * t) / max)}%`; bar.append(fill);
+        const tt = document.createElement('span'); tt.className = 't'; tt.textContent = fmt(t);
+        row.append(name, bar, tt); return row;
+      }));
+    };
+    input.addEventListener('input', update); update();
+  }
+</script>

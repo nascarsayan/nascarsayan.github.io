@@ -1,0 +1,112 @@
+---
+/**
+ * "Will this binary load on this GPU?" Rules:
+ *  - NVIDIA (CUDA programming guide, binary compatibility): a cubin for sm_XY runs on
+ *    compute capability X.Z with Z >= Y (same major); sm_XYa (arch-specific) only on X.Y;
+ *    PTX for compute_XY is JIT-compiled on any GPU with capability >= X.Y.
+ *    A compatible cubin is used before PTX (CUDA_FORCE_PTX_JIT=1 overrides that).
+ *  - AMD (LLVM AMDGPU docs): a code object runs only on its processor, or on any
+ *    processor its generic target lists (gfx9-4-generic: gfx942, gfx950; no FP8/BF8).
+ */
+const gpus = {
+  h100: { label: 'H100 (sm_90, CC 9.0)', vendor: 'nv', cc: 90 },
+  b200: { label: 'B200 (sm_100, CC 10.0)', vendor: 'nv', cc: 100 },
+  mi300x: { label: 'MI300X (gfx942)', vendor: 'amd', gfx: 'gfx942' },
+  mi355x: { label: 'MI355X (gfx950)', vendor: 'amd', gfx: 'gfx950' },
+};
+const entries = {
+  nv: [
+    { id: 'sm_90', label: 'cubin sm_90', kind: 'cubin', cc: 90 },
+    { id: 'sm_90a', label: 'cubin sm_90a (wgmma)', kind: 'cubin', cc: 90, exact: true },
+    { id: 'sm_100', label: 'cubin sm_100', kind: 'cubin', cc: 100 },
+    { id: 'compute_90', label: 'PTX compute_90', kind: 'ptx', cc: 90 },
+    { id: 'compute_100', label: 'PTX compute_100', kind: 'ptx', cc: 100 },
+  ],
+  amd: [
+    { id: 'gfx942', label: 'code object gfx942', covers: ['gfx942'] },
+    { id: 'gfx950', label: 'code object gfx950', covers: ['gfx950'] },
+    { id: 'gfx9-4-generic', label: 'code object gfx9-4-generic', covers: ['gfx942', 'gfx950'], generic: true },
+  ],
+};
+const defaults = ['sm_90', 'compute_90', 'gfx942'];
+---
+
+<figure class="ld" data-ld={JSON.stringify({ gpus, entries })}>
+  <figcaption class="ld-title">Will this binary load? Pick the GPU and what the build put in the fat binary</figcaption>
+  <div class="ld-in">
+    <label>GPU in the node <select data-k="gpu">{Object.entries(gpus).map(([k, g]) => <option value={k} selected={k === 'mi355x'}>{g.label}</option>)}</select></label>
+    <fieldset data-v="nv"><legend>.nv_fatbin contains</legend>{entries.nv.map((e) => <label><input type="checkbox" value={e.id} checked={defaults.includes(e.id)} /> <code>{e.label}</code></label>)}</fieldset>
+    <fieldset data-v="amd"><legend>.hip_fatbin contains</legend>{entries.amd.map((e) => <label><input type="checkbox" value={e.id} checked={defaults.includes(e.id)} /> <code>{e.label}</code></label>)}</fieldset>
+  </div>
+  <ol class="ld-steps" data-o="steps"></ol>
+  <p class="ld-res" data-o="res"></p>
+</figure>
+
+<style>
+  .ld { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .ld-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .ld-in { display: flex; flex-wrap: wrap; gap: 12px 28px; font-size: 0.875rem; align-items: flex-start; }
+  .ld-in fieldset { min-width: 260px; display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 6px 12px 8px; border: 1px solid var(--color-gray-100); border-radius: 10px; }
+  .ld-in fieldset.is-off { display: none; }
+  .ld-in legend { padding: 0 4px; font-size: 0.75rem; color: var(--color-muted); }
+  .ld-in code { white-space: nowrap; }
+  .ld-in input, .ld-in select { accent-color: var(--color-primary); }
+  .ld-steps { margin: 14px 0 0; padding-left: 20px; font-size: 0.875rem; }
+  .ld-steps :global(li) { margin: 2px 0; }
+  .ld-steps :global(.ok) { color: #059669; font-weight: 600; }
+  .ld-steps :global(.no) { color: var(--color-muted); }
+  .ld-res { margin-top: 10px; padding: 8px 12px; border-radius: 10px; font-size: 0.9375rem; font-weight: 600; }
+  .ld-res.good { background: color-mix(in srgb, #10b981 18%, transparent); }
+  .ld-res.warn { background: color-mix(in srgb, #f59e0b 20%, transparent); }
+  .ld-res.risk { background: color-mix(in srgb, #e5484d 18%, transparent); }
+</style>
+
+<script>
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-ld]')) {
+    const { gpus, entries } = JSON.parse(fig.dataset.ld!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const update = () => {
+      const g = gpus[$<HTMLSelectElement>('[data-k=gpu]').value];
+      fig.querySelectorAll<HTMLElement>('fieldset').forEach((f) => f.classList.toggle('is-off', f.dataset.v !== g.vendor));
+      const on = new Set([...fig.querySelectorAll<HTMLInputElement>(`fieldset[data-v=${g.vendor}] input:checked`)].map((i) => i.value));
+      const list = entries[g.vendor].filter((e: { id: string }) => on.has(e.id));
+      const li: string[] = [];
+      const res = $<HTMLElement>('[data-o=res]');
+      const say = (tone: string, text: string) => { res.className = `ld-res ${tone}`; res.textContent = text; };
+      if (g.vendor === 'nv') {
+        const major = Math.floor(g.cc / 10);
+        let cubin = null, ptx = null;
+        for (const e of list) {
+          if (e.kind === 'cubin') {
+            const ok = e.exact ? e.cc === g.cc : Math.floor(e.cc / 10) === major && e.cc <= g.cc;
+            li.push(`<li class="${ok ? 'ok' : 'no'}">${e.label}: ${ok ? 'matches this GPU' : e.exact ? `arch-specific, runs only on CC ${e.cc / 10}` : `different major version (${Math.floor(e.cc / 10)} vs ${major})`}</li>`);
+            if (ok && !cubin) cubin = e;
+          } else {
+            const ok = e.cc <= g.cc;
+            li.push(`<li class="${ok ? 'ok' : 'no'}">${e.label}: ${ok ? 'can be JIT-compiled for this GPU' : `targets a newer GPU (CC ${e.cc / 10})`}</li>`);
+            if (ok && !ptx) ptx = e;
+          }
+        }
+        if (!list.length) li.push('<li class="no">nothing selected</li>');
+        $<HTMLElement>('[data-o=steps]').innerHTML = li.join('');
+        if (cubin) say('good', `Runs natively: the driver loads the ${cubin.label}.`);
+        else if (ptx) say('warn', `Runs after JIT: the driver compiles the ${ptx.label} at first use and caches it in ~/.nv/ComputeCache. Slower first start; no instructions newer than ${ptx.id} (no wgmma, no tcgen05).`);
+        else say('risk', 'Fails: no compatible cubin and no usable PTX. CUDA reports "no kernel image is available for execution on the device".');
+      } else {
+        let hit = null;
+        for (const e of list) {
+          const ok = e.covers.includes(g.gfx);
+          li.push(`<li class="${ok ? 'ok' : 'no'}">${e.label}: ${ok ? (e.generic ? `generic target, covers ${g.gfx}` : 'exact processor match') : `built for ${e.covers.join(', ')}`}</li>`);
+          if (ok && (!hit || hit.generic)) hit = ok ? e : hit;
+        }
+        if (!list.length) li.push('<li class="no">nothing selected</li>');
+        $<HTMLElement>('[data-o=steps]').innerHTML = li.join('');
+        if (hit && !hit.generic) say('good', `Runs: the HIP runtime loads the ${hit.label}.`);
+        else if (hit) say('warn', `Runs from the generic code object. It lacks FP8/BF8 instructions and may be slower than a gfx-specific build.`);
+        else say('risk', `Fails: no code object for ${g.gfx}. HIP reports hipErrorNoBinaryForGpu. AMD has no PTX-like fallback in a normal build.`);
+      }
+    };
+    fig.querySelectorAll('select, input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

@@ -1,0 +1,61 @@
+---
+/** Blast radius of one node failure: replicas of one model, GPU nodes, placement. 1 GPU per replica, 8 per node. */
+---
+
+<figure class="bc" data-blast>
+  <figcaption class="bc-title">Blast-radius calculator: one node dies</figcaption>
+  <div class="bc-in">
+    <label>Replicas of one model <input data-k="r" type="range" min="1" max="32" value="8" /> <output data-o="r"></output></label>
+    <label>GPU nodes available <input data-k="n" type="range" min="1" max="8" value="4" /> <output data-o="n"></output></label>
+    <label>Placement <select data-k="p"><option value="packed">packed (no spread rule)</option><option value="spread">spread evenly (topology spread)</option></select></label>
+  </div>
+  <div class="bc-nodes" data-o="nodes" aria-hidden="true"></div>
+  <div class="bc-out">
+    <div><span class="k">Replicas lost (worst node)</span><span class="v" data-o="lost"></span></div>
+    <div><span class="k">Capacity left</span><span class="v" data-o="left"></span></div>
+  </div>
+  <p class="bc-note" data-o="note"></p>
+</figure>
+
+<style>
+  .bc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .bc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .bc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .bc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .bc-in input, .bc-in select { accent-color: var(--color-primary); }
+  .bc-in output { min-width: 24px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bc-nodes { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 14px; }
+  .bc-nodes :global(.nd) { display: grid; grid-template-columns: repeat(4, 10px); gap: 3px; padding: 5px; border: 1px solid var(--color-gray-300); border-radius: 6px; }
+  .bc-nodes :global(.nd.dead) { border-color: var(--color-error); background: var(--color-error-100); }
+  .bc-nodes :global(.nd i) { width: 10px; height: 10px; border-radius: 2px; background: var(--color-gray-100); }
+  .bc-nodes :global(.nd i.on) { background: var(--color-primary); }
+  .bc-nodes :global(.nd.dead i.on) { background: var(--color-error); }
+  .bc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-top: 12px; }
+  .bc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .bc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .bc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bc-note { margin-top: 6px; font-size: 0.875rem; }
+</style>
+
+<script>
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-blast]')) {
+    const $ = <T extends HTMLElement>(s: string) => fig.querySelector<T>(s)!;
+    const update = () => {
+      const r = Number($<HTMLInputElement>('[data-k=r]').value), n = Number($<HTMLInputElement>('[data-k=n]').value);
+      const spread = $<HTMLSelectElement>('[data-k=p]').value === 'spread';
+      $('[data-o=r]').textContent = String(r); $('[data-o=n]').textContent = String(n);
+      const fit = Math.min(r, n * 8);
+      const per = Array.from({ length: n }, (_, i) => spread ? Math.floor(fit / n) + (i < fit % n ? 1 : 0) : Math.max(0, Math.min(8, fit - 8 * i)));
+      const worst = per.indexOf(Math.max(...per));
+      $('[data-o=nodes]').innerHTML = per.map((c, i) => `<span class="nd${i === worst && c ? ' dead' : ''}">${Array.from({ length: 8 }, (_, g) => `<i class="${g < c ? 'on' : ''}"></i>`).join('')}</span>`).join('');
+      const lost = per[worst];
+      $('[data-o=lost]').textContent = `${lost} of ${fit}`;
+      $('[data-o=left]').textContent = `${Math.round((100 * (fit - lost)) / fit)} %`;
+      $('[data-o=note]').textContent = (fit < r ? `Only ${fit} replicas fit on ${n} nodes. ` : '') +
+        (lost === fit ? 'The whole model goes offline with one node: all of its replicas sit on one MI355X node.'
+          : `One node fault takes ${lost} replica${lost === 1 ? '' : 's'}: a fatal error resets all 8 GPUs of the red node, so everything on it dies together.`);
+    };
+    fig.querySelectorAll('input, select').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

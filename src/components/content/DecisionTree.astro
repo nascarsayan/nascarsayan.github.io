@@ -1,0 +1,99 @@
+---
+/**
+ * A decision tree: every road through a set of choices, taken or not, with what happened on it.
+ *
+ *   import roads from './_roads.decision';
+ *   <DecisionTree spec={roads} id="roads" />
+ *
+ * Left to right, one column per choice. Click a branch to fold or unfold it; click a road (a leaf) to see its
+ * runs: the checks per lens, the findings behind each failed check, follow-up test logs. The lens switch
+ * colours the roads by one environment or shows all; the legend highlights the roads that end in one
+ * outcome. Hover a box to light its path from the root. Keys: arrows move, Enter/Space opens or folds, Esc
+ * closes the detail. The selected road is in the URL (#<id>=<node>). Roads not taken are drawn (dashed),
+ * roads a dependency rules out are struck through. Without JavaScript: the
+ * tree as a nested list. Format: src/diagrams/decision.ts. Script: src/scripts/decision.ts.
+ */
+import '@/styles/diagram.css';
+import '@/styles/decision.css';
+import { checkDecision, leafOutcome, leaves, OUTCOME_LABEL, OUTCOMES, type Decision, type DNode } from '@/diagrams/decision';
+
+interface Props { spec: Decision; id: string }
+const { spec, id } = Astro.props;
+if (!/^[a-z][a-z0-9-]{0,40}$/.test(id)) throw new Error(`DecisionTree id "${id}": lowercase letters, digits and dashes`);
+const errors = checkDecision(spec);
+if (errors.length) throw new Error(`DecisionTree "${spec.title}":\n  ${errors.join('\n  ')}`);
+// JSON inside <script type="application/json">: escape "<" so the text can never close the element.
+const payload = JSON.stringify(spec).replace(/</g, '\\u003c');
+const roads = leaves(spec.root);
+const count = (lens: string) =>
+  Object.fromEntries(OUTCOMES.map((o) => [o, roads.filter((n) => leafOutcome(n, lens) === o).length]));
+const outcomeText = (n: DNode) =>
+  spec.lenses.map((l) => `${l.label}: ${OUTCOME_LABEL[leafOutcome(n, l.id)]}`).join('; ');
+---
+
+<figure class="dt" id={id} data-decision tabindex="-1" aria-label={spec.title}>
+  <header class="dt-top">
+    <span class="dt-title">{spec.title}</span>
+    <span class="dt-lens" role="radiogroup" aria-label="Colour roads by">
+      <button type="button" role="radio" aria-checked="true" data-dt-lens="*" data-sound-click="popDown">All</button>
+      {spec.lenses.map((l) => (
+        <button type="button" role="radio" aria-checked="false" data-dt-lens={l.id} title={l.note} data-sound-click="popDown">{l.label}</button>
+      ))}
+    </span>
+    <span class="dt-ctrl">
+      <button type="button" class="dg-btn" data-dt="expand" aria-label="Unfold all" title="Unfold all">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 9l5 5 5-5" /></svg>
+      </button>
+      <button type="button" class="dg-btn" data-dt="collapse" aria-label="Fold to the first choice" title="Fold to the first choice">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 15l5-5 5 5" /></svg>
+      </button>
+      <button type="button" class="dg-btn" data-dt="full" aria-label="Full window" title="Full window (F, Esc to leave)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+      </button>
+    </span>
+  </header>
+  <div class="dt-legend" role="group" aria-label="Highlight roads by outcome">
+    {(spec.marks ?? []).map((m) => (
+      <span class="dt-mkey" title={m.note}><i aria-hidden="true"></i>{m.label}</span>
+    ))}
+    {OUTCOMES.map((o) => (
+      <button type="button" class={`dt-key is-${o}`} data-dt-outcome={o} aria-pressed="false">
+        <i aria-hidden="true"></i>{OUTCOME_LABEL[o]} <span class="dt-n" data-dt-count={o}></span>
+      </button>
+    ))}
+  </div>
+  <div class="dt-body">
+    <div class="dt-scroll"><svg class="dt-svg" role="tree" aria-label={spec.title}></svg></div>
+    <aside class="dt-detail" hidden aria-label="Road details" aria-live="polite"></aside>
+  </div>
+  {spec.caption && <figcaption class="dt-caption">{spec.caption}</figcaption>}
+  <div class="dt-fallback">
+    <p><strong>{spec.title}</strong> ({spec.levels.map((l) => l.title).join(' → ')}). Roads per lens:
+      {spec.lenses.map((l) => {
+        const c = count(l.id);
+        return <span> {l.label}: {OUTCOMES.filter((o) => c[o]).map((o) => `${c[o]} ${OUTCOME_LABEL[o].toLowerCase()}`).join(', ')}.</span>;
+      })}
+    </p>
+    {(spec.marks ?? []).length > 0 && (
+      <p>{(spec.marks ?? []).map((m) => {
+        const path: string[] = [];
+        const find = (n: DNode, trail: string[]): boolean => n.id === m.leaf ? (path.push(...trail, n.label), true) : (n.children ?? []).some((c) => find(c, [...trail, n.label]));
+        find(spec.root, []);
+        return <span><strong>{m.label}:</strong> {path.slice(1).join(' → ')}{m.note && ` (${m.note})`}. </span>;
+      })}</p>
+    )}
+    <ul>
+      {(function list(n: DNode): any {
+        return n.children?.length
+          ? <li>{n.label}{n.note && ` (${n.note})`}<ul>{n.children.map(list)}</ul></li>
+          : <li>{n.label}: {n.blocked ? `not possible (${n.blocked})` : outcomeText(n)}{(n.runs ?? []).length > 0 && ` [runs: ${(n.runs ?? []).map((r) => r.id).join(', ')}]`}</li>;
+      })(spec.root)}
+    </ul>
+  </div>
+  <script type="application/json" set:html={payload} />
+</figure>
+
+<script>
+  import { initDecisions } from '@/scripts/decision';
+  initDecisions();
+</script>

@@ -1,0 +1,203 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPU boot and firmware: from power-on to a kernel launch"
+short: "Boot & firmware"
+description: "What happens between pressing power and a kernel running on a datacenter GPU: on-board firmware (AMD IFWI, PSP, SMU; NVIDIA VBIOS, GSP), driver probe, device files, queues and doorbells. AMD MI355X with illustrative node output, NVIDIA side by side, and the failure modes each step owns."
+updated: "2026-11-10"
+track: fundamentals
+order: 3
+requires: [what-is-a-gpu]
+eyebrow: "Learn · GPU fundamentals"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import boot from './_boot.diagram';
+import ProbeGantt from './_ProbeGantt.astro';
+import Log from './_Log.astro';
+import { d, g0, probes, rows } from './_probe';
+
+A datacenter GPU is a computer of its own. It has small embedded processors that run **firmware** before Linux has even loaded a driver. Many GPU incidents are about one of these stages: firmware that did not come back after a reset, a driver that failed its probe, a device file that is missing in a container. This page walks the whole path once, with AMD MI355X first and NVIDIA beside it.
+
+## The idea first
+
+Think of a GPU card as **a small building inside the server**, with its own staff:
+
+| Stage | Everyday picture | The question it answers | How often |
+| --- | --- | --- | --- |
+| Board firmware (PSP, SMU) | the building's security guard and caretaker wake up when the power comes on | "Is this card healthy, trusted and powered correctly?" | once per power cycle |
+| Driver probe | the tenant (Linux's `amdgpu` driver) moves in, hands the guard its paperwork (microcode files) and learns the floor plan | "What is this card, and is it ready for work?" | once per driver load |
+| Device files | front doors with a lock: `/dev/kfd`, `/dev/dri/renderD*` | "How does a program get in?" | created at probe |
+| Queue + doorbell | a mailbox inside the building and a bell next to it | "How does a program hand over work fast?" | set up per process, used per launch |
+
+Where the picture breaks: the guard (PSP) does not keep the tenant's paperwork. The driver hands it the microcode again **every time it loads**, so "firmware" lives both on the card and on the host disk. And once the mailbox exists, the tenant is no longer involved: programs drop work into it and ring the bell without asking the driver.
+
+<Diagram spec={boot} title="One MI355X from power-on to a running kernel" autoSteps caption="AMD names. Press play: boot happens once per power cycle, driver load once per modprobe, the last four messages on every kernel launch." />
+
+## Worked example: one boot of an MI355X node
+
+The kernel log stamps every line with the seconds since Linux started. Below is an illustrative boot of an example node, `gpu-node-1`, as `journalctl -k -b -o short-monotonic` would show it (the stamps are made up but realistic; all durations are computed from them).
+
+<Kpis items={[
+  { label: 'First GPU probe', value: ("" + (d.first) + " s"), detail: 'after the kernel started', tone: 'neutral' },
+  { label: 'One GPU probe', value: ("" + (d.probe0) + " s"), detail: ("GPU 0; average of 8: " + (d.avg) + " s"), tone: 'primary' },
+  { label: 'Waiting for the SMU', value: ("" + (d.smuShare) + "%"), detail: 'of each probe', tone: 'warn' },
+  { label: 'All 8 GPUs ready', value: ("" + (d.last) + " s"), detail: ("probed one after another, " + (d.total) + " s"), tone: 'good' },
+]} />
+
+<Walkthrough title="GPU 0 (0000:11:00.0) from driver load to /dev/kfd" caption={"Example output for `gpu-node-1` (illustrative stamps). The other 7 GPUs repeat the same pattern."}>
+  <WStep title="1 · The driver module loads">
+    <ProbeGantt gpu={0} upto={-1} />
+
+    <Log lines={["[    7.200000] [drm] amdgpu version: 6.14.0.30100000", "[    7.250000] amdgpu 0000:11:00.0: initializing kernel modesetting (IP DISCOVERY 0x1002:0x75A3 ...)"]} />
+
+    7.2 s after the kernel starts, Linux has enumerated PCIe, found a device with vendor `1002` (AMD) and device `75a3` (MI355X), and loaded `amdgpu` (here an example AMD GPU Driver 30.10.0). {d.toDiscovery} ms later the probe of the first GPU starts. The board firmware has been running since power-on; the driver now meets it.
+  </WStep>
+  <WStep title="2 · IP discovery, PSP, RAS, VRAM: the floor plan">
+    <ProbeGantt gpu={0} upto={0} />
+
+    <Log lines={["[    7.255000] amdgpu 0000:11:00.0: detected ip block number 3 <psp_v13_0_0> (psp)", "[    7.265000] amdgpu 0000:11:00.0: RAS INFO: ras initialized successfully ...", "[    7.266000] amdgpu 0000:11:00.0: [drm] Detected VRAM RAM=294912M, BAR=524288M"]} />
+
+    In {d.vramAfter} ms the driver reads the GPU's **IP discovery table** (which hardware blocks it has, and their versions, instead of a hard-coded chip model), finds the PSP (+{d.pspAfter} ms), starts **RAS** (error detection and correction for HBM and the chip; the card's list of retired HBM pages lives in its EEPROM, read by `amd-smi bad-pages`), and sizes memory: 294,912 MiB is the 288 GB of HBM3E. The **BAR**, the window through which the CPU and other PCIe devices address GPU memory, is 512 GiB: larger than VRAM, so a NIC can reach all of HBM (see [memory and interconnects](/learn/gpu-memory-and-interconnects/)).
+  </WStep>
+  <WStep title={("3 · Firmware load: " + (d.smuWait) + " s until the SMU is up")}>
+    <ProbeGantt gpu={0} upto={1} />
+
+    <Log lines={["[    9.666000] amdgpu 0000:11:00.0: SMU is initialized successfully!"]} />
+
+    The longest phase, {d.smuShare}% of the probe. The driver reads microcode files from the host disk and hands them to the PSP, which checks their signatures and loads them into the GPU's blocks: compute (`gc_9_5_0_mec.bin` and friends), copy engines, the SMU interface. On a typical install these several hundred files come from the `amdgpu-dkms-firmware` package in `/lib/firmware/updates/amdgpu/`. The log does not break this time down further.
+  </WStep>
+  <WStep title="4 · Partition mode and the XGMI hive">
+    <ProbeGantt gpu={0} upto={2} />
+
+    <Log lines={["[    9.668000] amdgpu 0000:11:00.0: Requesting 1 partitions through PSP", "[    9.918000] amdgpu 0000:11:00.0: XGMI: Add node 2, hive 0x1111222233334444."]} />
+
+    The driver asks the PSP for the compute partition mode: 1 partition is SPX, the whole GPU as one device (see [partitioning](/learn/gpu-partitioning/)). {d.xgmiAfter} ms later the GPU joins its **XGMI hive**, the set of GPUs wired to each other. All 8 GPUs on this node log the same hive ID, `{d.hive}`: from here on they share fate in some resets.
+  </WStep>
+  <WStep title="5 · Compute device ready: /dev/kfd and a render node">
+    <ProbeGantt gpu={0} upto={3} />
+
+    <Log lines={["[   10.418000] kfd kfd: added device 1002:75a3", "\u0024 ls -l /dev/kfd /dev/dri/by-path/ | grep -E 'kfd|11:00.0'", "crw-rw-rw-. 1 root render 235, 0 Jan  1 00:00 /dev/kfd", "pci-0000:11:00.0-card -> ../card1", "pci-0000:11:00.0-render -> ../renderD128"]} />
+
+    {d.kfdAfter} ms after the hive join, **KFD** (the compute half of `amdgpu`) adds the GPU. Its probe took {d.probe0} s in total. User space can now reach it through two files: `/dev/kfd`, one for the whole node (compute control), and `renderD128`, this GPU's own node. The `by-path` links are how you map a PCI address to its render node.
+  </WStep>
+  <WStep title={("6 · The other seven, one after another: all ready " + (d.last) + " s after boot")}>
+    <ProbeGantt />
+    <table>
+      <thead><tr><th>GPU</th><th>PCI address</th><th>Start (s)</th><th>KFD ready (s)</th><th>Probe (s)</th><th>SMU wait (s)</th><th>XGMI node</th><th>DRM card</th><th>Render node</th></tr></thead>
+      <tbody>{rows.map((r) => <tr>{r.map((c) => <td>{c}</td>)}</tr>)}</tbody>
+    </table>
+  </WStep>
+</Walkthrough>
+
+What to read in it:
+
+- **The probes run one after another.** In this log each GPU starts only after the previous one is done, so the node needs about {d.total} s from the first probe to the last GPU; a GPU that probes slowly delays the ones after it.
+- **Render nodes are not the whole story.** The driver also pre-creates 7 spare render nodes per GPU for partitions, so the node has 64 render nodes for 8 GPUs, even in SPX. In this example the 8 primaries are `renderD128` to `renderD135`; real hosts can number primaries and spares differently, so always map a PCI address to its node through `by-path`.
+- **XGMI node IDs do not follow PCI order** (GPU 0 is hive node {g0.node}). One more numbering to keep apart.
+- **Same timings on every GPU** (within 0.1 s) is what healthy looks like. A probe that stalls in the SMU phase or never logs `kfd: added device` points at firmware or hardware.
+
+## The small processors inside the GPU
+
+A GPU package has more than compute units. A few on-die microcontrollers run firmware and manage the rest:
+
+| Job | AMD (CDNA) | NVIDIA (Blackwell) |
+| --- | --- | --- |
+| Security root, firmware loader | **PSP** (Platform Security Processor): checks signatures and loads firmware for the other blocks | Boot ROM and GSP (details not public) |
+| Power, clocks, temperatures | **SMU** (System Management Unit) | handled by GSP firmware and on-board controllers (details not public) |
+| Device management offloaded from the host driver | partly in PSP, SMU, MES | **GSP** (GPU System Processor): runs much of the initialization and management that the CPU driver used to do |
+| Feeding work to the compute units | **CP** (command processor), with MEC microcode for compute queues and RLC | front-end and GigaThread scheduler (details not public) |
+| Copy engines | **SDMA** engines | copy engines |
+
+The Linux kernel documentation describes the AMD blocks: the PSP "handles security policy for the SoC and executes trusted applications, and validates and loads firmwares for other blocks", and the SMU is "the power management microcontroller". NVIDIA's driver README says GSP firmware "is used by default on GPUs which support it" and ships as `gsp_*.bin` files under `/lib/firmware/nvidia/<driver version>/`.
+
+## Stage 1: firmware on the board
+
+**AMD.** Each MI355X OAM module has its own flash with the **IFWI** (Integrated Firmware Image): the firmware the PSP boots from. AMD and the server vendor ship it inside a **PLDM bundle**, the unit you flash through the server's BMC. Example read-only output on an 8-GPU MI355X server (versions are made up):
+
+```text
+$ amd-smi static -g 0          # trimmed
+    IFWI:
+        NAME: AMD MI355X
+        BUILD_DATE: 2026/01/01 00:00
+        VERSION: 113-EXAMPLE-0001
+$ amd-smi firmware -g 0        # trimmed
+            FW_ID: PSP_SOSDRV     FW_VERSION: 00.00.00.10
+            FW_ID: TA_RAS         FW_VERSION: 00.00.00.11
+            FW_ID: TA_XGMI        FW_VERSION: 00.00.00.12
+            FW_ID: PM             FW_VERSION: 00.00.00.13
+            FW_ID: PLDM_BUNDLE    FW_VERSION: 01.00.00.00
+```
+
+`TA_RAS` and `TA_XGMI` are PSP **trusted applications** for error handling and for the GPU-to-GPU links. `PM` is the SMU firmware. `PLDM_BUNDLE` is the version to check against the minimum AMD lists for the MI350 series in the ROCm compatibility matrix.
+
+After power-on, the PSP boots, brings up HBM and starts the SMU. AMD does not publish the details of this stage. What matters operationally: this state lives on the card. A Linux reboot does not always reset it. That is why a GPU whose PSP does not resume after a reset can need a **cold power cycle**, and why firmware updates often use a "virtual AC cycle" (the BMC cuts and restores power) after flashing.
+
+**NVIDIA.** The equivalent is the **VBIOS** on the board plus firmware for the NVSwitch and other parts, delivered in an HGX or NVL72 firmware bundle through the BMC. `nvidia-smi -q` shows the VBIOS version and `GSP Firmware Version`.
+
+## Stage 2: the kernel driver probes the GPU
+
+The [worked example](#worked-example-one-boot-of-an-mi355x-node) above is this stage, line by line: IP discovery, microcode handed to the PSP, RAS, VRAM and BAR, partition mode, XGMI hive, KFD device. Two points to keep from it:
+
+- **"GPU firmware" is two things**: the **IFWI on the card** (changed by flashing through the BMC) and the **microcode files on the host** (changed by a package update and a driver reload).
+- **The GPUs are probed one after another**, about {d.avg} s each, so a node's GPUs are ready about {d.total} s after the first probe starts.
+
+**NVIDIA.** The `nvidia` module probes the GPU, loads the GSP firmware from `/lib/firmware/nvidia/<version>/` onto the GPU, and from then on talks to the GSP through a message interface. Blackwell requires the **open** kernel modules (NVIDIA: "the proprietary drivers are unsupported on these platforms"), and those modules work only with GSP firmware from the same driver release. On NVSwitch systems, **Fabric Manager** (and on Blackwell HGX, the NVLink Subnet Manager) must also start before GPUs can use NVLink.
+
+## Stage 3: device files appear
+
+The driver creates character devices that user space opens:
+
+| AMD | NVIDIA | Purpose |
+| --- | --- | --- |
+| `/dev/kfd` (one for the whole node) | `/dev/nvidiactl` | compute control: queues, memory, events |
+| `/dev/dri/renderD128…` (one per GPU or partition) | `/dev/nvidia0…N` | per-device access |
+| `/dev/dri/cardN` | (display only) | mode setting; not needed for compute |
+| — | `/dev/nvidia-uvm` | unified (CPU/GPU shared) memory |
+| — | `/dev/nvidia-caps/*` | MIG and other capabilities |
+
+The worked example showed them appearing for GPU 0 (`/dev/kfd`, mode `crw-rw-rw-`, group `render`; `renderD128`). A container gets only the files its CDI spec lists; the [software stack](/learn/gpu-software-stack/) page covers how.
+
+## Stage 4: a process sets up
+
+A HIP program (inside the Pod) starts. The ROCm runtime (ROCr) opens `/dev/kfd` and the render node, and asks the driver through `ioctl` calls to:
+
+- allocate memory in HBM and map it into the process's GPU address space;
+- create a **user-mode queue**: a ring buffer in memory that the GPU's command processor reads;
+- map a **doorbell**: a small memory-mapped register the process writes to say "new work in the queue".
+
+From the driver's side, the process now "holds" the GPU. That is why `amd-smi process` lists it, why a driver reload must wait until no process is open, and why one stuck process blocks maintenance on the whole node.
+
+## Stage 5: every kernel launch
+
+A launch such as `hipLaunchKernelGGL(...)` does **not** call the kernel driver. The runtime writes a 64-byte **AQL dispatch packet** (Architected Queuing Language, from the HSA standard) into the ring, writes the packet's index to the doorbell (a plain memory write, no system call), and the command processor (CP) spreads the workgroups over the compute units of all XCDs. When the grid finishes, the CP writes a **completion signal** to memory. [The software stack](/learn/gpu-software-stack/#worked-example-one-matrix-multiply-from-pytorch-to-the-doorbell) follows one launch through every field of that packet.
+
+Because launches bypass the kernel, they cost microseconds. It also means the driver does not see individual launches: a hung kernel shows up as a queue that stops making progress, and the driver finds out only through a timeout or a hardware error interrupt. CUDA works in the same spirit: `libcuda` writes commands into memory the GPU reads and rings a doorbell; NVIDIA does not document the format.
+
+## Failure modes, by stage
+
+| Stage | What breaks | How it looks | Usual fix |
+| --- | --- | --- | --- |
+| Board firmware | PSP or SMU stops responding after a fault | GPU missing or failing in `amd-smi`; driver reset fails | cold power cycle; firmware update |
+| Driver probe | microcode or driver mismatch, PCIe link trained narrow or slow | `amdgpu` errors in `journalctl -k`; GPU absent from `amd-smi list` | fix package versions; reseat/RMA |
+| XGMI hive | a link fails training | hive smaller than 8; topology shows a missing link | reboot; hardware ticket |
+| Device files | CDI spec wrong or stale | container sees no GPU while the host does | fix the DRA driver or CDI files |
+| Queues | kernel hangs, page fault, ECC error | process killed, RAS events, Pod restarts | depends on error; see [GPU failures](/learn/gpu-failures/) |
+
+<Callout tone="warn" title="Read-only on production nodes">Everything shown on this page only reads: `amd-smi static|firmware|list`, `journalctl -k`, `ls /dev`. Resets, driver reloads and firmware flashing interrupt every GPU process on the node, and some resets take the whole 8-GPU hive.</Callout>
+
+## Misconceptions
+
+- "**Rebooting the server resets the GPU.**" A warm reboot keeps power on the card. Firmware state can survive it; some faults need a cold power cycle.
+- "**Firmware means one version.**" There is the IFWI/PLDM bundle on the card, the microcode files on the host, and (NVIDIA) GSP firmware tied to the driver release. Each has its own version and update path.
+- "**The driver schedules every kernel.**" It sets up queues once; after that the GPU's command processor reads work straight from user memory.
+
+## Further reading
+
+- [amdgpu driver core: IP blocks (PSP, SMU, SDMA, CP)](https://docs.kernel.org/gpu/amdgpu/driver-core.html) — Linux kernel docs
+- [ROCm compatibility matrix](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html): driver and PLDM firmware versions per GPU
+- [amd-smi CLI](https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html)
+- [NVIDIA GSP firmware](https://download.nvidia.com/XFree86/Linux-x86_64/580.95.05/README/gsp.html) · [NVIDIA open GPU kernel modules](https://github.com/NVIDIA/open-gpu-kernel-modules) · [NVIDIA moves to open kernel modules (Blackwell requirement)](https://developer.nvidia.com/blog/nvidia-transitions-fully-towards-open-source-gpu-kernel-modules/)
+- [HSA Platform System Architecture specification (AQL packets)](https://hsafoundation.com/standards/)

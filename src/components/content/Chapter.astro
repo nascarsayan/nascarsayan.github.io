@@ -1,0 +1,22 @@
+---
+/** One chapter of a <Scrolly>: `focus` lists the diagram ids it lights up. */
+interface Props { focus: string; title?: string; eyebrow?: string }
+const { focus, title, eyebrow } = Astro.props;
+---
+
+<article class="chapter" data-chapter-focus={focus}>
+  {eyebrow && <p class="eyebrow">{eyebrow}</p>}
+  {title && <h3 class="title">{title}</h3>}
+  <div class="body"><slot /></div>
+</article>
+
+<style>
+  .chapter { min-height: 62%; padding: 20px 0; scroll-snap-align: center; cursor: pointer; opacity: 0.32; transform: translateY(6px); transition: opacity 500ms var(--ease-soft), transform 600ms var(--ease-soft); }
+  .chapter:global(.is-active) { opacity: 1; transform: none; cursor: auto; }
+  .chapter:first-child { margin-top: 18%; }
+  .chapter:last-child { margin-bottom: 18%; }
+  .eyebrow { font-size: 0.8125rem; letter-spacing: 1.5px; text-transform: uppercase; color: var(--color-secondary); }
+  .title { margin: 4px 0 8px; font-size: 1.2rem; }
+  .body :global(> :first-child) { margin-top: 0; }
+  @media (prefers-reduced-motion: reduce) { .chapter { transition: none; transform: none; } }
+</style>

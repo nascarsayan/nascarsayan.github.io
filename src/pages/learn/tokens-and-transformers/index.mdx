@@ -1,0 +1,232 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Tokens and transformers: what an LLM computes"
+short: "Tokens & transformers"
+description: "From the model's side, step by step: text becomes tokens, tokens become vectors, 36 transformer layers (norm, attention with RoPE, mixture-of-experts MLP, residual adds) update them, and the last vector picks the next token. A real tokenizer run, one layer worked through with numbers, a sampling explorer, and weights, parameter counts and FLOPs for gpt-oss-120b."
+updated: "2026-11-10"
+track: inference
+order: 1
+eyebrow: "Learn · LLM inference"
+links:
+  - { label: "gpt-oss-120b config.json", href: "https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json" }
+  - { label: "gpt-oss model card", href: "https://arxiv.org/abs/2508.10925" }
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import MatRow from '@/components/content/MatRow.astro';
+import Op from '@/components/content/Op.astro';
+import layer from './_layer.diagram';
+import TokenChips from './_TokenChips.astro';
+import Sampler from './_Sampler.astro';
+import ParamBar from './_ParamBar.astro';
+import { sentences } from './_tokens';
+import * as ex from './_example';
+
+A large language model (LLM) is one function: it takes a list of tokens and returns, for every possible next token, a probability. Generating text means calling that function again and again, appending the chosen token each time. This page walks through one call, using **gpt-oss-120b**, an open-weight mixture-of-experts model. Its numbers come from its [config.json](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json) and [model card](https://arxiv.org/abs/2508.10925).
+
+## The idea
+
+Think of the model as an assembly line that works on a **notepad per word**.
+
+- **Tokens** answer "what are the pieces?" Text is cut into pieces from a fixed list (the vocabulary), and each piece is replaced by its number in that list.
+- **Embedding** answers "what is a first guess at what this piece means?" Each token number picks one row of a big table: a list of 2,880 numbers, the token's notepad. Similar pieces get similar notepads.
+- **Layers** answer "what does this piece mean *here*?" 36 stations each read every notepad and write a small correction on it. In **attention** the notepads compare notes with earlier ones ("which earlier words matter to me?"); in the **MLP** each notepad is processed alone ("given what I now know, what facts apply?").
+- **Unembedding and sampling** answer "what comes next?" The last notepad is scored against every vocabulary entry; the scores become probabilities; one token is picked.
+
+Where the analogy breaks: the notepads are not words or facts a person could read. They are vectors of numbers whose meaning is learned, and every layer writes into the same vector (the **residual stream**) instead of a fresh page.
+
+<Kpis items={[
+  { label: 'Vocabulary', value: '201,088', detail: 'embedding rows (200,019 defined tokens)' },
+  { label: 'Hidden size', value: '2,880', detail: 'numbers per token vector' },
+  { label: 'Layers', value: '36', detail: '18 sliding-window + 18 full attention' },
+  { label: 'Parameters', value: '116.8 B', detail: '5.1 B active per token', tone: 'primary' },
+  { label: 'Context', value: '131,072', detail: 'tokens at most' },
+  { label: 'Checkpoint', value: '60.8 GiB', detail: 'experts in MXFP4 (4.25 bits)' },
+]} />
+
+Attention: 64 query heads, 8 key/value heads, head size 64. MLP: mixture of experts, 128 experts per layer, 4 used per token.
+
+<Diagram spec={layer} title="One forward pass" caption="gpt-oss-120b shapes. Every token flows through all 36 layers; only the last position's output becomes a next-token choice.">
+  <Step path="text => tok" title="Tokenize">Text is cut into pieces from the 201,088-entry vocabulary. Each piece becomes its integer id.</Step>
+  <Step path="tok => emb" title="Embed">Each id selects one row of the embedding table: 2,880 numbers per token. This matrix, tokens × 2,880, is the residual stream.</Step>
+  <Step path="emb => attn" title="Attention">RMSNorm, then attention: each token mixes in information from earlier tokens. Keys and values are kept in the KV cache. The result is added to the stream.</Step>
+  <Step path="attn => moe" title="MoE MLP">RMSNorm, then the router picks 4 of 128 experts per token. Their weighted output is added to the stream. Attention + MLP is one layer; this repeats 36 times.</Step>
+  <Step path="moe => head" title="Unembed">After layer 36 and a final RMSNorm, the last position's vector is multiplied by a 2,880 × 201,088 matrix: one score (logit) per vocabulary entry.</Step>
+  <Step path="head => samp => next" title="Sample">Softmax turns logits into probabilities; the sampler picks one token. Append it and run again: that loop is decode.</Step>
+</Diagram>
+
+## Worked example: one sentence through one layer
+
+The tokenizer below is the real gpt-oss one. The rest is a toy model with vectors of 4 numbers instead of 2,880 and one layer instead of 36; its embeddings and weights are made up, but every number is computed from the ones before it. Step through with the arrows, or switch to *Spread* to see every step at once.
+
+<Walkthrough title="“The GPU node is ready.” through a toy layer" caption="Toy sizes: hidden size 4, one attention head, one dense SwiGLU MLP, 6 candidate output tokens. Each stage is rounded to 2 decimals before the next uses it.">
+  <WStep title="1 · Tokenize: text → integer ids">
+    <TokenChips text={ex.sentence.text} tokens={ex.toks} />
+    The real gpt-oss tokenizer (`o200k_harmony`, a byte-pair encoding) cuts the sentence into 6 tokens. The leading space belongs to the token: `␣GPU` is id 47969, and "The" at the start ({ex.ids[0]}) differs from "␣The" mid-sentence ({ex.candIds[1]}). From here on the model sees only these 6 integers.
+  </WStep>
+  <WStep title="2 · Embed: each id selects one row">
+    <MatRow>
+      <Matrix title="Token ids" rows={ex.labels} data={ex.ids.map((i) => [i])} scale="none" digits={0} />
+      <Op>→ rows of the table →</Op>
+      <Matrix title="x: the residual stream (6 tokens × 4)" rows={ex.labels} cols={ex.dims} data={ex.X0} scale="div" corner="token" />
+    </MatRow>
+    Embedding is a lookup, not arithmetic: id 47969 means "take row 47,969 of the table". In gpt-oss the table is 201,088 × 2,880 (0.58 B numbers) and each row has 2,880 numbers. This tokens × width matrix is the **residual stream**: every layer reads it and adds to it.
+  </WStep>
+  <WStep title="3 · RMSNorm: rescale each row">
+    <MatRow>
+      <Matrix title="RMS of each row" rows={ex.labels} data={ex.rms0.map((v) => [v])} scale="none" />
+      <Op>x ÷ rms =</Op>
+      <Matrix title="Normed x (input to attention)" rows={ex.labels} cols={ex.dims} data={ex.N1} scale="div" highlight={{ rows: [5] }} />
+    </MatRow>
+    Each row is divided by its root-mean-square so it has a typical size of 1 (a learned per-dimension gain follows; it is 1 in this toy). Row "." : {ex.rmsText(5)}. This keeps numbers in range through dozens of layers, and costs a few operations per number.
+  </WStep>
+  <WStep title="4 · Attention: each token mixes in earlier tokens">
+    <MatRow>
+      <Matrix title="Attention weights (causal)" rows={ex.labels} cols={ex.labels} data={ex.W} scale="seq" corner="query ↓ key →" highlight={{ rows: [5] }} />
+      <Op>×</Op>
+      <Matrix title="V (values)" rows={ex.labels} cols={ex.dims} data={ex.Vr} scale="div" />
+      <Op>=</Op>
+      <Matrix title="Attention output" rows={ex.labels} cols={ex.dims} data={ex.A} scale="div" highlight={{ rows: [5] }} />
+    </MatRow>
+    The only step where tokens see each other. Each row of weights says how much of every earlier token's value to take, and sums to 1. Row "." takes {ex.weightsText(5)}. The upper triangle is masked: no token sees the future. How queries, keys and these weights are computed is on [Attention and the KV cache](/learn/attention-and-kv-cache/).
+  </WStep>
+  <WStep title="5 · Residual add: x + attention">
+    <MatRow>
+      <Matrix title="x (embedding)" rows={ex.labels} cols={ex.dims} data={ex.X0} scale="div" />
+      <Op>+</Op>
+      <Matrix title="Attention output" rows={ex.labels} cols={ex.dims} data={ex.A} scale="div" />
+      <Op>=</Op>
+      <Matrix title="x after attention" rows={ex.labels} cols={ex.dims} data={ex.X1} scale="div" highlight={{ rows: [5] }} />
+    </MatRow>
+    The block does not replace the stream; it adds a correction. This **residual connection** is why very deep stacks train at all, and why each layer can be read as "read the stream, write a small update".
+  </WStep>
+  <WStep title="6 · MLP: each token on its own (SwiGLU)">
+    <MatRow>
+      <Matrix title="gate = norm(x)·W<sub>gate</sub>" rows={ex.labels} cols={ex.dims} data={ex.G} scale="div" />
+      <Matrix title="up = norm(x)·W<sub>up</sub>" rows={ex.labels} cols={ex.dims} data={ex.U} scale="div" />
+      <Op>→</Op>
+      <Matrix title="silu(gate) × up" rows={ex.labels} cols={ex.dims} data={ex.H} scale="div" highlight={{ cells: [[5, 0]] }} />
+      <Op>× W<sub>down</sub> =</Op>
+      <Matrix title="MLP output" rows={ex.labels} cols={ex.dims} data={ex.F} scale="div" highlight={{ rows: [5] }} />
+    </MatRow>
+    After another RMSNorm, three matrix multiplies: gate and up, a non-linear `silu` (z ÷ (1 + e<sup>−z</sup>)) on the gate as a soft on/off switch, then down. Outlined cell: {ex.siluText(5, 0)}. No row looks at another row here. gpt-oss replaces this one MLP with 128 experts and uses 4 per token: [Mixture of experts](/learn/mixture-of-experts/).
+  </WStep>
+  <WStep title="7 · Residual add: x + MLP = output of the layer">
+    <MatRow>
+      <Matrix title="x after attention" rows={ex.labels} cols={ex.dims} data={ex.X1} scale="div" />
+      <Op>+</Op>
+      <Matrix title="MLP output" rows={ex.labels} cols={ex.dims} data={ex.F} scale="div" />
+      <Op>=</Op>
+      <Matrix title="x after the layer" rows={ex.labels} cols={ex.dims} data={ex.X2} scale="div" highlight={{ rows: [5] }} />
+    </MatRow>
+    Same shape in, same shape out: 6 × 4 here, 6 × 2,880 in gpt-oss. That is what lets 36 layers stack. Layer 2 would start again at step 3 with this matrix.
+  </WStep>
+  <WStep title="8 · The residual stream of “.”, stage by stage">
+    <MatRow>
+      <Matrix title={("Row “" + (ex.lastLabel) + "” through the layer")} rows={ex.streamRows} cols={ex.dims} data={ex.stream} scale="div" highlight={{ rows: [0, 2, 4] }} />
+    </MatRow>
+    One token's notepad: it starts as its embedding row, gets an attention correction (information from earlier tokens), then an MLP correction. Outlined rows are the stream; the other two are what each block added. After 36 such layers the last row is what predicts the next token.
+  </WStep>
+  <WStep title="9 · Predict: last row → logits → probabilities">
+    <MatRow>
+      <Matrix title="Final RMSNorm of “.”" rows={['.']} cols={ex.dims} data={ex.hLast} scale="div" />
+      <Op>× W<sub>unembed</sub> =</Op>
+      <Matrix title="Logits (one per candidate)" rows={['.']} cols={ex.cand} data={[ex.logits]} scale="seq" />
+      <Op>softmax →</Op>
+      <Matrix title="Probabilities" rows={['.']} cols={ex.cand} data={[ex.probs]} scale="seq" digits={3} highlight={{ cells: [[0, ex.best]] }} />
+    </MatRow>
+    Only the **last** position is scored. The unembedding gives one logit per vocabulary entry: 6 candidates here (their ids are real), 201,088 in gpt-oss. Softmax turns them into probabilities; greedy decoding takes "␣It" (id {ex.candIds[ex.best]}). Earlier positions' predictions are thrown away in prefill, but their keys and values are kept.
+  </WStep>
+</Walkthrough>
+
+The sampler decides how that distribution becomes one token. Move the sliders:
+
+<Sampler />
+
+- **Greedy**: take the most likely token.
+- **Temperature** T: divide logits by T before the softmax. Below 1 sharpens, above 1 flattens.
+- **Top-p** (and top-k): sample only from the smallest set whose probabilities sum to p (or the k most likely).
+
+Appending the chosen token and running again is [decode](/learn/decode-phase/). The first pass over the whole prompt is [prefill](/learn/prefill-phase/). A forward pass computes a hidden state for **every** input position; [speculative decoding](/learn/speculative-decoding/) uses the predictions at several positions at once.
+
+## Tokens, in more detail
+
+More real tokenizer output:
+
+{sentences.slice(1).map((s) => <TokenChips text={s.text} tokens={s.tokens} compact />)}
+
+- gpt-oss uses `o200k_harmony`, a **byte-pair encoding** (BPE): start from bytes and repeatedly merge the most common adjacent pairs seen in training, so common words become one token and rare words, code and IDs become several.
+- English prose averages roughly 3–4 characters per token. Every cost on these pages (KV cache size, prefill time, price per request) scales with **tokens**, not characters.
+- Chat requests are wrapped in the [harmony format](https://cookbook.openai.com/articles/openai-harmony) before tokenizing: special tokens mark system, user and assistant turns. A "short" user message still arrives as a few hundred tokens with the system prompt and template. That shared start is what [prefix caching](/learn/kv-cache-management/) reuses.
+
+## The layer, in more detail
+
+```text
+x = x + Attention( RMSNorm(x) )    # tokens exchange information
+x = x + MoE_MLP(   RMSNorm(x) )    # each token is processed on its own
+```
+
+- **RMSNorm**: `x / sqrt(mean(x²) + 1e-5) * g`, applied before each block ("pre-norm") and once after the last layer.
+- **Attention**: query, key and value projections per token; scores against earlier keys; softmax; weighted sum of values. 64 query heads of size 64 share 8 key/value heads (**grouped-query attention**, GQA); an output matrix maps the 4,096 concatenated head outputs back to 2,880.
+- **RoPE** (rotary position embedding): attention alone does not know token order. RoPE rotates pairs of numbers in each query and key by an angle proportional to the position, so a query–key dot product depends on their distance. gpt-oss uses `rope_theta` 150,000 and YaRN scaling (factor 32) to stretch a 4,096-token training context to 131,072.
+- **Sliding window**: every other gpt-oss layer attends only to the last 128 tokens, which halves the long-context [KV cache](/learn/attention-and-kv-cache/).
+- **MLP**: SwiGLU, `down( silu(gate(x)) * up(x) )`, with gate and up mapping 2,880 → 2,880. In gpt-oss each layer has 128 such experts and a router picks 4 per token: 4 × 24.9 M = 99.5 M MLP parameters used per layer, out of 3.2 B. Hence 116.8 B parameters but 5.1 B active. → [Mixture of experts](/learn/mixture-of-experts/)
+- **Embedding and unembedding**: two separate 201,088 × 2,880 matrices (`tie_word_embeddings` is false).
+
+## Where the parameters are
+
+Counting from the config (biases and small tensors left out):
+
+<ParamBar />
+
+| Part | Shape per layer | Parameters (all 36 layers) | Used per token |
+| --- | --- | --- | --- |
+| Attention Q, K, V, O | 2,880×4,096 + 2×(2,880×512) + 4,096×2,880 | ~0.96 B | all |
+| Router | 2,880 × 128 | ~0.01 B | all |
+| Experts (SwiGLU) | 128 × 3 × 2,880 × 2,880 | ~114.7 B | 4 of 128 per layer: ~3.6 B |
+| Embedding | 201,088 × 2,880 | 0.58 B | one row per token |
+| Unembedding | 2,880 × 201,088 | 0.58 B | only where a token is predicted |
+
+The model card gives the same split: MLP 114.71 B, attention 0.96 B, embed + unembed 1.16 B, 5.1 B active. Over 98% of the weights are experts, and that is exactly what is stored at 4.25 bits (MXFP4); attention, router and embeddings stay in 16-bit. Hence the 60.8 GiB checkpoint, roughly 65 GB.
+
+For comparison, a dense model such as **Llama 3.3 70B** (80 layers, hidden size 8,192, 64 query and 8 KV heads of size 128) uses all ~70 B parameters for every token, about 141 GB in 16-bit.
+
+## What the hardware actually does
+
+Almost every step is a **matrix multiply**: a $$\text{tokens} \times 2{,}880$$ activation matrix times a weight matrix. A multiply-add counts as 2 floating-point operations (FLOPs), so a linear layer costs about **2 FLOPs per weight per token**.
+
+For gpt-oss-120b, the active weights excluding embeddings are about 4.5 B, so the linear layers cost about **9 GFLOP per token**, plus attention, which grows with context length (worked out on [Prefill](/learn/prefill-phase/)). Llama 3.3 70B costs about 140 GFLOP per token: MoE makes gpt-oss roughly 15× cheaper per token in compute, though it still has to *store* all 117 B parameters.
+
+The two numbers that decide speed on any chip:
+
+- **FLOPs** needed, which matter when many tokens share each weight read (prefill), and
+- **bytes** read from memory, which matter when few tokens share each weight read (decode).
+
+That split is why [prefill](/learn/prefill-phase/) and [decode](/learn/decode-phase/) behave so differently. The GPU kernels that do these multiplies are on [Prefill and decode as kernels](/learn/llm-kernels/).
+
+<Callout tone="note" title="How this shows up when serving">
+A serving process loads the full checkpoint (about 65 GB for gpt-oss-120b as published) into GPU memory at start-up; one 288 GB MI355X holds it with room left for the KV cache. Load time scales with checkpoint size and storage bandwidth, not with traffic.
+</Callout>
+
+## Common misconceptions
+
+- **"A token is a word."** It is a vocabulary entry; `kubectl` is two, `MI355X` three.
+- **"Bigger model, slower per token, always."** For MoE models, compute per token tracks *active* parameters (5.1 B), while memory tracks *total* (117 B).
+- **"The model remembers the conversation."** It does not. Every request re-sends the whole history as tokens. The server can avoid recomputing it with a [prefix cache](/learn/kv-cache-management/), but that is a cache, not memory in the model.
+- **"Only the new token is computed."** In prefill every prompt position runs through every layer. In decode only the new token does, because the [KV cache](/learn/attention-and-kv-cache/) holds the rest.
+
+## Further reading
+
+- [gpt-oss-120b and gpt-oss-20b model card](https://arxiv.org/abs/2508.10925) (architecture, Section 2)
+- [gpt-oss-120b config.json](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json)
+- [Attention Is All You Need](https://arxiv.org/abs/1706.03762) (the original transformer)
+- [RoFormer: rotary position embedding](https://arxiv.org/abs/2104.09864)
+- [Hugging Face: summary of tokenizers](https://huggingface.co/docs/transformers/main/en/tokenizer_summary) (BPE and others)
+- [tiktoken](https://github.com/openai/tiktoken) (OpenAI's BPE tokenizer library)
+- [The Illustrated Transformer](https://jalammar.github.io/illustrated-transformer/)
+- [Llama 3.3 70B config](https://huggingface.co/unsloth/Llama-3.3-70B-Instruct/blob/main/config.json) (public mirror of the gated [Meta model page](https://huggingface.co/meta-llama/Llama-3.3-70B-Instruct))

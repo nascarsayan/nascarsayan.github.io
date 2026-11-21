@@ -1,0 +1,7 @@
+/* Shared tone colours for content components (fg = ink/accent, bg = fill). */
+.tone-neutral { --t-fg: var(--color-gray-500); --t-bg: var(--color-cloud-100); }
+.tone-note { --t-fg: var(--color-info); --t-bg: var(--color-info-100); }
+.tone-good { --t-fg: var(--color-success); --t-bg: var(--color-success-100); }
+.tone-warn { --t-fg: var(--color-warning-700); --t-bg: var(--color-warning-100); }
+.tone-risk { --t-fg: var(--color-error); --t-bg: var(--color-error-100); }
+.tone-primary { --t-fg: var(--color-primary); --t-bg: var(--color-info-100); }

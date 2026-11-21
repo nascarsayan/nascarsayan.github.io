@@ -1,0 +1,10 @@
+---
+/**
+ * One state of an <Explorer>. Rendered inside a <template>, so the browser does
+ * not parse or lay it out until it is picked; <Explorer> unwraps the default one.
+ */
+interface Props { id: string }
+const { id } = Astro.props;
+---
+
+<template data-sx-tpl={id}><div class="sx-variant" data-variant={id}><slot /></div></template>

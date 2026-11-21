@@ -1,0 +1,14 @@
+---
+/** Inline nodes of src/diagrams/md.ts (text is escaped by Astro). */
+import type { Inline } from '@/diagrams/md';
+interface Props { items: Inline[] }
+const { items } = Astro.props;
+---
+{items.map((n) =>
+  n.t === 'text' ? n.v
+  : n.t === 'code' ? <code>{n.v}</code>
+  : n.t === 'strong' ? <strong><Astro.self items={n.c} /></strong>
+  : n.t === 'em' ? <em><Astro.self items={n.c} /></em>
+  : n.external ? <a href={n.href} target="_blank" rel="noopener noreferrer"><Astro.self items={n.c} /></a>
+  : <a href={n.href}><Astro.self items={n.c} /></a>
+)}

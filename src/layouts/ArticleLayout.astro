@@ -1,0 +1,224 @@
+---
+/**
+ * Layout for MDX article pages (`src/pages/<slug>/index.mdx`, `layout:` in
+ * frontmatter). Title block, sticky contents built from `##` headings, prose
+ * column. Headings get hover copy-link anchors.
+ *
+ * Frontmatter: title, description, group, updated (YYYY-MM-DD), and optional
+ * eyebrow, subtitle, links: [{ label, href }].
+ */
+import '@/styles/prose.css';
+import 'katex/dist/katex.min.css'; // math (src/lib/math.ts); fonts load only where glyphs are used
+import '@/styles/diagram.css';
+import '@/styles/explorer.css';
+import BaseLayout from './BaseLayout.astro';
+import LearnPath from '@/components/learn/LearnPath.astro';
+import { readMinutes } from '@/lib/read-time'; // not @/config/routes: that imports every page (cycle)
+
+interface Frontmatter {
+  title: string;
+  description?: string;
+  eyebrow?: string;
+  subtitle?: string;
+  links?: { label: string; href: string }[];
+  /** First published, YYYY-MM-DD (optional); shown with `updated` and the reading time. */
+  created?: string;
+  updated?: string;
+}
+interface Props { frontmatter: Frontmatter; headings?: { depth: number; slug: string; text: string }[] }
+const { frontmatter: fm, headings = [] } = Astro.props;
+const links = fm.links ?? [];
+const learnSlug = Astro.url.pathname.match(/^\/learn\/([^/]+)\/?$/)?.[1];
+// Header meta line: created, updated, reading time (prose words, as in the page lists).
+const sources = import.meta.glob<string>('/src/pages/**/index.mdx', { query: '?raw', import: 'default', eager: true });
+const src = sources[`/src/pages${Astro.url.pathname.replace(/\/?$/, '/')}index.mdx`];
+const fmtDate = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
+const metaBits = [
+  fm.created && `Created ${fmtDate(fm.created)}`,
+  fm.updated && (fm.updated !== fm.created || !fm.created) && `Updated ${fmtDate(fm.updated)}`,
+  src && `${readMinutes(src)} min read`,
+].filter(Boolean) as string[];
+const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
+const hasToc = headings.filter((h) => h.depth === 2).length >= 2;
+---
+
+<BaseLayout title={fm.title} description={fm.description} toc={hasToc}>
+  <div class="article max-width-wrapper" class:list={[{ 'has-toc': hasToc }]}>
+    {hasToc && (
+      <aside class="toc-wrap">
+        <div class="toc-sticky">
+          <nav class="toc" id="toc" aria-label="Contents">
+            <p class="toc-title">Contents</p>
+            <ol role="list" data-toc-list>
+              <span class="rail-fill" aria-hidden="true"></span>
+              <span class="rail-dot" aria-hidden="true"></span>
+              {toc.map((h) => (
+                <li class={`d${h.depth}`}><a href={`#${h.slug}`} data-toc={h.slug}><span class="dash" aria-hidden="true"></span><span class="label">{h.text}</span></a></li>
+              ))}
+            </ol>
+          </nav>
+        </div>
+      </aside>
+    )}
+    <article>
+      <header class="head">
+        {fm.eyebrow && <p class="eyebrow">{fm.eyebrow}</p>}
+        <h1>{fm.title}</h1>
+        {fm.subtitle && <p class="subtitle">{fm.subtitle}</p>}
+        {metaBits.length > 0 && <p class="meta">{metaBits.join(' · ')}</p>}
+        {links.length > 0 && (
+          <div class="head-row">
+            <ul role="list" class="links">
+              {links.map((l) => <li><a href={l.href}>{l.label}</a></li>)}
+            </ul>
+          </div>
+        )}
+      </header>
+      {learnSlug && <LearnPath slug={learnSlug} />}
+      <div class="prose"><slot /></div>
+    </article>
+  </div>
+</BaseLayout>
+
+<style>
+  .article { --content-width: 1180px; padding-top: 40px; padding-bottom: 40px; }
+  .article.has-toc { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 40px; transition: grid-template-columns 250ms var(--ease-out); }
+  :global(html[data-toc='collapsed']) .article.has-toc { grid-template-columns: 32px minmax(0, 1fr); }
+  article { min-width: 0; max-width: 1120px; }
+  /* Prose keeps a readable measure; diagrams, tables and grids use the full width. */
+  .prose :global(> :is(p, ul, ol, blockquote, h2, h3, h4, details:not(.fold), aside)) { max-width: 760px; }
+  /* A <Fold> spans the full width like tables and diagrams; its text keeps the measure. */
+  .prose :global(.fold-body > :is(p, ul, ol, blockquote, h2, h3, h4, details:not(.fold), aside)) { max-width: 760px; }
+  .toc-sticky { position: sticky; z-index: var(--z-toc); top: calc(var(--header-height) + 20px); transition: top 320ms var(--ease-soft); }
+  :global(html.header-hidden) .toc-sticky { top: 20px; }
+  .toc { max-height: calc(100vh - var(--header-height) - 100px); overflow: auto; font-size: 0.8125rem; }
+  .toc-title { margin-bottom: 8px; font-size: 0.75rem; letter-spacing: 1px; text-transform: uppercase; color: var(--color-muted); }
+  .toc ol { position: relative; border-left: 2px solid var(--color-gray-100); }
+  /* Reading progress: a fill down the rail and a dot that slides between sections. */
+  .rail-fill { position: absolute; left: -2px; top: 0; width: 2px; height: var(--fill, 0px); background: var(--color-primary); border-radius: 2px; transition: height 120ms linear; }
+  .rail-dot { position: absolute; left: -6px; top: 0; width: 10px; height: 10px; border-radius: 999px; background: var(--color-primary); box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-primary) 22%, transparent); transform: translateY(calc(var(--dot, 0px) - 5px)); transition: transform 120ms linear; opacity: var(--dot-on, 0); }
+  .toc a { display: flex; align-items: center; margin-left: -2px; padding: 4px 0 4px 12px; border-left: 2px solid transparent; color: var(--color-gray-700); text-decoration: none; line-height: 1.35; }
+  .toc .d3 a { padding-left: 24px; font-size: 0.78rem; }
+  .toc a:hover { color: var(--color-primary); }
+  .toc a[aria-current='true'] { color: var(--color-primary); font-weight: var(--font-weight-medium); }
+  .toc a.is-past { color: var(--color-gray-800); }
+  .dash { display: none; }
+
+  /* Collapsed: a rail of dashes; hovering or focusing it shows the full list. */
+  :global(html[data-toc='collapsed']) .toc { position: relative; overflow: visible; }
+  :global(html[data-toc='collapsed']) .toc-title { display: none; }
+  :global(html[data-toc='collapsed']) .toc ol { border: 0; }
+  :global(html[data-toc='collapsed']) .toc :is(.rail-fill, .rail-dot) { display: none; }
+  :global(html[data-toc='collapsed']) .toc a { padding: 5px 0; border: 0; }
+  :global(html[data-toc='collapsed']) .toc .label { display: none; }
+  :global(html[data-toc='collapsed']) .dash { display: block; width: 18px; height: 2px; border-radius: 2px; background: var(--color-gray-300); transition: width 200ms, background 200ms; }
+  :global(html[data-toc='collapsed']) .d3 .dash { width: 11px; margin-left: 7px; }
+  :global(html[data-toc='collapsed']) a[aria-current='true'] .dash { width: 26px; background: var(--color-primary); }
+  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) ol {
+    position: absolute; top: -8px; left: -8px; z-index: 1;
+    width: 260px; max-height: 70vh; overflow: auto;
+    padding: 10px 12px;
+    background: var(--color-background); border-radius: var(--radius); box-shadow: var(--shadow-elevation-medium);
+  }
+  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) .label { display: inline; }
+  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) .dash { display: none; }
+  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) a { padding: 4px 0; }
+  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) .d3 a { padding-left: 12px; }
+
+  @media (max-width: 960px) {
+    .article.has-toc, :global(html[data-toc='collapsed']) .article.has-toc { display: block; }
+    /* The toggle is in the header; on narrow screens the list drops down below it. */
+    .toc-wrap { position: fixed; left: 12px; top: calc(var(--header-height) + 8px); z-index: var(--z-toc); }
+    .toc { display: none; }
+    :global(html[data-toc='open-mobile']) .toc { display: block; position: absolute; top: 0; left: 0; width: min(320px, 85vw); max-height: 60vh; padding: 12px; background: var(--color-background); border-radius: var(--radius); box-shadow: var(--shadow-elevation-medium); }
+  }
+  .head { max-width: 860px; margin-bottom: 32px; padding-bottom: 24px; border-bottom: 1px solid var(--color-gray-100); }
+  .eyebrow { font-size: 0.8125rem; letter-spacing: 1.5px; text-transform: uppercase; color: var(--color-secondary); }
+  h1 { margin-top: 6px; font-size: 2.25rem; font-weight: var(--font-weight-bold); line-height: 1.2; }
+  .subtitle { margin-top: 10px; font-size: 1.125rem; color: var(--color-gray-700); }
+  .head-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-top: 16px; }
+  .meta { margin-top: 10px; font-size: 0.9375rem; color: var(--color-gray-700); font-variant-numeric: tabular-nums; }
+  .links { display: flex; flex-wrap: wrap; gap: 8px; }
+  .links a { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.8125rem; text-decoration: none; color: var(--color-link); background: var(--color-cloud-100); }
+  .links a:hover { filter: brightness(0.97); text-decoration: underline; }
+  @media (max-width: 960px) {
+    .article.has-toc { display: block; }
+    .toc { display: none; }
+  }
+</style>
+
+<script>
+  // Contents toggle (remembered), copy-link anchors on headings, scroll-spy.
+  const root = document.documentElement;
+  // A link to something inside a closed <details> (a <Fold>, a Learn track) opens it first,
+  // so the browser can scroll to the target.
+  const openTo = (hash: string) => {
+    if (hash.length < 2) return;
+    let id = hash.slice(1);
+    try { id = decodeURIComponent(id); } catch { /* keep as is */ }
+    const target = document.getElementById(id);
+    for (let d = target?.closest('details'); d; d = d.parentElement?.closest('details')) d.open = true;
+  };
+  openTo(location.hash);
+  if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
+  addEventListener('hashchange', () => openTo(location.hash));
+  document.addEventListener('click', (e) => {
+    const a = (e.target as Element).closest?.('a[href^="#"]');
+    if (a) openTo(a.getAttribute('href') ?? '');
+  }, true);
+  const toggle = document.querySelector<HTMLButtonElement>('[data-toc-toggle]');
+  const narrow = matchMedia('(max-width: 960px)');
+  const sync = () => toggle?.setAttribute('aria-expanded', String(narrow.matches ? root.dataset.toc === 'open-mobile' : root.dataset.toc !== 'collapsed'));
+  toggle?.addEventListener('click', () => {
+    if (narrow.matches) root.dataset.toc = root.dataset.toc === 'open-mobile' ? '' : 'open-mobile';
+    else {
+      root.dataset.toc = root.dataset.toc === 'collapsed' ? '' : 'collapsed';
+      localStorage.setItem('toc', root.dataset.toc || 'open');
+    }
+    sync();
+  });
+  document.querySelectorAll('[data-toc]').forEach((a) => a.addEventListener('click', () => { if (root.dataset.toc === 'open-mobile') { root.dataset.toc = ''; sync(); } }));
+  sync();
+
+  document.querySelectorAll<HTMLHeadingElement>('.prose :is(h2, h3)[id]').forEach((h) => {
+    const a = document.createElement('a');
+    a.className = 'heading-anchor';
+    a.href = `#${h.id}`;
+    a.setAttribute('aria-label', `Copy link to "${h.textContent}"`);
+    a.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>';
+    a.addEventListener('click', () => {
+      const url = new URL(location.href);
+      url.hash = h.id;
+      navigator.clipboard?.writeText(url.toString()).catch(() => {});
+    });
+    h.prepend(a);
+  });
+  // Scroll-spy with a continuous rail: the fill and dot interpolate between
+  // section links by how far the reading line is between their headings.
+  const list = document.querySelector<HTMLElement>('[data-toc-list]');
+  const items = [...document.querySelectorAll<HTMLAnchorElement>('[data-toc]')];
+  const heads = items.map((a) => document.getElementById(a.dataset.toc!));
+  let raf = 0;
+  const spy = () => {
+    raf = 0;
+    if (!list || !items.length) return;
+    const line = innerHeight * 0.3;
+    const tops = heads.map((h) => (h ? h.getBoundingClientRect().top : Infinity));
+    let cur = -1;
+    tops.forEach((t, i) => { if (t <= line) cur = i; });
+    items.forEach((a, i) => { a.setAttribute('aria-current', String(i === cur)); a.classList.toggle('is-past', i < cur); });
+    const y = (i: number) => items[i].offsetTop + items[i].offsetHeight / 2;
+    let pos = 0;
+    if (cur >= 0) {
+      const next = cur + 1 < items.length ? tops[cur + 1] : (document.querySelector('.prose')?.getBoundingClientRect().bottom ?? line);
+      const f = Math.max(0, Math.min(1, (line - tops[cur]) / Math.max(1, next - tops[cur])));
+      pos = cur + 1 < items.length ? y(cur) + (y(cur + 1) - y(cur)) * f : y(cur) + (items[cur].offsetHeight / 2) * f;
+    }
+    list.style.setProperty('--fill', `${pos}px`);
+    list.style.setProperty('--dot', `${pos}px`);
+    list.style.setProperty('--dot-on', cur >= 0 ? '1' : '0');
+  };
+  addEventListener('scroll', () => { raf ||= requestAnimationFrame(spy); }, { passive: true });
+  addEventListener('resize', spy);
+  spy();
+</script>

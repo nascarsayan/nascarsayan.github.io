@@ -1,0 +1,267 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GEMM tiling: how a matrix multiply fills the matrix cores"
+short: "GEMM tiling"
+description: "Why a naive matrix multiply is memory-bound and how tiling fixes it: workgroup tiles in LDS, wave tiles in registers, MFMA/Tensor Core instructions, double buffering, the epilogue, tile-count problems on skinny decode shapes (split-K), and grouped GEMM for mixture-of-experts. Worked numbers for MI355X."
+updated: "2026-11-10"
+track: silicon
+order: 4
+requires: [gpu-isa-ptx, gpu-memory-hierarchy]
+eyebrow: "Learn · Kernels & silicon"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import tiles from './_tiles.diagram';
+import idea from './_idea.diagram';
+import kloop from './_kloop.diagram';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import MatRow from '@/components/content/MatRow.astro';
+import Op from '@/components/content/Op.astro';
+import TileCalc from './_TileCalc.astro';
+import * as ex from './_example';
+
+Most of an LLM's FLOPs are in **GEMMs** (general matrix-matrix multiplies): the Q/K/V and output projections, and the MLP or expert layers. A GEMM computes $$C = A \cdot B$$, with $$A$$ of size $$M \times K$$, $$B$$ of size $$K \times N$$ and $$C$$ of size $$M \times N$$. In a transformer layer, $$M$$ is the number of tokens, $$K$$ the input width and $$N$$ the output width. This page explains how a GPU kernel turns that into work the matrix cores can do at full speed.
+
+## The idea first
+
+**Every output needs a whole row and a whole column.** One number of C, `C[i][j]`, is a dot product: row $$i$$ of A times column $$j$$ of B. Neighbouring outputs share inputs: everything in row $$i$$ of C uses the same row of A, everything in column *j* uses the same column of B. Tiling is just **noticing that sharing and fetching each shared piece once**.
+
+**Sandwich analogy.** A team must make 16 sandwiches: every combination of 4 breads (rows of A) and 4 fillings (columns of B). One cook per sandwich, each walking to the pantry for their own bread and filling, makes 32 trips. A team that puts the 4 breads and 4 fillings on its table once makes 8 trips, and makes all 16 sandwiches from the table. Bigger teams save more: a 256 × 256 tile fetches 512 items for 65,536 outputs.
+
+| Piece | Sandwich version | The question it answers |
+| --- | --- | --- |
+| Workgroup tile | one team and its 16 sandwiches | "Which block of C does this team own?" |
+| LDS (shared memory) | the team table | "What did we fetch once, for all of us?" |
+| K-step | the sandwich has many layers; bring one layer's worth at a time | "How much of the row and column fits on the table at once?" |
+| Wave tile, registers | each cook's hands: their share of sandwiches, kept while layers are added | "Where do partial results live until done?" |
+| MFMA / Tensor Core | a machine that assembles a 32 × 32 block of sandwiches in one go | "What is the smallest unit of work the hardware does?" |
+| Epilogue | wrap and ship each finished sandwich once | "What cheap step can we do before the result leaves?" |
+
+<Diagram spec={idea} title="Fetch per output, or fetch once per tile" caption="Toy numbers: a 4 × 4 tile of C. The worked example below runs this with real matrices.">
+  <Step title="Naive: everyone to the pantry" path="pantry -> team" state={{ team: { tone: 'warn', detail: '16 outputs, 32 fetches' } }}>Each output fetches its own row and column: 2 trips per output, 32 for the tile. The math units mostly wait for the trips.</Step>
+  <Step title="Tiled: fetch once, share from the table" path="pantry -> table -> team" state={{ table: { detail: '4 rows + 4 columns: 8 fetches' }, team: { tone: 'good', detail: '16 outputs from the table' } }}>The team fetches 4 rows and 4 columns once (8 trips) and builds all 16 outputs from the table. 4× fewer trips: the tile width.</Step>
+</Diagram>
+
+**Where the analogy breaks.** A real row of A is thousands of numbers long (K), and the table is small (160 KB of LDS on MI355X), so the team brings it in K-steps and keeps adding into the same results. Partial results live in registers, not on the table. And teams do not choose their sandwiches: the kernel assigns tiles, and neighbouring teams that share rows can still share them through the L2 cache.
+
+## The naive kernel is memory-bound
+
+Give each thread one element of C. It reads a row of A and a column of B (2K values) and does K multiply-adds (2K FLOPs). In BF16 that is 2K FLOPs for 4K bytes: **0.5 FLOP/B**. The MI355X BF16 ridge point is about 310 FLOP/B ([roofline](/learn/gpu-memory-hierarchy/#the-roofline)). The naive kernel would run at well under 1 % of peak, even though the whole matrix multiply has plenty of reuse: every element of A is needed by all N columns of C.
+
+The fix is **tiling**: load a block of A and a block of B once into fast memory, and compute every output that needs them before loading the next block.
+
+## Worked example: one workgroup, one tile, two K-steps
+
+An 8 × 8 matrix multiply, small integers so every sum is exact (the values are made up, the arithmetic is computed). C is split into four 4 × 4 tiles, one per **workgroup**. We follow workgroup 1, which owns rows 0–3, columns 4–7 of C. It walks along K in steps of 4.
+
+<Walkthrough title="Workgroup 1 computes its 4 × 4 tile of C" caption="Toy sizes: 8 × 8 matrices, 4 × 4 tile, K-step 4. A real MI355X kernel might use 256 × 256 tiles, a K-step of 64, and 32 × 32 × 16 MFMA instructions inside.">
+  <WStep title="1 · Which data does this tile need?">
+    <MatRow>
+      <Matrix title="Which workgroup owns each tile of C" rows={['rows 0–3', 'rows 4–7']} cols={['cols 0–3', 'cols 4–7']} data={ex.wgGrid} digits={0} scale="none" highlight={{ cells: [[0, 1]] }} note="Workgroup 1 (outlined) is the one we follow." />
+    </MatRow>
+    <MatRow>
+      <Matrix title="A (8 × 8)" rows={ex.rows} cols={ex.cols} data={ex.A} digits={0} scale="none" highlight={{ cells: ex.hiA(null) }} />
+      <Op>·</Op>
+      <Matrix title="B (8 × 8)" rows={ex.rows} cols={ex.cols} data={ex.B} digits={0} scale="div" highlight={{ cells: ex.hiB(null) }} />
+    </MatRow>
+    Output rows 0–3 need rows 0–3 of A; output columns 4–7 need columns 4–7 of B. All of K, in both. The other three workgroups need overlapping slices: workgroup 0 reads the **same** rows of A. That overlap is the reuse tiling exploits.
+  </WStep>
+  <WStep title="2 · K-step 0: load two 4 × 4 slices into LDS, multiply">
+    <MatRow>
+      <Matrix title="A rows 0–3, k 0–3" rows={ex.tileRows} cols={ex.kSteps[0].kLabels} data={ex.kSteps[0].a} digits={0} scale="none" />
+      <Op>·</Op>
+      <Matrix title="B k 0–3, cols 4–7" rows={ex.kSteps[0].kLabels} cols={ex.tileCols} data={ex.kSteps[0].b} digits={0} scale="div" />
+      <Op>=</Op>
+      <Matrix title="Accumulator after step 0" rows={ex.tileRows} cols={ex.tileCols} data={ex.acc1} digits={0} scale="div" highlight={{ cells: [[0, 0]] }} />
+    </MatRow>
+    The workgroup copies 16 values of A and 16 of B from HBM to LDS, waits at a barrier, then each wave reads its fragments and multiplies. Every loaded value is used 4 times (once per output in its row or column). The outlined cell, `C[0][4]` so far: {ex.dot(0)} = {ex.part(0)}. The accumulators stay in registers.
+  </WStep>
+  <WStep title="3 · K-step 1: next slices, add into the same accumulator">
+    <MatRow>
+      <Matrix title="A rows 0–3, k 4–7" rows={ex.tileRows} cols={ex.kSteps[1].kLabels} data={ex.kSteps[1].a} digits={0} scale="none" />
+      <Op>·</Op>
+      <Matrix title="B k 4–7, cols 4–7" rows={ex.kSteps[1].kLabels} cols={ex.tileCols} data={ex.kSteps[1].b} digits={0} scale="div" />
+      <Op>=</Op>
+      <Matrix title="This step's product" rows={ex.tileRows} cols={ex.tileCols} data={ex.kSteps[1].p} digits={0} scale="div" />
+    </MatRow>
+    <MatRow>
+      <Matrix title="Accumulator before" rows={ex.tileRows} cols={ex.tileCols} data={ex.acc1} digits={0} scale="div" />
+      <Op>+</Op>
+      <Matrix title="This step" data={ex.kSteps[1].p} digits={0} scale="div" />
+      <Op>=</Op>
+      <Matrix title="Accumulator after step 1" rows={ex.tileRows} cols={ex.tileCols} data={ex.acc2} digits={0} scale="div" highlight={{ cells: [[0, 0]] }} />
+    </MatRow>
+    The old slices in LDS are overwritten by the next ones. `C[0][4]` adds {ex.dot(4)} = {ex.part(1)}, so {ex.part(0)} + {ex.part(1)} = {ex.acc2[0][0]}. K is exhausted after two steps.
+  </WStep>
+  <WStep title="4 · Epilogue: store the finished tile">
+    <MatRow>
+      <Matrix title="C = A · B (all four tiles)" rows={ex.rows} cols={ex.cols} data={ex.C} digits={0} scale="div" highlight={{ cells: ex.hiC }} />
+    </MatRow>
+    The accumulator is written once to its place in C (outlined). It matches the full product computed directly: {ex.tileOk ? 'yes' : 'NO'}. Before storing, a real kernel converts FP32 to BF16 and can fuse cheap element-wise work here (bias, activation, residual add).
+  </WStep>
+  <WStep title="5 · Count the loads">
+    | | Elements read from memory | Multiply-adds | MACs per element read |
+    | --- | --- | --- | --- |
+    | Naive: one thread per output, row of A + column of B each | {ex.naiveLoads.toLocaleString('en-US')} | {ex.macs} | {(ex.macs / ex.naiveLoads).toFixed(2)} |
+    | Tiled: 4 workgroups × 2 K-steps × (16 + 16) | {ex.tiledLoads} | {ex.macs} | {(ex.macs / ex.tiledLoads).toFixed(2)} |
+
+    Same math, {ex.naiveLoads / ex.tiledLoads}× fewer loads: the tile width. Each element of a loaded slice serves a whole row or column of the tile. A 256 × 256 tile reuses each loaded element 256 times, which is what lifts a GEMM above the [ridge point](/learn/gpu-memory-hierarchy/#the-roofline).
+  </WStep>
+</Walkthrough>
+
+## The tiling hierarchy
+
+<Diagram spec={tiles} title="Tiles at each level (example sizes for MI355X)" caption="Tile sizes are an illustrative configuration, not the ones a specific library picks. Hover for the arithmetic." />
+
+| Level | Lives in | Example size | What it buys |
+| --- | --- | --- | --- |
+| Workgroup tile | LDS (shared memory) | 256 × 256 outputs, K-step 64 | reuse of A and B slices across a whole tile |
+| Wave tile | registers (AGPRs for C, VGPRs for A/B fragments) | 128 × 128 per wavefront | reuse of fragments across many MFMAs |
+| Instruction tile | the matrix core | `v_mfma_f32_32x32x16_bf16`: 32 × 32 outputs, $$K = 16$$ | one instruction = 32,768 FLOPs |
+
+### Intensity of a tile
+
+A workgroup tile of $$M_t \times N_t$$ outputs, for each K-step of depth $$k_t$$, loads $$(M_t + N_t)\,k_t$$ elements and does $$2\,M_t N_t k_t$$ FLOPs. With $$b$$ bytes per element:
+
+$$
+I = \frac{2\,M_t N_t k_t}{(M_t + N_t)\,k_t\,b} = \frac{2\,M_t N_t}{(M_t + N_t)\,b}
+$$
+
+| Tile (BF16, $$b = 2$$) | FLOP per byte loaded |
+| --- | --- |
+| 1 × 1 (naive) | 0.5 |
+| 64 × 64 | 32 |
+| 128 × 128 | 64 |
+| 256 × 256 | 128 |
+
+That is intensity per tile *as seen by L2*. Neighbouring workgroups load the same A rows and B columns, so L2 and the Infinity Cache serve many of those loads and HBM sees fewer. Libraries order workgroups (Triton's `GROUP_SIZE_M` "grouped ordering", AMD's XCD-aware remapping) so tiles that share data run at the same time on the same L2. Bigger tiles mean higher intensity, but need more LDS and registers, and give fewer workgroups.
+
+### Budget check on MI355X
+
+Take the 256 × 256 tile with a K-step of 64 in BF16:
+
+| Item | Size | Fits? |
+| --- | --- | --- |
+| A slice 256 × 64 + B slice 64 × 256 | 64 KB of LDS | yes |
+| Double-buffered (load next while computing current) | 128 KB | yes on MI355X (160 KB) and H100 (228 KB); **no** on MI300X (64 KB) |
+| C accumulators, 256 × 256 FP32 | 256 KB, split over 4 waves = 256 AGPRs per lane | uses the whole AGPR bank |
+| Waves per SIMD | 256 AGPRs + up to 256 VGPRs = 512 | **1** (12.5 % occupancy) |
+
+That is normal. A good GEMM keeps the matrix cores busy with one or two waves per SIMD, because each wave already has many independent MFMAs and loads in flight. → [Occupancy](/learn/gpu-execution-model/#occupancy-how-many-waves-fit)
+
+Try other tiles. The calculator applies the same arithmetic and also counts how many CUs get a tile, which matters in the next section.
+
+<TileCalc />
+
+## Inside the K loop
+
+Each workgroup walks along K. A straightforward version, per K-step:
+
+1. Every lane issues `global_load_dwordx4` for its share of the next A and B slices.
+2. Wait (`s_waitcnt vmcnt`), then write them to LDS with `ds_write_b128`.
+3. Barrier (`s_barrier`) so every wave sees the full slices.
+4. Each wave reads its fragments with `ds_read_b128` and issues its MFMAs.
+5. Barrier, then the next K-step.
+
+The real gfx950 loop on [PTX and AMDGCN](/learn/gpu-isa-ptx/#feeding-the-matrix-cores-amd) is exactly this, for a single wave.
+
+### Double buffering (software pipelining)
+
+The straightforward loop leaves the matrix cores idle during steps 1–3. Production kernels keep **two** LDS buffers. While MFMAs run on buffer 0, the loads for step *k + 1* fill buffer 1; then they swap.
+
+<Diagram spec={kloop} title="Double-buffered K loop of one workgroup" caption="Press play. The moving packet is the load in flight; the lit path is the math running at the same time.">
+  <Step path="hbm => buf0" focus="hbm, buf0">Prologue: load K-step 0 into buffer 0. Nothing to compute yet; the matrix cores wait once.</Step>
+  <Step path="hbm => buf1" focus="buf0, buf0 -> mfma, mfma, mfma -> acc, acc">Compute step 0 from buffer 0 while step 1 streams into buffer 1.</Step>
+  <Step path="hbm => buf0" focus="buf1, buf1 -> mfma, mfma, mfma -> acc, acc">Swap: compute step 1 from buffer 1 while step 2 overwrites buffer 0. Repeat until K runs out.</Step>
+  <Step path="acc => c" focus="acc, c">Epilogue: convert the FP32 accumulators and store the tile of C once.</Step>
+</Diagram>
+ On NVIDIA the hardware helps: `cp.async` (Ampere) and TMA (Hopper, `cp.async.bulk.tensor`) copy global → shared memory asynchronously, and Hopper's `wgmma` and Blackwell's `tcgen05.mma` are themselves asynchronous. On gfx950, `global_load_lds_dwordx4` loads straight into LDS without passing through VGPRs. Kernels with more LDS to spare use three or four stages instead of two.
+
+### The epilogue
+
+When the K loop ends, the accumulators hold FP32 results. The **epilogue** converts them (to BF16 or FP8), applies anything cheap and element-wise (bias, activation such as SiLU, a residual add, an output scale), and stores the tile. Fusing those steps here saves a full extra read and write of C through HBM, which for element-wise work is the entire cost (it is memory-bound at ~0.2 FLOP/B).
+
+### What it looks like in Triton (illustrative)
+
+Simplified from the official Triton matrix-multiplication tutorial. Triton lets the author write the workgroup tile; the compiler produces the LDS staging, MFMA/MMA instructions and pipelining:
+
+```python
+# Illustrative: one program (= one workgroup) computes one BLOCK_M x BLOCK_N tile of C.
+acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+for k in range(0, tl.cdiv(K, BLOCK_K)):
+    a = tl.load(a_ptrs, mask=offs_k[None, :] < K - k * BLOCK_K, other=0.0)   # A slice
+    b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_K, other=0.0)   # B slice
+    acc = tl.dot(a, b, acc)                      # becomes v_mfma_* / mma / wgmma
+    a_ptrs += BLOCK_K * stride_ak
+    b_ptrs += BLOCK_K * stride_bk
+c = acc.to(tl.bfloat16)                          # epilogue: convert (and fuse activations here)
+tl.store(c_ptrs, c, mask=c_mask)
+```
+
+## When there are not enough tiles
+
+Tiling assumes M and N are large. In decode they are not: M is the number of sequences in the batch.
+
+**Worked example: gpt-oss-120b Q/K/V projection.** Hidden size $$K = 2{,}880$$. Output $$N = (64\ \text{query} + 8\ \text{key} + 8\ \text{value heads}) \times 64 = 5{,}120$$ (published config). On an MI355X with 256 CUs:
+
+| Case | M | Tile | Workgroups | CUs used |
+| --- | --- | --- | --- | --- |
+| Prefill, 4,000 tokens | 4,000 | 256 × 256 | 16 × 20 = 320 | all 256 (1.25 waves of tiles) |
+| Decode, batch 64 | 64 | 256 × 256 | 1 × 20 = 20 | **20 of 256 (8 %)** |
+| Decode, batch 64 | 64 | 64 × 128 | 1 × 40 = 40 | 40 of 256 |
+| Decode, batch 64, split-K by 4 | 64 | 64 × 128 | 160 | 160 of 256 |
+
+Fixes for skinny shapes:
+
+- **Smaller tiles.** Fewer FLOPs per byte, but decode is memory-bound anyway.
+- **Split-K.** Several workgroups each take part of K for the same output tile, then their partial sums are added (atomics or a second small kernel).
+- **Stream-K.** Divide the total K-iterations evenly across exactly one wave of workgroups, so no CU sits idle at the end.
+- **GEMV kernels.** For batch 1–8, a matrix-vector kernel that just streams weights at full bandwidth is often fastest.
+
+Libraries choose among these per shape. hipBLASLt (AMD) and cuBLASLt (NVIDIA) keep tuned tables per GPU model, which is one reason the same model can need re-tuning on a new GPU.
+
+## Grouped GEMM for mixture-of-experts
+
+An MoE layer has many expert weight matrices (gpt-oss-120b: 128 experts per layer, 4 chosen per token). Each expert multiplies only the tokens routed to it: many small GEMMs of different sizes. Launching 128 kernels would waste most of the GPU, so servers run **one grouped GEMM**. vLLM's `fused_moe` Triton kernel shows the pattern:
+
+1. **Route.** A small kernel picks the top-4 experts per token.
+2. **Align.** `moe_align_block_size` sorts the (token, expert) pairs by expert and pads each expert's list to a multiple of `BLOCK_SIZE_M`. It outputs `sorted_token_ids` and `expert_ids` (one expert per M-block).
+3. **Grouped GEMM.** Each workgroup reads `expert_ids[pid_m]` to pick which expert's B matrix to use, gathers its tokens' rows of A via `sorted_token_ids`, and runs the normal tiled loop.
+4. **Combine.** Results are weighted by the router scores and summed per token.
+
+The padding is the cost. In decode, an expert typically has 1–3 tokens; padding to `BLOCK_SIZE_M` = 16 or 64 means most of the tile computes zeros, and each expert's weights are read for very few tokens. → [Roofline for MoE](/learn/gpu-memory-hierarchy/#apply-it-to-an-llm)
+
+On AMD, the AITER library provides MoE and GEMM kernels tuned for MI300/MI355 that vLLM can use instead of the Triton path.
+
+## Who writes these kernels
+
+| Library | Vendor | Notes |
+| --- | --- | --- |
+| hipBLASLt, rocBLAS (Tensile) | AMD | the BLAS libraries PyTorch calls on ROCm |
+| Composable Kernel (CK), AITER | AMD | templated / hand-tuned kernels for attention, MoE, GEMM |
+| cuBLAS, cuBLASLt | NVIDIA | the BLAS libraries PyTorch calls on CUDA |
+| CUTLASS / CuTe | NVIDIA | C++ templates; the base of many custom kernels |
+| Triton | both | Python DSL; vLLM's fused MoE and several attention kernels |
+
+<Callout tone="note" title="Misconception: one GEMM kernel">
+A single `torch.matmul` call can dispatch to dozens of different kernels depending on M, N, K, data type and GPU. Profiles therefore show long, mangled kernel names (tile sizes and pipeline depth are often encoded in them). Two GPUs running "the same model" usually run different GEMM kernels.
+</Callout>
+
+## How this shows up in operations
+
+- **Performance after a ROCm or driver upgrade can move.** GEMM libraries and their tuning tables ship with ROCm. A new version may pick different kernels for the same shapes.
+- **Batch size is a GPU efficiency knob.** Small decode batches leave most CUs idle in GEMMs, which shows up as low throughput with "busy" utilization counters.
+- **Kernel names in traces identify the library.** Names starting with `Cijk_` come from Tensile (rocBLAS/hipBLASLt); `fused_moe_kernel` is vLLM's Triton MoE kernel. → [LLM kernels](/learn/llm-kernels/#seeing-real-kernels)
+
+## Further reading
+
+- [Triton matrix multiplication tutorial](https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html): tiling, grouped ordering, autotuning
+- [MI300/MI350 workload optimization](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html): XCD-aware tile mapping, hipBLASLt tuning
+- [vLLM `fused_moe.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py): grouped GEMM, `sorted_token_ids`, `expert_ids`
+- [AITER](https://github.com/ROCm/aiter): AMD's inference kernel library
+- [CUTLASS](https://github.com/NVIDIA/cutlass): NVIDIA GEMM templates
+- [AMD matrix instruction calculator](https://github.com/ROCm/amd_matrix_instruction_calculator): MFMA shapes and register layouts
+- [gpt-oss-120b config](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json)

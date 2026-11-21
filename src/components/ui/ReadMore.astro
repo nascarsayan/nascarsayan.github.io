@@ -1,0 +1,40 @@
+---
+/**
+ * "Read more" with a trail of chevrons that fade in one by one on hover.
+ * Without `href` it renders a span, for use inside a card that is itself a link
+ * (the trail then lights up when the card is hovered).
+ */
+interface Props { href?: string; title: string; label?: string }
+const { href, title, label = 'Read more' } = Astro.props;
+const Tag = href ? 'a' : 'span';
+---
+
+<Tag class="read-more" href={href} data-sound-hover={href ? 'risingPops' : undefined}>
+  {label}<span class="visually-hidden">: {title}</span>
+  <svg width="36" height="12" viewBox="0 0 36 12" fill="none" stroke="currentColor" stroke-width="1.5"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <path d="M0.75 6H11.25M6 0.75L11.25 6L6 11.25" />
+    <path d="M15 10L19.5 5.5L15 1" />
+    <path d="M23 10L27.5 5.5L23 1" stroke-opacity="0.66" />
+    <path d="M31 10L35.5 5.5L31 1" stroke-opacity="0.35" />
+  </svg>
+</Tag>
+
+<style>
+  .read-more {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    font-weight: var(--font-weight-bold);
+    text-decoration: none;
+    color: var(--color-text);
+    transition: color 200ms;
+  }
+  svg { overflow: visible; color: var(--color-primary); }
+  path { opacity: 0; transition: opacity 125ms; }
+  .read-more:hover, :global(a:hover) .read-more { color: var(--color-primary); }
+  .read-more:hover path, :global(a:hover) .read-more path { opacity: 1; }
+  .read-more:hover path:nth-child(3), :global(a:hover) .read-more path:nth-child(3) { transition-delay: 125ms; }
+  .read-more:hover path:nth-child(4), :global(a:hover) .read-more path:nth-child(4) { transition-delay: 250ms; }
+</style>

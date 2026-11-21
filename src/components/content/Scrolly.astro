@@ -1,0 +1,61 @@
+---
+/**
+ * A diagram beside a list of chapters that drive it: scrolling the list (its own scroll
+ * box, as tall as the diagram) moves through the steps; the page scrolls past the whole
+ * thing like any other diagram. Clicking a chapter also goes to it.
+ *
+ *   <Scrolly spec={flow} title="Adoption" mode="build">
+ *     <Chapter focus="installer" eyebrow="Before" title="The installer owns it">Markdown…</Chapter>
+ *     <Chapter focus="argo, argo -> chart" title="Argo adopts">…</Chapter>
+ *   </Scrolly>
+ *
+ * On narrow screens the list goes under the diagram. The diagram column is about 635 px
+ * wide on a desktop and diagrams never shrink below 0.8 scale, so use a diagram up to
+ * about 790 px wide; a wider one scrolls sideways.
+ */
+import Diagram from './Diagram.astro';
+import type { DiagramInput } from '@/diagrams/spec';
+
+interface Props { spec: DiagramInput; title?: string; mode?: 'highlight' | 'build'; side?: 'left' | 'right' }
+const { spec, title, mode = 'highlight', side = 'left' } = Astro.props;
+const chapters = await Astro.slots.render('default');
+// One diagram step per chapter (same focus), so focus ids are validated by <Diagram>.
+const steps = [...chapters.matchAll(/data-chapter-focus="([^"]*)"/g)]
+  .map((m) => `<li class="dg-step" data-focus="${m[1]}"></li>`)
+  .join('');
+---
+
+<section class:list={['scrolly', `side-${side}`]} data-scrolly>
+  <div class="stage">
+    <Diagram spec={spec} title={title} mode={mode} player={false}><Fragment set:html={steps} /></Diagram>
+  </div>
+  <div class="list">
+    <div class="chapters" tabindex="0" aria-label="Steps: scroll to move through them"><Fragment set:html={chapters} /></div>
+    <p class="hint" aria-hidden="true">Scroll the steps <span class="count"></span></p>
+  </div>
+</section>
+
+<style>
+  .scrolly { display: grid; grid-template-columns: minmax(0, 1.7fr) minmax(0, 1fr); gap: 24px; margin: 32px 0; }
+  .scrolly.side-right .stage { order: 2; }
+  .stage { align-self: start; }
+  .stage :global(.dg) { width: 100%; margin: 0; }
+  /* The list is as tall as the diagram (it does not size the row) and scrolls on its own. */
+  .list { position: relative; min-height: 240px; }
+  .chapters {
+    position: absolute; inset: 0 0 28px; overflow-y: auto; scroll-snap-type: y proximity;
+    padding: 0 6px 0 2px; border-top: 1px solid var(--color-gray-100); border-bottom: 1px solid var(--color-gray-100);
+    mask-image: linear-gradient(transparent, #000 24px, #000 calc(100% - 24px), transparent);
+  }
+  .chapters:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .hint { position: absolute; left: 2px; bottom: 0; margin: 0; font-size: 0.8125rem; color: var(--color-gray-500); }
+  @media (max-width: 900px) {
+    .scrolly { display: block; }
+    .list { height: 44vh; margin-top: 12px; }
+  }
+</style>
+
+<script>
+  import { initScrolly } from '@/scripts/scrolly';
+  initScrolly();
+</script>

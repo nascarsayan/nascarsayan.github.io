@@ -1,0 +1,46 @@
+---
+layout: ../../layouts/ArticleLayout.astro
+title: "Article title"
+eyebrow: "Notes"
+description: "One line for the home page card and search."
+updated: "2026-01-01"
+links: [{ label: "example/repo#123", href: "https://github.com/example/repo/pull/123" }]
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import flow from './_flow.diagram';
+
+Lead with the summary: what this page is about and the one thing to remember.
+
+<Kpis items={[
+  { label: 'Requests', value: '1,200/s', detail: 'peak', tone: 'primary' },
+  { label: 'Errors', value: '0.1%', tone: 'good' },
+  { label: 'Latency p99', value: '180 ms', tone: 'warn' },
+]} />
+
+## How it works
+
+<Diagram spec={flow} title="Request path" mode="build">
+  <Step focus="client, client -> api" title="Request">The client calls the API.</Step>
+  <Step focus="api -> queue, queue" title="Enqueue">The API puts the job on a queue and answers at once.</Step>
+  <Step path="client -> api -> store" title="Round trip">A read goes through the API to the store and back.</Step>
+</Diagram>
+
+<Callout tone="note" title="Note">
+Callouts take tone `note`, `good`, `warn`, `risk` or `neutral`.
+</Callout>
+
+## Details
+
+Markdown for prose, lists, tables and code.
+
+| Part | Role |
+| --- | --- |
+| API | Accepts requests |
+| Queue | Buffers work |
+
+```bash
+echo "code blocks are highlighted"
+```

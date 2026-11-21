@@ -1,0 +1,199 @@
+---
+/**
+ * Layered topic map (org-chart style), laid out here at build time.
+ *
+ * Rows are levels: a page with no building blocks is level 0 (bottom); any
+ * other page sits one row above its highest building block. Overviews end up
+ * on top. Lines join a page to each page it is built from. Within a row,
+ * boxes are ordered by track, then by the average position of their links
+ * (a few barycentre passes) to cut crossings. Only the transitive reduction is
+ * drawn: a line p -> c is left out when p already reaches c through another page.
+ *
+ * Hover or focus a box: its building blocks (below) and the pages it is part
+ * of (above) light up, everything else dims. Click opens the page. The map
+ * sits in a zoom viewport (scripts/diagram-zoom.ts).
+ *
+ *   <LearnMap />                 every Learn page
+ *   <LearnMap hub="gpu-fundamentals" />   a hub and everything below it
+ */
+import '@/styles/diagram.css';
+import { LEARN, TRACKS, learnPage, learnHref, type LearnPage } from '@/config/learn';
+
+interface Props { hub?: string; title?: string }
+const { hub, title } = Astro.props;
+
+// Pages in scope: all, or the hub plus everything it is (transitively) built from.
+let scope: LearnPage[] = LEARN;
+if (hub) {
+  const seen = new Set<string>();
+  const walk = (s: string) => { if (seen.has(s)) return; seen.add(s); learnPage(s)?.requires.forEach(walk); };
+  if (!learnPage(hub)) throw new Error(`LearnMap: unknown hub ${hub}`);
+  walk(hub);
+  scope = LEARN.filter((p) => seen.has(p.slug));
+}
+const inScope = new Set(scope.map((p) => p.slug));
+const kids = (p: LearnPage) => p.requires.filter((r) => inScope.has(r));
+
+// Levels.
+const level = new Map<string, number>();
+const lv = (s: string): number => {
+  if (level.has(s)) return level.get(s)!;
+  const c = kids(learnPage(s)!);
+  const v = c.length ? 1 + Math.max(...c.map(lv)) : 0;
+  level.set(s, v);
+  return v;
+};
+scope.forEach((p) => lv(p.slug));
+const top = Math.max(...level.values());
+const trackIdx = (t: string) => TRACKS.findIndex((x) => x.id === t);
+const rows: LearnPage[][] = Array.from({ length: top + 1 }, (_, l) =>
+  scope.filter((p) => level.get(p.slug) === l).sort((a, b) => trackIdx(a.track) - trackIdx(b.track) || a.order - b.order));
+
+// Crossing reduction: barycentre sweeps, keeping track order as a tie-break weight.
+const pos = new Map<string, number>();
+const index = () => rows.forEach((r) => r.forEach((p, i) => pos.set(p.slug, i / Math.max(1, r.length - 1))));
+index();
+const ups = new Map<string, string[]>();
+for (const p of scope) for (const r of kids(p)) ups.set(r, [...(ups.get(r) ?? []), p.slug]);
+for (let pass = 0; pass < 6; pass++) {
+  const order = pass % 2 === 0 ? [...rows.keys()] : [...rows.keys()].reverse();
+  for (const l of order) {
+    const bc = (p: LearnPage) => {
+      const n = [...kids(p), ...(ups.get(p.slug) ?? [])].map((s) => pos.get(s)!);
+      return n.length ? n.reduce((a, b) => a + b, 0) / n.length : pos.get(p.slug)!;
+    };
+    rows[l].sort((a, b) => (bc(a) + trackIdx(a.track) * 0.02) - (bc(b) + trackIdx(b.track) * 0.02));
+    index();
+  }
+}
+
+// Geometry (px at 100%).
+const BW = 176, BH = 50, GAP_X = 22, GAP_Y = 92, PAD = 24;
+const widest = Math.max(...rows.map((r) => r.length));
+const W = PAD * 2 + widest * BW + (widest - 1) * GAP_X;
+const H = PAD * 2 + rows.length * BH + (rows.length - 1) * GAP_Y;
+const xy = new Map<string, { x: number; y: number }>();
+rows.forEach((r, l) => {
+  const rowW = r.length * BW + (r.length - 1) * GAP_X;
+  const x0 = (W - rowW) / 2;
+  const y = PAD + (top - l) * (BH + GAP_Y);
+  r.forEach((p, i) => xy.set(p.slug, { x: x0 + i * (BW + GAP_X), y }));
+});
+const tone = (t: string) => TRACKS.find((x) => x.id === t)?.tone ?? 'neutral';
+// Draw only the transitive reduction: skip p -> c when p reaches c through another child.
+const reaches = (from: string, to: string, seen = new Set<string>()): boolean =>
+  kids(learnPage(from)!).some((k) => k === to || (!seen.has(k) && (seen.add(k), reaches(k, to, seen))));
+const drawn = (p: LearnPage) => kids(p).filter((c) => !kids(p).some((o) => o !== c && reaches(o, c)));
+const edges = scope.flatMap((p) => drawn(p).map((c) => {
+  const a = xy.get(p.slug)!, b = xy.get(c)!;
+  const x1 = a.x + BW / 2, y1 = a.y + BH, x2 = b.x + BW / 2, y2 = b.y;
+  const my = (y1 + y2) / 2;
+  return { from: p.slug, to: c, tone: tone(p.track), d: `M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}` };
+}));
+// Hover reach uses the drawn edges, so the lit lines always connect lit boxes.
+const upsDrawn = new Map<string, string[]>();
+for (const p of scope) for (const c of drawn(p)) upsDrawn.set(c, [...(upsDrawn.get(c) ?? []), p.slug]);
+const graph = Object.fromEntries(scope.map((p) => [p.slug, { d: drawn(p), u: upsDrawn.get(p.slug) ?? [] }]));
+const tracksUsed = TRACKS.filter((t) => scope.some((p) => p.track === t.id));
+---
+
+<figure class="dg lm" data-learn-map={JSON.stringify(graph)}>
+  {title && <div class="dg-title">{title}</div>}
+  <div class="dg-frame">
+    <div class="dg-zoomwrap">
+      <div class="dg-viewport lm-vp" data-zoom tabindex="0" aria-label="Topic map: drag to pan, Ctrl or ⌘ + wheel to zoom">
+        <div class="dg-fit" style={`--w: ${W}; --h: ${H}`}>
+          <div class="lm-inner" style={`width:${W}px;height:${H}px`}>
+            <svg class="lm-lines" width={W} height={H} viewBox={`0 0 ${W} ${H}`} aria-hidden="true">
+              {edges.map((e) => <path class={`lm-e lm-${e.tone}`} d={e.d} data-from={e.from} data-to={e.to} />)}
+            </svg>
+            {scope.map((p) => {
+              const { x, y } = xy.get(p.slug)!;
+              return (
+                <a class={`lm-n lm-${tone(p.track)}${p.hub ? ' is-hub' : ''}${p.slug === hub ? ' is-root' : ''}`} href={learnHref(p.slug)} draggable="false" data-slug={p.slug} title={p.description} style={`left:${x}px;top:${y}px;width:${BW}px;height:${BH}px`}>
+                  <span class="lm-t">{p.short}</span>
+                  <span class="lm-k">{p.hub ? 'overview' : TRACKS.find((t) => t.id === p.track)?.label}</span>
+                </a>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+      <div class="dg-zoom" role="group" aria-label="Zoom">
+        <button type="button" data-zoom-act="out" aria-label="Zoom out" title="Zoom out (−)">−</button>
+        <span class="dg-zoom-val" aria-live="polite">100%</span>
+        <button type="button" data-zoom-act="in" aria-label="Zoom in" title="Zoom in (+)">+</button>
+        <button type="button" data-zoom-act="fit" aria-label="Fit to width" title="Fit (0)">Fit</button>
+        <button type="button" data-zoom-act="one" aria-label="Actual size" title="Actual size (1)">1:1</button>
+      </div>
+    </div>
+  </div>
+  <figcaption>
+    <span class="lm-legend">{tracksUsed.map((t) => <span class={`lm-chip lm-${t.tone}`}>{t.label}</span>)}</span>
+    Bottom row: the smallest building blocks. Each line goes down from a page to a page it is built from; overviews (bold border) sit on top. Hover a box to light up what it is built from and what it is part of; click to open it.
+  </figcaption>
+</figure>
+
+<style>
+  .lm-inner { position: relative; transform: scale(var(--z, 1)); transform-origin: 0 0; }
+  .lm-lines { position: absolute; inset: 0; overflow: visible; }
+  .lm-e { fill: none; stroke-width: 1.6; opacity: 0.45; transition: opacity 150ms, stroke-width 150ms; }
+  .lm-n {
+    position: absolute; display: flex; flex-direction: column; justify-content: center; gap: 1px;
+    padding: 4px 10px; border-radius: 10px; border: 1.5px solid transparent;
+    text-decoration: none; color: var(--color-text); background: var(--lm-bg);
+    box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); transition: opacity 150ms, box-shadow 150ms;
+  }
+  .lm-n:hover, .lm-n:focus-visible { box-shadow: 0 0 0 2px var(--color-primary); z-index: 1; }
+  .lm-n.is-hub { border-color: var(--lm-line); font-weight: var(--font-weight-bold); }
+  .lm-n.is-root { box-shadow: 0 0 0 2px var(--color-success); }
+  .lm-t { font-size: 13.5px; line-height: 1.2; font-weight: 600; }
+  .lm-k { font-size: 10.5px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--color-muted); }
+  .lm.is-focus .lm-n { opacity: 0.22; }
+  .lm.is-focus .lm-e { opacity: 0.08; }
+  .lm.is-focus .lm-n.is-on { opacity: 1; }
+  .lm.is-focus .lm-e.is-on { opacity: 0.95; stroke-width: 2.4; }
+  .lm-legend { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 6px; }
+  .lm-chip { padding: 0 8px; border-radius: 999px; font-size: 0.75rem; color: var(--color-text); background: var(--lm-bg); }
+  .lm-vp { max-height: min(78vh, 980px); }
+  /* Track colours: tinted box, solid line. */
+  .lm-lime { --lm-bg: color-mix(in srgb, #a6d189 30%, var(--color-background)); --lm-line: #7fae5f; }
+  .lm-sky { --lm-bg: color-mix(in srgb, #99d1db 32%, var(--color-background)); --lm-line: #5fa9b8; }
+  .lm-pink { --lm-bg: color-mix(in srgb, #f4b8e4 32%, var(--color-background)); --lm-line: #d77fbf; }
+  .lm-primary { --lm-bg: var(--color-info-100); --lm-line: var(--color-primary); }
+  .lm-teal { --lm-bg: color-mix(in srgb, #81c8be 32%, var(--color-background)); --lm-line: #4fa598; }
+  .lm-violet { --lm-bg: color-mix(in srgb, #ca9ee6 32%, var(--color-background)); --lm-line: #9e6fc4; }
+  .lm-peach { --lm-bg: color-mix(in srgb, #ef9f76 30%, var(--color-background)); --lm-line: #d0784c; }
+  .lm-warn { --lm-bg: color-mix(in srgb, #e5c890 34%, var(--color-background)); --lm-line: #b8964f; }
+  .lm-neutral { --lm-bg: var(--color-gray-100); --lm-line: var(--color-gray-500); }
+  .lm-e.lm-lime, .lm-e.lm-sky, .lm-e.lm-pink, .lm-e.lm-primary, .lm-e.lm-teal, .lm-e.lm-violet, .lm-e.lm-peach, .lm-e.lm-warn, .lm-e.lm-neutral { stroke: var(--lm-line); }
+</style>
+
+<script>
+  import { initZoom } from '@/scripts/diagram-zoom';
+  initZoom();
+  // Hover/focus: light up the box, everything below it (built from) and above it (part of).
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-learn-map]')) {
+    const g: Record<string, { d: string[]; u: string[] }> = JSON.parse(fig.dataset.learnMap || '{}');
+    const reach = (s: string, k: 'd' | 'u', out: Set<string>) => { for (const n of g[s]?.[k] ?? []) if (!out.has(n)) { out.add(n); reach(n, k, out); } };
+    const on = (s: string) => {
+      const down = new Set<string>(), up = new Set<string>();
+      reach(s, 'd', down); reach(s, 'u', up);
+      const lit = new Set([s, ...down, ...up]);
+      fig.classList.add('is-focus');
+      fig.querySelectorAll<HTMLElement>('.lm-n').forEach((n) => n.classList.toggle('is-on', lit.has(n.dataset.slug!)));
+      const upS = new Set([s, ...up]), downS = new Set([s, ...down]);
+      fig.querySelectorAll<SVGPathElement>('.lm-e').forEach((e) => {
+        const f = e.dataset.from!, t = e.dataset.to!;
+        e.classList.toggle('is-on', (upS.has(f) && upS.has(t)) || (downS.has(f) && downS.has(t)));
+      });
+    };
+    const off = () => { fig.classList.remove('is-focus'); fig.querySelectorAll('.is-on').forEach((n) => n.classList.remove('is-on')); };
+    fig.querySelectorAll<HTMLElement>('.lm-n').forEach((n) => {
+      n.addEventListener('pointerenter', () => on(n.dataset.slug!));
+      n.addEventListener('focus', () => on(n.dataset.slug!));
+      n.addEventListener('pointerleave', off);
+      n.addEventListener('blur', off);
+    });
+  }
+</script>

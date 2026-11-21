@@ -1,0 +1,12 @@
+---
+/**
+ * The Learn topic map: all pages, or a hub and everything it is built from.
+ * Kept as the name pages import; the layered map itself is LearnMap.astro.
+ */
+import LearnMap from './LearnMap.astro';
+
+interface Props { hub?: string; title?: string }
+const { hub, title } = Astro.props;
+---
+
+<LearnMap hub={hub} title={title ?? (hub ? 'What this overview is built from' : 'Topic map: building blocks (bottom) to overviews (top)')} />

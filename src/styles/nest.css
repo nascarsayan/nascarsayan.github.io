@@ -1,0 +1,64 @@
+/* <Nest>: static nested windows in the look of <Chronicle> boxes (chronicle.css), without the player. */
+.nest {
+  --n-ink: var(--color-text);
+  --n-muted: var(--color-gray-700);
+  --n-line: var(--color-gray-300);
+  --n-soft: var(--color-gray-100);
+  --n-bg: var(--color-background);
+  --n-win: var(--color-gray-500);
+  --n-desk: color-mix(in srgb, var(--color-gray-500) 5%, var(--n-bg));
+  --n-titlebar: color-mix(in srgb, var(--n-ink) 7%, transparent);
+  --n-shadow: 0 1px 2px rgb(0 0 0 / 0.10), 0 4px 12px rgb(0 0 0 / 0.08);
+  margin: 1.75rem 0;
+  padding: 6px;
+  border: 1px solid var(--n-soft);
+  border-radius: 10px;
+  background: var(--color-cloud-100, var(--n-soft));
+  color: var(--n-ink);
+  font-size: 0.8125rem;
+  line-height: 1.35;
+}
+.nest-win {
+  --tint: var(--n-win);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+  border: 1.5px solid var(--tint);
+  border-radius: 8px;
+  background: var(--n-desk);
+  box-shadow: var(--n-shadow);
+}
+.nest-win.is-leaf { background: var(--n-bg); box-shadow: none; border-width: 1px; border-color: var(--n-line); }
+.nest-head { display: flex; flex-direction: column; gap: 2px; padding: 6px 10px; border-bottom: 1px solid var(--n-line); background: var(--n-titlebar); }
+.nest-win.is-leaf > .nest-head { border-bottom: 0; background: transparent; }
+.nest-title { display: flex; align-items: center; gap: 0.45em; min-width: 0; }
+.nest-icon { width: 18px; height: 18px; flex: none; }
+.nest-kind { flex: none; padding: 0 5px; border-radius: 4px; border: 1px solid var(--n-line); background: var(--n-bg); color: var(--n-muted); font-size: 0.625rem; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+.nest-name { min-width: 0; overflow: hidden; font-weight: var(--font-weight-medium, 500); white-space: nowrap; text-overflow: ellipsis; }
+a.nest-name { color: inherit; text-decoration: underline; text-decoration-color: var(--n-line); text-underline-offset: 2px; }
+a.nest-name:hover { text-decoration-color: currentColor; }
+.nest-sub { overflow: hidden; color: var(--n-muted); font-family: var(--font-family-mono); font-size: 0.75rem; white-space: nowrap; text-overflow: ellipsis; }
+.nest-note { color: var(--n-muted); font-size: 0.75rem; }
+.nest-note code { font-size: 0.95em; }
+.nest-arts { display: flex; flex-wrap: wrap; gap: 4px; padding: 6px 8px 0; }
+.nest-win.is-leaf > .nest-arts { padding: 0 8px 8px; }
+.nest-art { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; height: 23px; padding: 0 7px 0 3px; border: 1px solid var(--n-line); border-radius: 6px; background: var(--n-bg); font-family: var(--font-family-mono); font-size: 0.71875rem; white-space: nowrap; }
+.nest-art-k { padding: 0 4px; border-radius: 3px; background: var(--n-soft); color: var(--n-muted); font-family: var(--font-family-sans, inherit); font-size: 0.5625rem; text-transform: uppercase; }
+.nest-art-image .nest-art-k { background: color-mix(in srgb, rgb(50 108 229) 18%, transparent); }
+.nest-art-yaml .nest-art-k, .nest-art-file .nest-art-k { background: color-mix(in srgb, var(--color-alert, #e5a50a) 25%, transparent); }
+.nest-art-cmd .nest-art-k, .nest-art-script .nest-art-k { background: color-mix(in srgb, var(--color-success) 18%, transparent); }
+.nest-art-net .nest-art-k, .nest-art-metric .nest-art-k { background: color-mix(in srgb, var(--color-info) 18%, transparent); }
+.nest-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 6px; padding: 6px; align-items: start; }
+/* Tones tint the frame and title bar, to tell parts apart (rack 1 vs rack 2). */
+.nest-t-note { --tint: var(--color-info); }
+.nest-t-good { --tint: var(--color-success); }
+.nest-t-warn { --tint: var(--color-warning-700); }
+.nest-t-risk { --tint: var(--color-error); }
+.nest-t-violet { --tint: #8839ef; }
+.nest-t-teal { --tint: #179299; }
+.nest-win[class*='nest-t-'] { border-color: var(--tint); }
+.nest-win[class*='nest-t-'] > .nest-head { background: color-mix(in srgb, var(--tint) 12%, transparent); }
+.nest-win.is-leaf[class*='nest-t-'] { border-color: color-mix(in srgb, var(--tint) 55%, var(--n-line)); }
+.nest-cap { margin: 8px 4px 2px; color: var(--n-muted); font-size: 0.8125rem; }
+@media (max-width: 640px) { .nest-grid { grid-template-columns: minmax(0, 1fr) !important; } }

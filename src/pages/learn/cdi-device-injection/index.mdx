@@ -1,0 +1,210 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "CDI: how a GPU gets into a container"
+short: "CDI device injection"
+description: "The Container Device Interface: the spec files a DRA driver writes, how containerd turns a CDI device name into device nodes and cgroup rules, which device files an AMD GPU needs (/dev/kfd, card, renderD) and how device names map to PCI addresses. Example specs from a sample node, NVIDIA for contrast, and the failure modes."
+updated: "2026-11-10"
+track: kubernetes
+order: 3
+requires: [k8s-gpu-allocation]
+eyebrow: "Learn · GPUs in Kubernetes"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Yaml from '../k8s-gpu-allocation/_Yaml.astro';
+import flow from './_flow.diagram';
+import Decoder from './_Decoder.astro';
+import * as c from '../k8s-gpu-allocation/_sample';
+import * as ex from './_cdi';
+
+Allocation decides *which* GPU a Pod gets. Something still has to put that GPU's device files into the container, and only those. With a DRA driver and containerd 2.x, that something is **CDI**, the Container Device Interface.
+
+## The idea
+
+A container sees only the device files the runtime puts into it. Think of a **CDI spec as a recipe card** pinned on a board (`/var/run/cdi`). The card has a name, `k8s.gpu.amd.com/gpu=<claim>-gpu-5-132`, and says "to cook this, add these three device files and these two environment variables". The DRA driver writes the card. The kubelet only passes the *name* along. containerd looks the name up on the board and follows the recipe when it builds the container.
+
+Each part answers one question:
+
+| Piece | Question it answers |
+| --- | --- |
+| CDI device name | *Which* device does this container want? (a string, nothing more) |
+| Spec file in `/var/run/cdi` | *What* does that name mean on this node? (device nodes, env, mounts) |
+| containerd's CDI cache | *How* do I turn names into an OCI spec? |
+| Device cgroup rule | *Enforce*: the container may open these major:minor numbers and no others |
+
+Where the analogy breaks: the card is read **once, at container create**. Nobody re-reads it while the container runs, so deleting the file later does not take the GPU away, and the driver that wrote it is not in the data path. But every container *restart* is a new create, so the card must still be on the board then.
+
+Before CDI, every vendor shipped its own runtime hook or wrapper (for example `nvidia-container-runtime`). With CDI the runtime does the work and the vendor only writes data.
+
+## Worked example: claim c1a10001 becomes three device files
+
+Follow the prefill Pod `…-p4x7k` on `gpu-node-1`, which the scheduler gave `gpu-5-132`. Every file below is illustrative example output in the driver's format; the derived values (file name, minor numbers, OCI edits) are computed from the device name at build time and checked against the example file.
+
+<Walkthrough title="From NodePrepareResources to /dev/dri/renderD132" caption="Claim UID c1a10001-0000-4000-8000-000000000001, containerd 2.2, AMD DRA driver v1.0.1 (example).">
+  <WStep title="1 · The kubelet asks the driver to prepare the claim">
+    <Yaml code={("# NodePrepareResources request (gRPC, dra.sock)\nclaims:\n- namespace: " + (c.ns) + "\n  uid: " + (c.claimUid) + "\n  name: " + (c.claim))} />
+
+    The kubelet sends only the claim's identity. The driver reads the claim from the API and finds its own result in `status.allocation`: driver `gpu.amd.com`, pool <code>{c.node}</code>, device **<code>{c.device}</code>**.
+  </WStep>
+  <WStep title="2 · The driver writes the CDI spec file">
+    <Yaml code={c.cdiYaml} />
+
+    File name = kind `k8s.gpu.amd.com/gpu` with `/` → `-`, then `_<claim uid>.yaml`: **<code>{ex.file}</code>**. Device name <code>{c.device}</code> is `gpu-<card>-<render>`, so the GPU's nodes are <code>{c.parseDeviceName(c.device).card}</code> and <code>{c.parseDeviceName(c.device).render}</code>, both DRM major 226. `/dev/kfd` has no minor in the file; the CDI library fills it by stat-ing the host file (238:0).
+  </WStep>
+  <WStep title="3 · …and keeps one shared file for every GPU container">
+    <Yaml code={c.cdiCommonYaml} />
+
+    Written once when the driver started (1 Nov 08:00). The driver answers the kubelet with **two** CDI names: <code>{ex.ids[0]}</code> and <code>{ex.ids[1]}</code>.
+  </WStep>
+  <WStep title="4 · The kubelet passes the names in CRI CreateContainer">
+    <Yaml code={ex.criYaml} />
+
+    The kubelet stores the names in its checkpoint and puts them in the CRI field `ContainerConfig.CDI_devices` every time it creates a container that lists the claim. It never sees device numbers.
+  </WStep>
+  <WStep title="5 · containerd resolves the names against its spec dirs">
+    <Yaml lang="toml" code={"# /etc/containerd/config.toml (excerpt)\nversion = 3\n    enable_cdi = true\n    cdi_spec_dirs = ['/etc/cdi', '/var/run/cdi']"} />
+
+    | Name part | Value | Found in |
+    | --- | --- | --- |
+    | kind (vendor/class) | <code>{ex.parsed[1].kind}</code> | both files |
+    | device `common` | 2 env vars | `k8s.gpu.amd.com-gpu_common.yaml` |
+    | device <code>{ex.parsed[1].name.slice(0, 8)}…-{c.device}</code> | 3 device nodes | <code>k8s.gpu.amd.com-gpu_{c.claimUid.slice(0, 8)}….yaml</code> |
+
+    `/etc/cdi` does not exist on GPU nodes; everything is in `/var/run/cdi`. An unknown name fails the create.
+  </WStep>
+  <WStep title="6 · The edits land in the OCI runtime spec">
+    <Yaml lang="js" code={ex.ociJson} />
+
+    For each device node the CDI library adds a `linux.devices` entry (runc creates the file) **and** a device-cgroup allow rule (the kernel lets the container open it). Env entries are appended to the process environment.
+  </WStep>
+  <WStep title="7 · The container sees one GPU">
+    <Yaml lang="shell" code={c.containerView} />
+    runc creates the container at 10:12:00 (node clock). The cgroup (a BPF device filter on cgroup v2) allows 238:0, 226:5 and 226:132 and nothing else, so the other 7 GPUs' render nodes cannot be opened even if someone creates them. The model then loads for {c.loadText} before the Pod turns Ready.
+  </WStep>
+</Walkthrough>
+
+## The same path, hop by hop
+
+<Diagram spec={flow} title="Who writes, who reads, who creates" caption="Prepare runs once per claim. Create runs every time the container is (re)created.">
+  <Step path="kubelet -> drv" title="Prepare">The kubelet calls `NodePrepareResources`; the reply carries the two CDI names.</Step>
+  <Step path="drv => cdi" title="Write the spec">During prepare the driver writes `k8s.gpu.amd.com-gpu_c1a10001….yaml` into `/var/run/cdi`.</Step>
+  <Step path="kubelet -> ctrd" title="Create">The kubelet sends CRI `CreateContainer` with `CDI_devices` = the two names.</Step>
+  <Step path="ctrd -> cdi" title="Resolve">containerd's CDI cache looks the names up in `/etc/cdi` and `/var/run/cdi`.</Step>
+  <Step path="ctrd => runc => ctr" title="Apply">containerd adds the edits to the OCI spec; runc makes the device nodes and the cgroup rules.</Step>
+  <Step path="ctrd -> cdi:hang" focus="ctrd, cdi" state={{ cdi: { tone: 'risk', detail: 'file missing' }, ctr: { tone: 'risk', detail: 'CreateContainerError' } }} title="Failure: spec file missing">If the file is gone at create time (driver lost it, or `/var/run` was wiped), the name does not resolve, containerd refuses the container and the Pod shows `CreateContainerError`.</Step>
+  <Step focus="ctr" state={{ drv: { tone: 'muted', detail: 'Pod deleted' }, ctr: { tone: 'good', detail: 'still has its GPU' } }} title="Driver gone, container fine">Once the container exists the driver is out of the picture. It keeps its device files even if the driver Pod dies.</Step>
+</Diagram>
+
+## The spec format
+
+A spec file has `cdiVersion` (for example `0.5.0`), `kind` (`vendor/class`), and `devices[]`, each with a `name` and `containerEdits`. `containerEdits` (per device, or top-level for all devices of the kind) holds `env`, `deviceNodes`, `mounts`, `hooks`, and since 0.7.0 `additionalGids` and `intelRdt`. A device's **fully qualified name** is `<kind>=<name>`.
+
+Runtimes look in `/etc/cdi` (static, written by packages) and `/var/run/cdi` (dynamic, written at run time). Files in `/var/run/cdi` win when names collide. On `gpu-node-1` there is one `common` file plus one file per prepared claim, named after the **claim UID**:
+
+```shell
+$ ls -l /var/run/cdi          # example output
+-rw-------. 1 root root 210 Nov  1 08:00 k8s.gpu.amd.com-gpu_common.yaml
+-rw-------. 1 root root 660 Nov  3 10:12 k8s.gpu.amd.com-gpu_c1a10001-0000-4000-8000-000000000001.yaml
+-rw-------. 1 root root 660 Nov  3 10:20 k8s.gpu.amd.com-gpu_c1a10002-0000-4000-8000-000000000002.yaml
+```
+
+Two claims are prepared on this node ({c.usedOn(c.node).join(' and ')}), so there are two per-claim files.
+
+## Which device files an AMD GPU needs
+
+<Decoder />
+
+| File | Major:minor | What it is | Shared? |
+| --- | --- | --- | --- |
+| `/dev/kfd` | 238:0 | **KFD** (Kernel Fusion Driver), the ROCm compute interface. Queues, memory, events for *all* GPUs go through it | one file for all GPUs |
+| `/dev/dri/cardN` | 226:N | DRM "primary" node of one GPU (display and mode setting heritage; some tools open it) | per GPU |
+| `/dev/dri/renderDN` | 226:N (N ≥ 128) | DRM render node of one GPU. ROCm needs it to use that GPU | per GPU |
+
+`/dev/kfd` alone is not enough. The ROCm runtime enumerates GPUs through KFD but can only use a GPU whose render node the process may open. AMD's container docs say it directly: pass `/dev/kfd` plus the individual `renderD*` nodes to restrict a container to some GPUs; passing all of `/dev/dri` gives all GPUs. So the isolation boundary is the device cgroup on the render node.
+
+
+### Which files give which GPUs
+
+<Explorer id="cdi-iso"
+  options={[{ key: 'pass', label: 'Container gets', default: 'claim', values: [
+    { value: 'claim', label: 'one DRA claim' },
+    { value: 'kfd', label: '/dev/kfd only' },
+    { value: 'all', label: '/dev/kfd + all of /dev/dri' },
+  ] }]}
+  variants={[{ match: { pass: 'claim' }, id: 'iso-claim' }, { match: { pass: 'kfd' }, id: 'iso-kfd' }, { match: { pass: 'all' }, id: 'iso-all' }]}>
+  <Variant id="iso-claim">
+    <Yaml lang="text" code="/dev/kfd  /dev/dri/card5  /dev/dri/renderD132" />
+
+    **1 usable GPU** (`gpu-5-132`). ROCm enumerates GPUs through KFD, but can only use one whose render node the process may open. This is what a Pod with one claimed GPU gets.
+  </Variant>
+  <Variant id="iso-kfd">
+    <Yaml lang="text" code="/dev/kfd" />
+
+    **No usable GPU**: the process can enumerate GPUs through KFD, but may open no render node.
+  </Variant>
+  <Variant id="iso-all">
+    <Yaml lang="text" code="/dev/kfd  /dev/dri/*   (9 card + 8 renderD nodes on this example node: 8 GPUs, plus card0 = the BMC's VGA chip)" />
+
+    **All 8 GPUs** of the node. AMD's container docs: passing all of `/dev/dri` gives all GPUs; pass individual `renderD*` nodes to restrict. A hostPath mount of `/dev` (as the DRA driver itself has) bypasses DRA entirely.
+  </Variant>
+</Explorer>
+
+On the host, `/dev/kfd` is `crw-rw-rw-` (mode 0666) and the `card`/`renderD` files are owned by groups `video` and `render`. Inside a container the cgroup, not the file mode, is what stops access to other GPUs.
+
+<Callout tone="note" title="Not a hard wall">
+Containers share the host kernel and the single KFD driver. AMD treats device-cgroup isolation as access control, not as a fault boundary: a GPU reset still affects the whole hive of 8 GPUs, and `ROCR_VISIBLE_DEVICES` / `HIP_VISIBLE_DEVICES` are only user-space filters.
+</Callout>
+
+### From device name to PCI address
+
+The 8 devices on `gpu-node-1` are named `gpu-1-128`, `gpu-2-129`, … `gpu-8-135`: the card minor and the render minor of the same GPU. The by-path links tie each pair to a PCI address (example output):
+
+```shell
+$ ls -l /dev/dri/by-path | head -5
+pci-0000:03:00.0-card   -> ../card0
+pci-0000:11:00.0-card   -> ../card1
+pci-0000:11:00.0-render -> ../renderD128
+pci-0000:2f:00.0-card   -> ../card2
+pci-0000:2f:00.0-render -> ../renderD129
+```
+
+In this example each MI355X runs as one partition (SPX), and the driver creates one card node and one render node per GPU, so the numbers are contiguous. `card0` is a non-AMD display controller (the BMC's VGA chip) at PCI `03:00.0`, with no render node. Do not count on contiguous numbers: some `amdgpu` versions pre-create spare DRM nodes for **compute partitions** (XCP, backed by platform devices named `amdgpu_xcp_*`), and then the minors step by 8. If someone repartitions a GPU, the partition nodes become real devices, and the DRA driver publishes `type: amdgpu-partition` devices instead. Read device names from the ResourceSlice; never derive them from the GPU index.
+
+## Failure modes
+
+- **Spec file missing at container create.** containerd refuses the container with an "unresolvable CDI devices" error (from the CDI library), and the Pod shows `CreateContainerError`. Causes: the driver lost its files, or `/var/run` was cleared. `/var/run` is tmpfs, so a reboot wipes all CDI files; that is harmless only because every Pod on the node restarts too and claims are prepared again.
+- **Container restart after a driver upgrade.** A restarted container is a new `CreateContainer`, so its CDI files must still be there. A new driver version must keep (or rewrite) the files for claims the old version prepared. The AMD driver re-reads its own `checkpoint.json` for this; see [DRA on the node](/learn/dra-on-the-node/).
+- **CDI off in the runtime.** With `enable_cdi = false` (the default before containerd 2.0), CDI IDs are ignored or rejected and the container starts without GPUs. containerd 2.x enables it by default; setting it explicitly in the containerd config is safer.
+- **Device numbering changes.** Device nodes are named in the spec by host path and major/minor. If a reboot renumbers cards (for example after a GPU drops off the bus), old spec files are wrong. They are regenerated on the next prepare.
+
+## NVIDIA for contrast
+
+NVIDIA also uses CDI, but its specs carry much more than device nodes, because the CUDA user-space driver libraries must match the host kernel driver:
+
+- **Device nodes**: `/dev/nvidia0` … `/dev/nvidiaN`, `/dev/nvidiactl`, `/dev/nvidia-uvm`, `/dev/nvidia-uvm-tools`, and capability nodes for MIG.
+- **Mounts**: host driver libraries such as `libcuda.so` and `libnvidia-ml.so`, plus binaries like `nvidia-smi`.
+- **Hooks**: an `nvidia-cdi-hook` that updates the linker cache and creates symlinks inside the container.
+
+The NVIDIA Container Toolkit generates a node-wide spec at `/var/run/cdi/nvidia.yaml` (`nvidia-ctk cdi generate`, refreshed by the `nvidia-cdi-refresh` systemd service); device names look like `nvidia.com/gpu=0` or `nvidia.com/gpu=all`. The NVIDIA DRA driver writes its own per-claim specs, like the AMD driver. An AMD container image ships the ROCm user-space itself and needs only the device files, which is why the AMD spec is three device nodes and two env lines.
+
+## Look for yourself
+
+```shell
+# on a GPU node (read-only)
+grep -n -E 'enable_cdi|cdi_spec_dirs' /etc/containerd/config.toml
+ls -l /var/run/cdi
+cat /var/run/cdi/k8s.gpu.amd.com-gpu_common.yaml
+ls -l /dev/kfd /dev/dri/by-path
+```
+
+## Further reading
+
+- [CDI specification](https://github.com/cncf-tags/container-device-interface/blob/main/SPEC.md) · [CDI project](https://github.com/cncf-tags/container-device-interface)
+- [Run ROCm Docker containers: restricting GPU access](https://rocm.docs.amd.com/en/latest/install/docker-containers.html) · [ROCm GPU isolation techniques](https://rocm.docs.amd.com/en/latest/reference/system-optimization/common.html) · [AMD SMI: GPU reset behavior](https://rocm.docs.amd.com/projects/amdsmi/en/develop/conceptual/gpu-reset-behavior.html)
+- [NVIDIA Container Toolkit: CDI support](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/cdi-support.html)
+- [Device plugins: CDI device names in Allocate](https://kubernetes.io/docs/concepts/extend-kubernetes/compute-storage-net/device-plugins/) — Kubernetes docs

@@ -1,0 +1,102 @@
+---
+/**
+ * Page-local calculators: (1) token budget versus ITL and TTFT in an
+ * aggregated server, a deliberately simple model; (2) Little's law.
+ * Step time model: ms ≈ a + b × tokens, an assumed model (see _example.ts).
+ */
+import { fit } from './_example';
+---
+
+<figure class="bc" data-bc={JSON.stringify(fit)}>
+  <figcaption class="bc-title">Token budget: what decoding users and a new long prompt each feel</figcaption>
+  <div class="bc-in">
+    <label>Token budget per step <input data-k="budget" type="range" min="0" max="5" step="1" value="2" /> <output data-o="budget"></output></label>
+    <label>Users decoding <input data-k="dec" type="range" min="0" max="512" step="16" value="64" /> <output data-o="dec"></output></label>
+    <label>New prompt (uncached tokens) <input data-k="prompt" type="range" min="0" max="6" step="1" value="3" /> <output data-o="prompt"></output></label>
+  </div>
+  <div class="bc-out">
+    <div><span class="k">Prompt tokens per step</span><span class="v" data-o="per"></span></div>
+    <div><span class="k">Steps to finish the prompt</span><span class="v" data-o="steps"></span></div>
+    <div><span class="k">Step time = ITL for decoders, while the prompt runs</span><span class="v" data-o="itl"></span></div>
+    <div><span class="k">ITL with no prompt in the step</span><span class="v" data-o="itl0"></span></div>
+    <div><span class="k">Prefill part of the prompt's TTFT</span><span class="v" data-o="ttft"></span></div>
+  </div>
+  <p class="bc-note" data-o="note"></p>
+  <p class="bc-src">Toy model of an aggregated server (prefill and decode on one GPU), vLLM order: decodes first, then prompt chunks. Step time ≈ <span data-o="fit"></span> per step, an assumed model: a fixed overhead plus gpt-oss-120b's ~9 GFLOP per token at 30% of one MI355X's peak. It ignores that decode tokens also read their KV and that later chunks attend to more context, so real decode-heavy steps are slower.</p>
+</figure>
+
+<figure class="bc lc">
+  <figcaption class="bc-title">Little's law: requests in flight = arrival rate × time in system</figcaption>
+  <div class="bc-in">
+    <label>Arrivals per second <input data-l="rate" type="range" min="0.5" max="40" step="0.5" value="10" /> <output data-lo="rate"></output></label>
+    <label>Mean time in the server (ms) <input data-l="time" type="range" min="5" max="500" step="1" value="50" /> <output data-lo="time"></output></label>
+  </div>
+  <div class="bc-out">
+    <div><span class="k">Requests in flight, on average</span><span class="v" data-lo="inflight"></span></div>
+    <div><span class="k">If one runs at a time: share of time busy</span><span class="v" data-lo="busy"></span></div>
+  </div>
+  <p class="bc-src">Defaults: 10 requests per second, 50 ms each (illustrative). Little's law holds for long-run averages of any stable queue; it says nothing about bursts.</p>
+</figure>
+
+<style>
+  .bc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .bc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .bc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .bc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .bc-in input { accent-color: var(--color-primary); }
+  .bc-in output { min-width: 60px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .bc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .bc-out div { display: flex; flex-direction: column; justify-content: space-between; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .bc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .bc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .bc-note { margin-top: 8px; font-size: 0.875rem; }
+  .bc-src { margin-top: 4px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const BUDGETS = [512, 1024, 2048, 4096, 8192, 16384];
+  const PROMPTS = [500, 1000, 2000, 4000, 8000, 32000, 64000];
+  const f = (n: number) => n.toLocaleString('en-US');
+  const t = (ms: number) => (ms >= 1000 ? `${(ms / 1000).toFixed(2)} s` : `${ms.toFixed(1)} ms`);
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-bc]')) {
+    const fit = JSON.parse(fig.dataset.bc!);
+    const $ = (s: string) => fig.querySelector<HTMLInputElement>(s)!;
+    const o = (k: string) => fig.querySelector<HTMLElement>(`[data-o=${k}]`)!;
+    const step = (tokens: number) => fit.a + fit.b * tokens;
+    const update = () => {
+      const B = BUDGETS[Number($('[data-k=budget]').value)];
+      const D = Number($('[data-k=dec]').value);
+      const P = PROMPTS[Number($('[data-k=prompt]').value)];
+      o('budget').textContent = f(B); o('dec').textContent = f(D); o('prompt').textContent = f(P);
+      o('fit').textContent = `${fit.a} ms + ${(fit.b * 1000).toFixed(2)} µs × tokens`;
+      const per = Math.max(0, B - D);
+      o('itl0').textContent = t(step(Math.min(D, B)));
+      if (per === 0) {
+        o('per').textContent = '0'; o('steps').textContent = '∞'; o('itl').textContent = t(step(B)); o('ttft').textContent = 'never';
+        o('note').textContent = `The ${f(D)} decodes use the whole budget of ${f(B)}: the new prompt cannot start. Raise the budget or cap decoding users (max_num_seqs).`;
+        return;
+      }
+      const n = Math.ceil(P / per);
+      const full = step(D + per);
+      const lastTok = D + (P - per * (n - 1));
+      const ttft = (n - 1) * full + step(lastTok);
+      o('per').textContent = f(per); o('steps').textContent = f(n); o('itl').textContent = t(full); o('ttft').textContent = t(ttft);
+      o('note').textContent = `${f(D)} decoders each get 1 token per step; the prompt gets the other ${f(per)}. Decoders see ${t(full)} per token instead of ${t(step(D))} for ${f(n)} step${n > 1 ? 's' : ''}; the prompt waits about ${t(ttft)} of compute before its first token. A bigger budget finishes the prompt sooner but makes every one of those steps longer.`;
+    };
+    fig.querySelectorAll('input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+  for (const fig of document.querySelectorAll<HTMLElement>('.lc')) {
+    const $ = (s: string) => fig.querySelector<HTMLInputElement>(`[data-l=${s}]`)!;
+    const o = (k: string) => fig.querySelector<HTMLElement>(`[data-lo=${k}]`)!;
+    const update = () => {
+      const r = Number($('rate').value), ms = Number($('time').value);
+      const L = r * ms / 1000;
+      o('rate').textContent = `${r}/s`; o('time').textContent = `${ms} ms`;
+      o('inflight').textContent = L.toFixed(2);
+      o('busy').textContent = L >= 1 ? '100%: a queue builds, unless several run per step' : `${(L * 100).toFixed(0)}%`;
+    };
+    fig.querySelectorAll('input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

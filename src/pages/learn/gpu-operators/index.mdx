@@ -1,0 +1,351 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPU operators: AMD DeviceConfig, NVIDIA ClusterPolicy and GPUCluster"
+short: "GPU operators"
+description: "A GPU operator installs the per-node GPU software as DaemonSets from one custom resource. The AMD GPU Operator in depth (every DeviceConfig section, the reconcile loop, upgradePolicy, Helm hooks, wrapping the chart), then the NVIDIA GPU Operator's ClusterPolicy and GPUCluster, and the NVIDIA DRA driver with ComputeDomains."
+updated: "2026-11-10"
+track: kubernetes
+order: 5
+requires: [k8s-gpu-allocation]
+eyebrow: "Learn · GPUs in Kubernetes"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import op from './_operator.diagram';
+import roll from './_rollout.diagram';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import RolloutCalc from './_RolloutCalc.astro';
+import * as ro from './_rollout';
+
+## The idea
+
+Every GPU node needs the same few helpers: one that tells Kubernetes which GPUs exist, one that labels the node, one that exports GPU metrics, and on some platforms one that loads the kernel driver. You could install each as its own DaemonSet and keep a whole fleet's worth of them in step by hand. A **GPU operator** does it from one order form.
+
+- **The order form** is one custom resource: `DeviceConfig` on AMD, `ClusterPolicy` or `GPUCluster` on NVIDIA. It answers *which nodes* (a label selector) and *which helpers, which images, how to upgrade them*.
+- **The clerk** is the operator's controller: one Pod that reads the form and keeps the cluster matching it.
+- **The helpers** are **operands**: one DaemonSet per enabled section of the form, so one Pod per selected node.
+
+Think of a facilities manager with a standing work order: "every GPU room gets a thermostat, a meter and a sign, model X". Change the model on the order and the manager swaps them room by room. Where the analogy breaks: the manager re-reads the whole order and re-applies it every few seconds, so a hand change in one room is quietly undone; and the work order only covers the helpers, not the GPUs or (in the setup shown here) the kernel driver.
+
+<Diagram spec={op} title="One order form, three helpers on every GPU node" caption="Sample cluster. Only the three enabled operands exist as DaemonSets.">
+  <Step title="Install" path="chart => ctl">The cluster's deploy step installs the Helm release: the controller Deployment (on a management node, it needs no GPU) …</Step>
+  <Step title="The order form" path="chart => dc">… and the DeviceConfig `default`, rendered from the chart values, plus the DeviceClass `gpu.amd.com` for DRA.</Step>
+  <Step title="The clerk reads it" path="dc => ctl">The controller watches DeviceConfigs. Any change, or a timer, starts a reconcile.</Step>
+  <Step title="Helpers on every node" focus="ctl -> dra, ctl -> lab, ctl -> exp, dra, lab, exp">It writes one DaemonSet per enabled operand, each owned by the DeviceConfig. The DaemonSet controller then runs one Pod per node with `example.com/gpu-vendor=AMD`: {ro.nodes.length} nodes, {ro.nodes.length * 3} Pods.</Step>
+</Diagram>
+
+## The AMD GPU Operator on the sample cluster
+
+Illustrative output for the 4-node example cluster; names and versions are examples.
+
+```shell
+$ helm -n kube-amd-gpu list
+NAME              REVISION  STATUS    CHART                   APP VERSION
+amd-gpu-operator  1         deployed  amd-gpu-operator-0.1.0  v1.4.0
+$ kubectl -n kube-amd-gpu get ds,deploy
+daemonset.apps/default-dra-driver         4   4   4   …  example.com/gpu-vendor=AMD
+daemonset.apps/default-metrics-exporter   4   4   4   …  example.com/gpu-vendor=AMD
+daemonset.apps/default-node-labeller      4   4   4   …  example.com/gpu-vendor=AMD
+deployment.apps/amd-gpu-operator-gpu-operator-charts-controller-manager   1/1
+```
+
+- **Controller manager.** One Deployment (`registry.local/rocm/gpu-operator:v1.4.0`), placed on a management node by a `nodeSelector`. It needs no GPU.
+- **CRDs.** `deviceconfigs.amd.com` and, when enabled, the remediation and Argo Workflows CRDs.
+- **DeviceConfig `kube-amd-gpu/default`.** The whole API surface: which nodes, which operands, which images.
+- **Operands.** One DaemonSet per enabled feature, each with an owner reference to the DeviceConfig (`blockOwnerDeletion: true`). Delete the DeviceConfig and all of them go.
+
+## DeviceConfig, section by section
+
+Example values for the sample cluster, trimmed. Each section below `selector` is one operand.
+
+```yaml
+apiVersion: amd.com/v1alpha1
+kind: DeviceConfig
+metadata:
+  name: default
+  namespace: kube-amd-gpu
+  annotations: {helm.sh/resource-policy: keep}
+  finalizers: [amd.node.kubernetes.io/deviceconfig-finalizer]
+spec:
+  selector: {example.com/gpu-vendor: AMD}
+  commonConfig:
+    initContainerImage: registry.local/busybox:1.36
+    utilsContainer: {image: registry.local/rocm/gpu-operator-utils:v1.4.0}
+  driver:            {enable: false, blacklist: false, driverType: container, version: 30.10.0, …}
+  devicePlugin:      {enableDevicePlugin: false, enableNodeLabeller: true,
+                      nodeLabellerImage: registry.local/rocm/k8s-device-plugin:labeller-v1.4.0}
+  draDriver:         {enable: true, image: registry.local/rocm/k8s-gpu-dra-driver:v0.3.0,
+                      upgradePolicy: {upgradeStrategy: RollingUpdate, maxUnavailable: 1}}
+  metricsExporter:   {enable: true, image: registry.local/rocm/device-metrics-exporter:v1.4.0,
+                      port: 5000, serviceType: ClusterIP, prometheus: {serviceMonitor: {enable: true, interval: 30s}},
+                      podResourceAPISocketPath: /var/lib/kubelet/pod-resources, rbacConfig: {enable: false}}
+  configManager:     {enable: false}
+  remediationWorkflow: {enable: false}
+  testRunner:        {enable: false}
+status:
+  conditions: [{type: Ready, status: "True", reason: OperatorReady}]
+  metricsExporter: {nodesMatchingSelectorNumber: 4, desiredNumber: 4, availableNumber: 4}
+  nodeModuleStatus: {gpu-node-1: {}, …}      # empty: the operator manages no driver
+```
+
+| Section | What it does when on | Sample cluster |
+| --- | --- | --- |
+| `selector` | node labels that pick the GPU nodes; applies to every operand | `example.com/gpu-vendor: AMD` (upstream default is the NFD label `feature.node.kubernetes.io/amd-gpu: "true"`) |
+| `driver` | builds or pulls an `amdgpu` driver image and loads it through **KMM** (Kernel Module Management); `blacklist` stops the host's module at boot (needs a reboot) | off: the OS image installs `amdgpu-dkms` and ROCm on the host; the operator only runs the operands |
+| `devicePlugin.enableDevicePlugin` | the device plugin, `amd.com/gpu` count on the Node | off |
+| `devicePlugin.enableNodeLabeller` | the node labeller (`amd.com/gpu.*` labels) | on |
+| `draDriver` | the DRA kubelet plugin (`gpu.amd.com`) | on, v0.3.0 |
+| `metricsExporter` | per-GPU Prometheus exporter, Service, optional ServiceMonitor and kube-rbac-proxy | on, port 5000 |
+| `configManager` | the **Device Config Manager**: applies compute/memory partition profiles (SPX/CPX, NPS1/NPS4) from a ConfigMap | off: GPUs stay whole |
+| `remediationWorkflow` | Argo Workflows that taint, drain, test and reboot a faulty node | off: node repair handled outside the operator |
+| `testRunner` | runs RVS/AGFHC health suites on a schedule or on failure | off |
+
+Two rules the operator enforces at **reconcile** time, not at admission: the device plugin and the DRA driver cannot both be on (`DRADriver and DevicePlugin cannot be enabled at the same time`), and the device plugin is on by default in the CRD, so it must be switched off explicitly. A bad DeviceConfig is accepted by `kubectl apply` and then never becomes Ready.
+
+### The status block
+
+`status.conditions[Ready]` is the operator's own verdict. Per-operand counters (`desiredNumber`, `availableNumber`) mirror the DaemonSets. `nodeModuleStatus` is per node and carries the driver upgrade state when the operator manages the driver; on the sample cluster every entry is empty.
+
+## The reconcile loop
+
+The controller log shows the order it walks on every reconcile (example pass, trimmed):
+
+```text
+start build configmap reconciliation
+start module install/upgrade reconciliation
+start KMM reconciliation
+start device-plugin reconciliation
+start DeviceClass reconciliation
+start dra-driver reconciliation          "Reconciled dra-driver" result="updated"
+start kmm mod version label reconciliation
+start node labeller reconciliation       "Reconciled node labeller" result="updated"
+select (!feature.node.kubernetes.io/amd-gpu,!feature.node.kubernetes.io/amd-vgpu,example.com/gpu-vendor=AMD) found 0 nodes
+start metrics exporter reconciliation    "Reconciled metrics exporter" result="updated"
+                                         "Reconciled ServiceMonitor" result="unchanged"
+start test runner reconciliation         enable=false
+start config manager reconciliation      enable=false
+start remediation workflow reconciliation
+```
+
+What to take from it:
+
+- **Every operand is applied every time.** `result="updated"` with no spec change is normal; the DaemonSets' `generation` stays 1 in the example.
+- **Hand edits to an operand DaemonSet are reverted** on the next reconcile. Change the DeviceConfig instead (or the chart values that render it, see below).
+- **The label cleanup step.** The `select (...) found 0 nodes` line is the operator looking for selected nodes that *lack* the NFD label. In the example operator version this path removes the labeller's labels from such nodes when NFD is off. Setting `feature.node.kubernetes.io/amd-gpu=true` yourself keeps the match empty, and all labeller labels (`amd.com/gpu.*` and `beta.amd.com/gpu.*`) stay.
+- **Deleting a DeviceConfig is slow on purpose.** The finalizer waits until every selected node confirms its operands (and, if managed, its kernel module) are removed.
+
+## Worked example: a new DRA driver image reaches every GPU node
+
+Follow one change end to end: a new DRA driver tag is deployed. Names, counts, versions and log lines are illustrative (4-node example cluster); the strategy is the operator's default.
+
+<Kpis items={[
+  { label: 'GPU nodes selected', value: ro.nodes.length, detail: 'gpu-vendor=AMD' },
+  { label: 'maxUnavailable / maxSurge', value: '1 / 0', detail: 'DaemonSet strategy' },
+  { label: 'Rounds', value: ro.rounds1, detail: 'one node at a time' },
+  { label: 'Kubelet wiping delay', value: ("" + (ro.wipeSeconds) + " s"), detail: 'slices deleted after this', tone: 'warn' },
+]} />
+
+<Walkthrough title="draDriver.image v0.3.0 → v0.3.1 on the sample cluster" caption="State per step. Pods already running on a GPU are never restarted by this rollout.">
+  <WStep title="1 · The order form changes">
+```yaml
+# values.yaml of the wrapper chart
+gpu-operator-charts:
+  deviceConfig:
+    spec:
+      draDriver:
+        image: registry.local/rocm/k8s-gpu-dra-driver:v0.3.1   # was v0.3.0
+```
+    The deploy step runs `helm upgrade`. Because the wrapper sets `crds.defaultCR.upgrade: true`, Helm re-renders `deviceconfig/default`: its `spec.draDriver.image` changes and `metadata.generation` goes 1 → 2. Nothing has touched a node yet.
+  </WStep>
+  <WStep title="2 · The controller reconciles">
+```text
+I0101 12:00:00.100000 device_config_reconciler.go:300] "start dra-driver reconciliation" DeviceConfig="kube-amd-gpu/default"
+I0101 12:00:00.108000 device_config_reconciler.go:1200] "Reconciled dra-driver" name="default-dra-driver" result="updated"
+```
+    These are example lines from a routine pass (no spec change, so the apply was a no-op even though it says `updated`). On a real change the same code path writes the new image into the DaemonSet's Pod template, 8 ms after it started. The controller's job ends here: it does not move Pods itself.
+  </WStep>
+  <WStep title="3 · The DaemonSet notices a new template">
+```text
+daemonset/default-dra-driver   generation 1 → 2
+  DESIRED 4  CURRENT 4  READY 4  UP-TO-DATE 0  AVAILABLE 4
+  updateStrategy: {type: RollingUpdate, rollingUpdate: {maxUnavailable: 1, maxSurge: 0}}
+controllerrevision default-dra-driver-5c7d9f8b6a (v0.3.0) + a new revision (v0.3.1)
+```
+    The DaemonSet controller hashes the new template into a new ControllerRevision. All {ro.nodes.length} Pods are now *out of date* (`UP-TO-DATE 0`). `maxSurge: 0` means it must **delete an old Pod before creating its replacement**: two DRA drivers on one node would fight over the same socket and GPUs.
+  </WStep>
+  <WStep title={("4 · Round 1: " + (ro.short(ro.nodes[0])) + " has no driver for a few seconds")}>
+    <Matrix title="Node state per round (maxUnavailable 1)" rows={ro.g1.rows} cols={ro.g1.cols} data={ro.g1.data.map((r) => r.slice(0, 3))} scale="div" digits={0} highlight={{ cells: [[0, 1]] }} note="0 = old driver running · −1 = no driver · 1 = new driver" />
+    The controller deletes <code>{ro.draPods[ro.nodes[0]]}</code> on <code>{ro.nodes[0]}</code>. Its plugin socket goes away, so the kubelet starts a {ro.wipeSeconds} s wiping timer. The new Pod runs its `driver-init` container (waits for `/sys/class/kfd`), then the plugin registers and republishes the node's 8 devices; the timer is cancelled. A start takes about {ro.startMs} ms in this example. During the gap, the 2 GPU Pods already on this node keep running; a *new* GPU Pod landing here would wait in ContainerCreating until the driver is back.
+  </WStep>
+  <WStep title={("5 · Rounds 2 to " + ro.rounds1 + ": one node at a time")}>
+    <Matrix title="All rounds" rows={ro.g1.rows} cols={ro.g1.cols} data={ro.g1.data} scale="div" digits={0} note="Read a column top to bottom: exactly one −1 per round (maxUnavailable 1). Order is the controller's choice; name order shown." />
+    The controller waits until the new Pod is Ready (`minReadySeconds: 0`) before taking the next node. At no moment are two GPU nodes without a driver. The total is {ro.rounds1} rounds; with gaps of a few seconds the whole rollout takes well under a minute, but the time is set by the slowest node.
+  </WStep>
+  <WStep title="6 · Done, and how to check it">
+```shell
+$ kubectl -n kube-amd-gpu rollout status ds/default-dra-driver
+daemon set "default-dra-driver" successfully rolled out
+$ kubectl -n kube-amd-gpu get ds default-dra-driver
+DESIRED 4  CURRENT 4  READY 4  UP-TO-DATE 4  AVAILABLE 4
+```
+    `UP-TO-DATE 4` (every selected node) is the signal. A deploy step without `helm --wait` does not wait for it, so a green deploy only means step 1 happened.
+  </WStep>
+</Walkthrough>
+
+The same rollout as a moving picture: the change travels from Helm to the DaemonSet, then one node at a time loses and regains its driver.
+
+<Diagram spec={roll} title="Rolling the DRA driver, node by node" interval={2600}>
+  <Step title="Helm renders" path="helm => dc">`helm upgrade` writes the new image into DeviceConfig `default`.</Step>
+  <Step title="Controller applies" path="dc => ctl => ds">The controller sees the change and updates the DaemonSet's Pod template.</Step>
+  {ro.nodes.map((n, i) => (
+    <Step title={("Round " + (i + 1) + ": " + (ro.short(n)))} path={("ds => " + (n.replaceAll('-', '_')))} state={Object.fromEntries(ro.nodes.map((m, j) => [m.replaceAll('-', '_'), j < i ? { tone: 'good', detail: 'v0.3.1' } : j === i ? { tone: 'risk', detail: 'no driver' } : { tone: 'muted', detail: 'v0.3.0' }]))}>Delete <code>{ro.draPods[n]}</code>, start its replacement; {i} of {ro.nodes.length} nodes done.</Step>
+  ))}
+  <Step title="Rolled out" state={Object.fromEntries(ro.nodes.map((m) => [m.replaceAll('-', '_'), { tone: 'good', detail: 'v0.3.1' }]))}>All {ro.nodes.length} Pods run v0.3.1. `UP-TO-DATE {ro.nodes.length}`.</Step>
+</Diagram>
+
+What if `maxUnavailable` were higher, or a node took longer than {ro.wipeSeconds} s to come back (slow image pull, `amdgpu` not loaded, crash loop)? Try it:
+
+<RolloutCalc />
+
+## upgradePolicy
+
+There are two kinds.
+
+**Operand upgradePolicy** (DRA driver, node labeller, metrics exporter, config manager, test runner). It maps onto the DaemonSet update strategy:
+
+- `upgradeStrategy: RollingUpdate` with `maxUnavailable: N` (default 1): change the image in the DeviceConfig and the DaemonSet rolls, N nodes at a time.
+- `upgradeStrategy: OnDelete`: nothing rolls until someone deletes each Pod.
+
+For the DRA driver this is the rollout in the worked example above. What one node's gap looks like from the kubelet's side is in [DRA on the node](/learn/dra-on-the-node/).
+
+**Driver upgradePolicy** (only when `driver.enable: true`). This is the dangerous one, because changing a kernel driver means draining the node:
+
+| Field | Meaning | Sample value (inert) |
+| --- | --- | --- |
+| `enable` | let the operator roll driver versions | false |
+| `maxParallelUpgrades` | nodes upgraded at once | 3 |
+| `maxUnavailableNodes` | max cordoned nodes, count or % | 25% |
+| `nodeDrainPolicy` | `force`, `timeoutSeconds`, `gracePeriodSeconds`, `ignoreDaemonSets` | force, 300 s |
+| `podDeletionPolicy` | delete GPU Pods instead of draining | force, 300 s |
+| `rebootRequired` | reboot after loading the new module | true |
+
+Per node it walks `Upgrade-Not-Started` → `Upgrade-In-Progress` → `Upgrade-Complete` (or `Upgrade-Timed-Out` after 2 h, or `Upgrade-Failed`). With `force: true` on up to 25% of nodes, this would evict GPU Pods on several nodes at once in a large fleet. That is one reason to keep the driver a host package, installed with the OS image, and set `driver.enable: false`.
+
+## Helm: the chart and its hooks
+
+The upstream chart `gpu-operator-charts` (example version v1.4.0) bundles three subcharts (`node-feature-discovery`, `kmm`, `remediation-crds`), the controller Deployment, RBAC, the `gpu.amd.com` DeviceClass (rendered only if the cluster serves a DRA API) and a **default DeviceConfig** built from `values.deviceConfig.spec`.
+
+It also has hooks, which run as Jobs using the **operator image**:
+
+| Hook | Job | What it does |
+| --- | --- | --- |
+| `pre-upgrade`, `pre-rollback` (weight 2) | `pre-upgrade-check` | lists DeviceConfigs; fails the upgrade if any node's driver state is `Upgrade-Not-Started`, `Upgrade-Started` or `Upgrade-In-Progress` |
+| `pre-upgrade`, `pre-rollback` (weight 3) | `upgrade-crd` | applies the new chart's CRDs (Helm never upgrades files in `crds/`) |
+| `pre-delete` | `…-pre-delete` | `kubectl delete deviceconfigs.amd.com --all -A` |
+| `post-delete` | `…-post-delete` | deletes the `deviceconfigs.amd.com` CRD and the remediation and Argo CRDs |
+
+Consequences:
+
+- **`helm uninstall` removes every GPU DaemonSet on every node**, through the pre-delete hook, before Helm deletes anything itself. The default DeviceConfig carries `helm.sh/resource-policy: keep` only so Helm does not try to delete it twice.
+- **The hook Jobs need the operator image in the registry and a schedulable node.** They inherit the controller's tolerations and affinity.
+- **`helm upgrade --no-hooks`** skips both the safety check and the CRD update. AMD documents it as a last resort.
+- **`crds.defaultCR.upgrade`** decides whether `helm upgrade` re-renders the default DeviceConfig. Upstream default is off (the live object, with any edits, persists).
+
+## Wrapping the upstream chart
+
+Clusters often deploy the operator through a thin wrapper chart that pins the upstream chart as a dependency and overrides values. Points that are easy to get wrong:
+
+| Value | Why |
+| --- | --- |
+| `node-feature-discovery.enabled: false`, `installdefaultNFDRule: false` | NFD only derives `feature.node.kubernetes.io/amd-gpu` from the PCI vendor ID; if your provisioning already labels GPU nodes, it adds nothing, and turning it off also drops the three NFD CRDs |
+| `kmm.enabled: false` | when the `amdgpu` module ships with the host OS |
+| `remediation.enabled: false`, `installCRDs: false` | it pulls in Argo Workflows; turn it on only if you want the operator to repair nodes |
+| `crds.defaultCR.upgrade: true` | re-apply on every redeploy, so hand edits to `deviceconfig/default` revert |
+| `deviceConfig.spec.selector: {feature.node.kubernetes.io/amd-gpu: null, example.com/gpu-vendor: AMD}` | Helm deep-merges maps; `null` removes the upstream default key |
+| `draDriver.enable: true`, `devicePlugin.enableDevicePlugin: false` | one allocator only: both would hand out the same GPU twice |
+| all images from a local registry | air-gapped clusters must mirror every operand image, including the ones that are off today |
+| `controllerManager.affinity: null` plus an explicit `nodeSelector` | the chart's preferred control-plane affinity is inherited by the Deployment **and all four hook Jobs**; admission policies that keep heavy workloads off control-plane nodes can then reject the hooks. `null`, not `{}`, because Helm merges an empty map with the default |
+
+A sensible deploy step:
+
+1. Mirror the operand images (operator, utils, metrics exporter, DRA driver, labeller, init container) into the cluster's registry.
+2. List nodes with the GPU-vendor label. If the API call **fails**, exit with an error, so an unreachable API server cannot look like "no GPUs". If it returns **nothing**, skip the install.
+3. `helm upgrade amd-gpu-operator ./chart --install --timeout 10m --namespace kube-amd-gpu --create-namespace`. Without `--wait`, Helm returns once objects are applied, not when DaemonSets have rolled.
+
+<Callout tone="warn" title="What this means in operations">
+A green `helm upgrade` says the release was applied, not that every GPU node runs the new DRA driver. Check `kubectl -n kube-amd-gpu rollout status ds/default-dra-driver`. A hook Job rejected by admission only shows up from the **second** release, because the hooks run on upgrade, not on first install.
+</Callout>
+
+## What runs on each GPU node
+
+| Operand | Image (sample) | Job | Talks to |
+| --- | --- | --- | --- |
+| `default-dra-driver` | `k8s-gpu-dra-driver:v0.3.0` | publishes the ResourceSlice, prepares claims, writes CDI | kubelet (gRPC), API server |
+| `default-node-labeller` | `k8s-device-plugin:labeller-v1.4.0` | writes `amd.com/gpu.*` and `beta.amd.com/gpu.*` node labels | API server (Node update) |
+| `default-metrics-exporter` | `device-metrics-exporter:v1.4.0` | per-GPU metrics on `:5000`; maps GPU to Pod through the kubelet PodResources socket | Prometheus via ServiceMonitor |
+
+Container operands upgrade live, one node at a time. The kernel driver, firmware and host ROCm are not operands here; they are installed and upgraded on the host, with a reboot.
+
+## Failure modes
+
+- **Controller down.** Nothing changes on the nodes: DaemonSets keep running, but new GPU nodes get no operands until it is back.
+- **DeviceConfig deleted** (by hand or by `helm uninstall`). All three DaemonSets are deleted, so the DRA driver stops on every node. Running Pods continue, but nothing new can be prepared or unprepared, and each kubelet wipes its node's ResourceSlices after 30 s.
+- **New upstream defaults.** A chart bump can change CRD defaults. Diff the rendered DeviceConfig before an upgrade (`helm template` against the new chart). A default that turned on `driver` or `configManager` would be disruptive.
+- **Image not mirrored.** Turning on an operand whose image still points at `docker.io` or `quay.io` (driver, configManager, kube-rbac-proxy and test runner in the example object) fails with `ImagePullBackOff`.
+
+## NVIDIA GPU Operator
+
+Same idea, more operands, and in current releases two separate custom resources.
+
+**`ClusterPolicy`** (cluster-scoped, device plugin model). Its spec has one section per operand:
+
+| Section | Operand |
+| --- | --- |
+| `driver` | NVIDIA kernel driver in a container (or `NVIDIADriver` CRs per node pool); optional `nvidia-peermem` for GPUDirect RDMA |
+| `toolkit` | NVIDIA Container Toolkit: configures containerd, generates CDI specs |
+| `devicePlugin` | `nvidia.com/gpu` extended resource (with time-slicing and MPS options) |
+| `gfd` | GPU Feature Discovery: `nvidia.com/gpu.*` node labels |
+| `dcgm`, `dcgmExporter` | DCGM host engine and Prometheus exporter |
+| `migManager`, `mig` | applies MIG geometries from a ConfigMap |
+| `validator` | checks that driver, toolkit, CUDA and plugin work |
+| `nodeStatusExporter` | operator health metrics per node |
+| `vfioManager`, `sandboxDevicePlugin`, `vgpuManager`, `vgpuDeviceManager`, `kataManager`, `ccManager` | VM passthrough, vGPU, Kata and confidential computing |
+| `cdi` | CDI mode for the toolkit (and its NRI plugin) |
+
+**`GPUCluster`** (cluster-scoped singleton named `gpu-cluster`, DRA model). It manages the NVIDIA DRA driver (`gpu.nvidia.com`, `mig.nvidia.com` and `vfio.gpu.nvidia.com` devices), the ComputeDomain controller and kubelet plugin, a DRA validator, DCGM Exporter and optionally standalone DCGM. It does not manage the kernel driver; use an `NVIDIADriver` CR or a host driver. NVIDIA's rules: a cluster has a `GPUCluster` or a `ClusterPolicy`, never both; prerequisites are Kubernetes 1.34.2+, driver 580+ and a CDI-enabled runtime; in-place migration from ClusterPolicy is not supported.
+
+On NVSwitch systems Fabric Manager is also required, and it runs on the host, outside the operator.
+
+### ComputeDomains
+
+On an NVL72 rack, 72 GPUs in 18 compute trays share one NVLink domain. A process can map memory of a GPU in another tray, but only through **IMEX** (Internode Memory Exchange) daemons and IMEX channels, which also act as access control. The NVIDIA DRA driver hides this behind a **ComputeDomain** object:
+
+1. The workload creates a `ComputeDomain` and references its claim template from its Pods.
+2. As the Pods are scheduled, the domain forms around the nodes they land on: the driver starts or reconfigures IMEX daemons there.
+3. Each container gets an IMEX channel injected through CDI.
+4. When the workload ends, the domain and its daemons are torn down.
+
+A ComputeDomain follows its workload: it is ephemeral and isolated from workloads in other namespaces. NVIDIA lists ComputeDomains as generally available in the DRA driver version the operator ships. See [rack-scale GPUs](/learn/rack-scale-gpus/).
+
+## AMD versus NVIDIA
+
+| | AMD | NVIDIA |
+| --- | --- | --- |
+| Custom resource | `DeviceConfig` (namespaced, several allowed) | `ClusterPolicy` (device plugin) or `GPUCluster` (DRA), both cluster-scoped |
+| Kernel driver | KMM-based, optional | driver DaemonSet or `NVIDIADriver` CR, optional |
+| Runtime integration | none needed; CDI from the DRA driver | Container Toolkit (CDI or runtime hook) |
+| Node labels | node labeller | GPU Feature Discovery |
+| Metrics | Device Metrics Exporter | DCGM + DCGM Exporter |
+| Partitioning | Device Config Manager (SPX/CPX, NPS) | MIG Manager |
+| Health tests | test runner (RVS, AGFHC) | validator, DCGM diagnostics |
+| Multi-node GPU memory | not applicable on MI355X | ComputeDomain (IMEX) |
+
+## Further reading
+
+- [AMD GPU Operator docs](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/) · [Full DeviceConfig reference](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/fulldeviceconfig.html) · [Component upgrades](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/upgrades/componentupgrades.html) · [Operator upgrade and hooks](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/upgrades/upgrade.html) · [Driver upgrades](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/drivers/upgrading.html) · [Uninstall](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/uninstallation/uninstallation.html) · [GitHub](https://github.com/ROCm/gpu-operator)
+- [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/index.html) · [DRA driver with GPUCluster](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-intro-install.html) · [ComputeDomains](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/dra-cds.html) · [NVIDIA DRA driver](https://github.com/NVIDIA/k8s-dra-driver-gpu)
+- [Helm chart hooks](https://helm.sh/docs/topics/charts_hooks/) · [Node Feature Discovery](https://kubernetes-sigs.github.io/node-feature-discovery/) · [Kernel Module Management](https://kmm.sigs.k8s.io/)

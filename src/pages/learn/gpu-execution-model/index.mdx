@@ -1,0 +1,381 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "How a GPU runs code: threads, warps, wavefronts"
+short: "Threads & wavefronts"
+description: "The GPU execution model from the bottom: a kernel launch is a grid of thread blocks; blocks run on one CU/SM; threads run in lockstep groups (warp 32, wavefront 64) under an execution mask; registers and LDS decide how many groups fit (occupancy), and those groups hide memory latency. Worked occupancy math for MI355X and H100."
+updated: "2026-11-10"
+track: silicon
+order: 1
+eyebrow: "Learn · Kernels & silicon"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import Step from '@/components/content/Step.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import hide from './_hide.diagram';
+import idea from './_idea.diagram';
+import Lanes from './_Lanes.astro';
+import Occupancy from './_Occupancy.astro';
+import * as ex from './_exec';
+
+A CPU core runs one thread fast and guesses ahead to avoid waiting. A GPU does the opposite. It runs tens of thousands of slow threads, and when one group must wait for memory it runs another group. This page explains how that works, from one line of kernel code down to the hardware unit that runs it. The main example is the AMD MI355X in an 8-GPU MI355X server, with NVIDIA beside it.
+
+## The idea first
+
+Picture a factory floor with thousands of workbenches. The work order says "do the same job on a million parts". Nobody plans who does which part: each worker reads a number off their badge and takes that part.
+
+| Piece | Everyday picture | The question it answers |
+| --- | --- | --- |
+| **Thread** | one worker, with their own bench (registers) | "Which part is mine?" (its index `i`) |
+| **Wavefront** (AMD, 64 threads) / **warp** (NVIDIA, 32) | a squad that follows **one foreman's commands** in lockstep: "everyone, pick up your part; everyone, add" | "What does the squad do next?" (one instruction for all) |
+| **EXEC mask** | the foreman's list of who takes part in this command; the rest stand still | "Who acts on this instruction?" |
+| **Block / workgroup** | a few squads given the same room, with a shared shelf (LDS) | "Who can share data and wait for each other?" |
+| **CU / SM** | a room with 4 foremen's stations (SIMDs) | "Where does a block run?" |
+| **Occupancy** | how many squads fit in the room at once, limited by benches (registers) and shelf space (LDS) | "How many squads are ready to step in?" |
+
+**Why so many squads?** Parts come from a far warehouse (HBM). A trip takes hundreds of cycles. When one squad waits for a delivery, its foreman's station points at another squad that already has its parts. Nobody leaves their bench, so the switch is free. That is **latency hiding**, and it only works if enough squads are in the room.
+
+**Where the picture breaks.** A squad cannot split up: if the command is "those with a red part, paint it", everyone else stands idle until it is done, then the squad does the other branch. And the "workers" are not little CPUs: they have no instruction stream of their own; only the foreman (one per wave) reads the recipe.
+
+<Diagram spec={idea} mode="build" title="From one launch to one lane" caption="MI355X numbers. NVIDIA: grid → block → SM (132 on H100) → 4 sub-partitions → warp of 32 → thread.">
+  <Step title="Launch" focus="launch, grid, launch -> grid">The host launches one function as a grid: here 3,907 blocks of 256 threads, about a million threads.</Step>
+  <Step title="Block → CU" focus="block, cu, grid -> block, block -> cu">The GPU hands each block to a CU that has room. The block stays there until it ends.</Step>
+  <Step title="Waves → SIMDs" focus="simd, wave, cu -> simd, simd -> wave">A 256-thread block is 4 wavefronts. They spread over the CU's 4 SIMDs; each SIMD keeps up to 8 waves and issues for one ready wave at a time.</Step>
+  <Step title="One instruction, 64 lanes" focus="wave, lane, wave -> lane">Each instruction runs for all 64 threads of the wave, on their own registers. The EXEC mask decides which lanes keep the result.</Step>
+</Diagram>
+
+Now the same ideas with real code and concrete numbers.
+
+## A kernel is one function launched many times
+
+A **kernel** is a function that runs on the GPU. You launch it once, and the GPU runs one copy per **thread**. Each copy reads a few built-in IDs to find out which piece of data it owns.
+
+```cpp
+// Real CUDA/HIP source (compiles unchanged with nvcc and hipcc). y = a*x + y.
+__global__ void axpy(float a, const float* x, float* y, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;   // which element am I?
+  if (i < n) y[i] = a * x[i] + y[i];
+}
+axpy<<<(n + 255) / 256, 256>>>(2.0f, x, y, n);      // grid of blocks, 256 threads each
+```
+
+The launch says: make a **grid** of blocks, and give each **block** 256 threads. For `n` = 1,000,000 that is 3,907 blocks and about a million threads. The programmer never says which core runs what. The hardware decides.
+
+## The four levels
+
+| Level | NVIDIA (CUDA) | AMD (HIP) | Runs on | Shares |
+| --- | --- | --- | --- | --- |
+| One copy of the function | thread | work-item (thread) | one lane of a vector unit | nothing; own registers |
+| Lockstep group | **warp**, 32 threads | **wavefront**, 64 threads on CDNA | one scheduler / one SIMD | one instruction stream, one program counter |
+| Cooperating group | thread block (CTA) | workgroup | one SM / one CU, never split | shared memory (NVIDIA) / LDS (AMD), barriers |
+| Whole launch | grid | grid | the whole GPU | HBM (global memory) |
+
+Words used below:
+
+- **CU (Compute Unit)** is AMD's compute block. **SM (Streaming Multiprocessor)** is NVIDIA's. They play the same role.
+- **SIMD (Single Instruction, Multiple Data)** is one vector unit inside a CU. An MI355X CU has 4. (AMD uses "SIMD" as the name of this hardware block; the programming model on top is SIMT. See [SIMD vs SIMT](#simd-vs-simt).)
+- **LDS (Local Data Share)** is AMD's on-chip scratch memory, shared by one workgroup. NVIDIA calls it **shared memory**.
+- **HBM (High Bandwidth Memory)** is the GPU's main memory: 288 GB on an MI355X.
+
+## What one MI355X offers
+
+Example `rocminfo` output for one MI355X GPU agent (illustrative, trimmed; values match the public MI355X specs):
+
+```text
+  Name:                    gfx950
+  Marketing Name:          AMD Instinct MI355X
+  Compute Unit:            256
+  SIMDs per CU:            4
+  Shader Engines:          32
+  Wavefront Size:          64(0x40)
+  Workgroup Max Size:      1024(0x400)
+  Max Waves Per CU:        32(0x20)
+  Max Work-item Per CU:    2048(0x800)
+  Max Clock Freq. (MHz):   2400
+  Cache Info:
+    L1:                      32(0x20) KB
+    L2:                      4096(0x1000) KB
+    L3:                      262144(0x40000) KB
+  Pool 4
+      Segment:                 GROUP
+      Size:                    160(0xa0) KB
+```
+
+<Kpis items={[
+  { label: 'SIMDs per GPU', value: '1,024', detail: '256 CUs × 4' },
+  { label: 'Waves resident', value: '8,192', detail: '8 per SIMD = 524,288 threads', tone: 'primary' },
+  { label: 'LDS per CU', value: '160 KB', detail: 'MI300X: 64 KB' },
+  { label: 'L2', value: '8 × 4 MB', detail: 'one per XCD' },
+]} />
+
+An 8-GPU node shows 8 such agents, one per GPU. How to read it:
+
+- 256 CUs × 4 SIMDs = **1,024 SIMDs** per GPU.
+- Each SIMD holds up to 8 wavefronts at once (32 per CU ÷ 4 SIMDs). The whole GPU can have 8,192 wavefronts, or 524,288 threads, **resident** at the same moment.
+- A workgroup has at most 1,024 threads (16 wavefronts). The `GROUP` segment is the LDS: up to 160 KB per workgroup.
+- The 4 MB L2 is **per XCD**. An MI355X has 8 XCDs (compute dies) of 32 CUs each, so 32 MB of L2 in total. The 256 MB "L3" is AMD Infinity Cache, shared by the whole GPU (ROCm hardware spec table).
+
+The NVIDIA equivalents, from the CUDA programming guide for compute capability 9.0 (H100) and 10.0 (B200): 64 resident warps per SM (2,048 threads), 32 resident blocks per SM, 64K 32-bit registers per SM, at most 255 registers per thread, up to 228 KB of shared memory per SM (227 KB per block). An H100 SXM has 132 SMs.
+
+## Lockstep: SIMT and the execution mask
+
+NVIDIA calls the model **SIMT (Single Instruction, Multiple Threads)**. You write code for one thread. The hardware groups 32 (NVIDIA) or 64 (AMD CDNA) threads and fetches **one instruction for the whole group**. Each thread applies it to its own registers.
+
+### SIMD vs SIMT
+
+| | SIMD (Single Instruction, Multiple Data) | SIMT (Single Instruction, Multiple Threads) |
+| --- | --- | --- |
+| What it names | the hardware: one instruction drives many lanes at once | the programming model: you write one scalar thread; hardware runs 32 or 64 of them on those lanes |
+| Who sees the width | the programmer, in every instruction (CPU AVX-512: 16 floats per `vaddps`) | mostly nobody: code is written per thread; width shows up only in warp/wave intrinsics and divergence cost |
+| Branches | you mask by hand (blend / mask registers) | the hardware masks for you (`EXEC` on AMD, active mask on NVIDIA) and runs both sides of a split branch |
+| Memory access | one vector load of contiguous data | each thread has its own address; the hardware merges neighbouring addresses (coalescing) |
+| Per-lane state | lanes share one program counter, no per-lane identity | each thread has its own registers and index (`threadIdx`); since NVIDIA Volta each thread also has its own program counter, so threads of one warp can diverge and reconverge more freely |
+
+So a GPU is **SIMT software on SIMD hardware**. AMD's block names say so: a CU contains four "SIMDs", and the wavefronts that run on them are SIMT thread groups. NVIDIA coined "SIMT" and avoids "SIMD" for its own units. When a page says "the SIMD", it means AMD's hardware unit; "SIMT", "lockstep" and "divergence" are about how threads execute on it.
+
+### How a wave runs on one SIMD
+
+On a CDNA CU each SIMD has 16 lanes. A wave64 vector instruction therefore takes 4 cycles, 16 threads per cycle. With 4 SIMDs, the CU can start one vector instruction on each SIMD every cycle, if enough wavefronts are ready (AMD HIP hardware-implementation guide).
+
+What happens to `if (i < n)` when only some threads pass? The group cannot split. Instead the hardware keeps an **execution mask**: one bit per thread. Instructions still run for the whole group, but threads whose bit is 0 do not write results. On AMD the mask is a real 64-bit register named `EXEC`, and you can see it in compiled code. This is illustrative `gfx950` assembly of the kind `hipcc --offload-arch=gfx950 -O3 --save-temps` produces for the `axpy` kernel above (example ROCm 7.0.0):
+
+```amdgcn
+; example compiler output, gfx950 (MI355X), trimmed; comments added
+  v_add_u32_e32        v0, s2, v0           ; i = blockIdx.x*blockDim.x + threadIdx.x  (v = per lane)
+  v_cmp_gt_i32_e32     vcc, s4, v0          ; vcc = one bit per lane: n > i ?
+  s_and_saveexec_b64   s[2:3], vcc          ; EXEC &= vcc  (lanes with i >= n switch off)
+  s_cbranch_execz      .LBB0_2              ; if no lane is left, skip the body
+  global_load_dword    v4, v[2:3], off      ; x[i]
+  global_load_dword    v5, v[0:1], off      ; y[i]
+  s_waitcnt            vmcnt(0)             ; wait for both loads
+  v_fmac_f32_e32       v5, s2, v4           ; y += a * x
+  global_store_dword   v[0:1], v5, off
+.LBB0_2:
+  s_endpgm
+```
+
+Two kinds of registers appear:
+
+- `v` registers (**VGPRs**, vector general-purpose registers) hold one 32-bit value **per lane**: 64 values for a wave64.
+- `s` registers (**SGPRs**, scalar registers) hold one value **for the whole wavefront**. The compiler puts anything that is the same for every thread there: `a`, `n`, the array base addresses, `blockIdx.x`. A separate scalar unit runs the `s_*` instructions.
+
+NVIDIA has the same ideas under other names. Its machine code (SASS) uses **predicates**: `ISETP.GE.AND P0, PT, R7, UR4, PT` then `@P0 EXIT`. `UR` registers are NVIDIA's "uniform" (per-warp) registers.
+
+### Divergence: one wave through an if/else, step by step
+
+**Divergence** means threads of one wave want different paths. The wave cannot split, so the hardware runs both paths one after the other and flips `EXEC` between them. Follow one wave through this kernel:
+
+```cpp
+__global__ void branchy(const float* x, const float* a, const float* b, float* y, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) {
+    float v = x[i];
+    if (v > 0.0f) y[i] = a[i] * v;    // "then" side
+    else          y[i] = b[i] - v;    // "else" side
+  }
+}
+```
+
+The instructions in each step are illustrative `gfx950` compiler output (`hipcc --offload-arch=gfx950 -O3 --save-temps`, example ROCm 7.0.0), trimmed. The data is made up: one workgroup of 64 threads (one wave), **n = {ex.n}**, a[i] = {ex.A}, b[i] = {ex.B}, and a mix of positive and negative x. Every mask and value below is computed from those inputs. Each row of the grid is what the 16-lane SIMD does in one cycle; a wave64 instruction takes 4 cycles.
+
+<Walkthrough title="64 threads through if (i < n) { if (x > 0) … else … }" caption="EXEC bit k = lane k is on; the hex shows lane 63 on the left, lane 0 on the right. Striped cells are off: they still take their slot in every cycle, but do not write results.">
+  <WStep title="1 · The wave starts: all 64 lanes on">
+    <Lanes active={ex.all} values={ex.vals.i} regs={[{ name: 'EXEC', mask: ex.all }]} />
+
+```amdgcn
+  s_mul_i32       s2, s2, s3       ; blockIdx.x * blockDim.x (same for the whole wave: scalar)
+  v_add_u32_e32   v0, s2, v0       ; i = that + threadIdx.x   (per lane: vector)
+```
+
+    Every lane computes its own `i` (shown in each cell): 0 to 63. `EXEC` is all ones.
+  </WStep>
+  <WStep title="2 · if (i < n): lanes 40–63 switch off">
+    <Lanes active={ex.inBounds} values={ex.vals.i} regs={[{ name: 'VCC', mask: ex.vccBounds, note: 'n > i' }, { name: 's[2:3]', mask: ex.s23, note: 'saved old EXEC' }, { name: 'EXEC', mask: ex.inBounds }]} />
+
+```amdgcn
+  v_cmp_gt_i32_e32     vcc, s4, v0     ; VCC bit = (n > i), one bit per lane
+  s_and_saveexec_b64   s[2:3], vcc     ; s[2:3] = EXEC; EXEC = EXEC & VCC
+  s_cbranch_execz      .LBB0_6         ; no lane left? jump to the end
+```
+
+    The compare writes one bit per lane into `VCC`. `s_and_saveexec` saves the old mask and keeps only the lanes that passed: {ex.nIn} of 64. If no lane had passed, `s_cbranch_execz` would skip the body; here some did, so the wave goes on.
+  </WStep>
+  <WStep title="3 · Load x and test it: the wave is split">
+    <Lanes active={ex.inBounds} values={ex.vals.x} tone="mix" split={ex.vccElse} regs={[{ name: 'VCC', mask: ex.vccElse, note: 'not (x > 0)' }, { name: 'EXEC', mask: ex.inBounds }]} caption="Amber = will take the else side, green = the then side." />
+
+```amdgcn
+  global_load_dword    v2, v[2:3], off ; v2 = x[i] (only on-lanes load)
+  s_waitcnt            vmcnt(0)        ; wait for the load
+  v_cmp_nlt_f32_e32    vcc, 0, v2      ; VCC bit = not (0 < x)
+```
+
+    Each on-lane loads its x. The compiler tests the **else** condition, "not (0 < x)" (true for x ≤ 0, and for NaN). Lanes that are off get 0 in `VCC`. Result: {ex.nElse} lanes go to the else side (lanes {ex.firstElse.join(', ')} …; lane 9 has x = 0, so it is one of them), {ex.nThen} lanes to the then side (lanes {ex.firstThen.join(', ')} …).
+  </WStep>
+  <WStep title="4 · Else side runs; then-lanes wait">
+    <Lanes active={ex.elseSide} values={ex.vals.elseY} tone="else" regs={[{ name: 'EXEC', mask: ex.elseSide, note: 'else lanes' }, { name: 's[0:1]', mask: ex.thenSaved, note: 'then lanes, for later' }]} />
+
+```amdgcn
+  s_and_saveexec_b64   s[0:1], vcc       ; s[0:1] = EXEC; EXEC = EXEC & VCC  (else lanes)
+  s_xor_b64            s[0:1], exec, s[0:1] ; s[0:1] = lanes still to do  (then lanes)
+  global_load_dword    v3, v[4:5], off   ; b[i]
+  v_sub_f32_e32        v3, v3, v2        ; y = b - x
+```
+
+    `EXEC` now holds only the {ex.nElse} else-lanes, and `s[0:1]` remembers the {ex.nThen} then-lanes. The wave issues the else side's instructions; each cell shows y = {ex.B} − x. The other lanes are idle but still take their slot in each of the 4 cycles.
+  </WStep>
+  <WStep title="5 · Flip the mask: then side runs">
+    <Lanes active={ex.thenSide} values={ex.vals.thenY} tone="then" regs={[{ name: 'EXEC', mask: ex.thenSide, note: 'then lanes' }, { name: 's[0:1]', mask: ex.elseSide, note: 'else lanes, saved' }]} />
+
+```amdgcn
+.LBB0_3:
+  s_andn2_saveexec_b64 s[0:1], s[0:1]    ; s[0:1] = EXEC; EXEC = old s[0:1] & ~EXEC
+  global_load_dword    v3, v[4:5], off   ; a[i]
+  v_mul_f32_e32        v3, v2, v3        ; y = a * x
+```
+
+    One instruction swaps the roles: `EXEC` becomes the then-lanes, `s[0:1]` keeps the else-lanes. The same wave now issues the then side; y = {ex.A} × x. The else-lanes wait.
+  </WStep>
+  <WStep title="6 · Reconverge and store">
+    <Lanes active={ex.merged} values={ex.vals.y} tone="mix" split={ex.elseSide} regs={[{ name: 'EXEC', mask: ex.merged, note: 'then | else' }]} />
+
+```amdgcn
+.LBB0_5:
+  s_or_b64             exec, exec, s[0:1] ; EXEC = then lanes | else lanes
+  global_store_dword   v[0:1], v3, off    ; y[i] = v3, one store for both sides
+```
+
+    `s_or_b64` puts both halves back together, and one store writes all {ex.nIn} results. The lanes past `n` never come back on: the wave simply ends (`s_endpgm`).
+  </WStep>
+  <WStep title="7 · What divergence cost">
+    | Phase | Vector instructions | Lanes doing useful work |
+    | --- | --- | --- |
+    | else side | {ex.VEC_PER_SIDE} | {ex.sides[0].lanes} of 64 |
+    | then side | {ex.VEC_PER_SIDE} | {ex.sides[1].lanes} of 64 |
+
+    The two sides ran one after the other: {2 * ex.VEC_PER_SIDE} vector instructions, of which each lane needed only {ex.VEC_PER_SIDE}. Only **{ex.usefulPct} %** of the lane slots in this part did useful work ({ex.nIn} useful of 128). Had all {ex.nIn} lanes taken the same side, the wave would issue {ex.VEC_PER_SIDE} instructions once, at {ex.nIn} of 64 lanes ({Math.round(ex.nIn / 64 * 100)} %). Short branches without loads are often flattened instead: the compiler computes both results and picks one per lane with `v_cndmask_b32`, one extra instruction. The worst case is a loop whose trip count differs per lane: the whole wave runs until its slowest lane is done. Good GPU code keeps neighbouring threads on the same path.
+  </WStep>
+</Walkthrough>
+
+<Callout tone="note" title="Warp 32 vs wavefront 64">
+A wider group wastes more work on divergence but issues fewer instructions for the same work. CUDA code that hard-codes 32 (for example a 5-step warp-shuffle reduction) is wrong on CDNA, which needs 6 steps. HIP exposes `warpSize`; portable code must use it. AMD's RDNA consumer GPUs default to wave32; MI355X (CDNA4) runs wave64.
+</Callout>
+
+## Scheduling and latency hiding
+
+A load from HBM takes hundreds of nanoseconds. At 2.4 GHz that is hundreds to over a thousand clock cycles. Vendors do not publish exact figures, so treat this as an order of magnitude. The GPU does not try to make the wait shorter. It fills the wait with other work:
+
+<Diagram spec={hide} autoSteps title="One SIMD, two resident wavefronts" caption="Instruction names from the gfx950 ISA. Real kernels keep several loads in flight per wave, and up to 8 waves per SIMD." />
+
+Each cycle, the scheduler for a SIMD (NVIDIA: each of the SM's four warp schedulers) picks a resident wave whose next instruction has its inputs ready, and issues it. Switching costs nothing, because every resident wave keeps its registers in the register file the whole time. Nothing is saved or restored. That is the key difference from CPU threads.
+
+AMD code shows the waits as instructions. `s_waitcnt vmcnt(N)` means "stall this wave until at most N vector-memory loads are outstanding". `lgkmcnt` counts LDS, scalar-memory and other short operations. NVIDIA encodes waits as scoreboard bits inside each SASS instruction, so you do not see separate wait instructions.
+
+### How many waves do you need?
+
+**Little's law**: $$\text{data in flight} = \text{bandwidth} \times \text{latency}$$. A worked example with round numbers (the latency is assumed, not measured):
+
+| Step | Value |
+| --- | --- |
+| MI355X HBM bandwidth (spec, approximate) | 8 TB/s |
+| Assumed load latency | 500 ns |
+| Bytes in flight to keep HBM busy | $$8 \times 10^{12} \times 500 \times 10^{-9}$$ = **4 MB** |
+| Per CU (÷ 256) | about **16 KB** |
+| One `global_load_dwordx4` per wave (64 lanes × 16 B) | 1 KB |
+| Waves per CU needed, one load each | about **16** (half of the 32 slots) |
+
+A memory-bound kernel therefore needs either many resident waves, or fewer waves that each keep several independent loads in flight (**instruction-level parallelism**). Both work. Fast GEMM kernels often run at low occupancy and use the second approach.
+
+## Occupancy: how many waves fit
+
+**The idea.** Every resident wave keeps its registers on the chip the whole time; that is why switching is free. So the register file, the LDS and the wave slots are a fixed room, and each workgroup takes a share of all three. **Occupancy** $$= \text{resident waves} / \text{the maximum}$$ (8 per SIMD on AMD, 64 warps per SM on NVIDIA). Whichever resource runs out first sets it. A kernel that needs more registers per thread holds fewer waves, and so has fewer waves to switch to while one waits.
+
+The resources on MI355X (CDNA4, gfx950):
+
+| Resource | Size | Source |
+| --- | --- | --- |
+| Wave slots | 8 per SIMD, 32 per CU | `rocminfo` above |
+| Vector register file | 512 KB per CU = 128 KB per SIMD → 128 KB ÷ (64 lanes × 4 B) = **512 VGPRs per lane** | ROCm GPU hardware specs |
+| Per-wave registers | up to 256 `v` + 256 `a` (AGPRs, accumulation registers for matrix cores); counted as align(v, 4) + a, in blocks of 8 | CDNA4 ISA guide §3.6.4, LLVM AMDGPU docs |
+| LDS | 160 KB per CU, allocated in 1,280-byte granules (MI300X: 64 KB, 512-byte granules) | `rocminfo`, LLVM AMDGPU docs |
+
+On H100 (compute capability 9.0): 64K 32-bit registers per SM, split over 4 sub-partitions and allocated per warp in units of 256; up to 228 KB shared memory per SM, plus 1 KB that CUDA reserves per block; 64 warp slots and 32 block slots (CUDA programming guide; algorithm from `cuda_occupancy.h` in the CUDA toolkit).
+
+Try it. The defaults are a 256-thread workgroup with 96 `v` + 32 `a` registers and 48 KB of LDS:
+
+<Occupancy />
+
+What to try:
+
+- **Switch to MI300X**: the same kernel drops from 3 workgroups per CU to 1, because 64 KB of LDS holds only one 48 KB workgroup. The 2.5× larger LDS is one of the most visible differences between gfx942 and gfx950 for kernel authors.
+- **Switch to H100** and move registers from 128 to 64 per thread: the register limit goes from 2 to 4 blocks, and occupancy doubles from 25 % to 50 %. If the compiler cannot fit the code in its register budget, it **spills** values to slow per-thread memory instead.
+- **Set VGPRs to 64 and AGPRs to 0** on MI355X with no LDS: 8 waves per SIMD, 100 %.
+
+The calculator's rules agree with the vendor tools (example results):
+
+| Case | Calculator | Vendor tool |
+| --- | --- | --- |
+| gfx950, 256 threads, 3 VGPRs, 48 KB LDS | 3 workgroups = 3 waves/SIMD | `hipcc -Rpass-analysis=kernel-resource-usage`: `Occupancy [waves/SIMD]: 3` |
+| gfx942, same kernel | 1 workgroup = 1 wave/SIMD | `Occupancy [waves/SIMD]: 1` |
+| H100, 256 threads, 128 regs, 48 KB | 2 blocks, 16 warps | `cudaOccMaxActiveBlocksPerMultiprocessor`: 2 blocks |
+| H100, 256 threads, 96 regs, no shared | 2 blocks (96 × 32 → 3,072 per warp; 16,384 ÷ 3,072 = 5 warps per sub-partition) | 2 blocks |
+| H100, 128 threads, 168 regs, 100 KB | 2 blocks (shared memory) | 2 blocks |
+
+### Where to read the numbers
+
+The compiler reports them, so you rarely calculate by hand:
+
+```text
+# AMD: add -Rpass-analysis=kernel-resource-usage   (example output, ROCm 7.0.0, gfx950, axpy)
+remark: axpy.hip:5:0:     VGPRs: 6
+remark: axpy.hip:5:0:     AGPRs: 0
+remark: axpy.hip:5:0:     Occupancy [waves/SIMD]: 8
+remark: axpy.hip:5:0:     LDS Size [bytes/block]: 0
+
+# NVIDIA: add -Xptxas -v   (example output, CUDA 12.8, sm_90, axpy)
+ptxas info    : Used 10 registers, used 0 barriers
+```
+
+At run time, `rocprofv3 --kernel-trace` records `VGPR_Count`, `Accum_VGPR_Count`, `SGPR_Count` and `LDS_Block_Size` for every kernel dispatch. Nsight Compute shows "Achieved Occupancy" next to the theoretical value. → [PTX and AMDGCN](/learn/gpu-isa-ptx/) shows how to collect them.
+
+## How the hardware places work
+
+1. The host writes a **dispatch packet** (kernel address, grid and block size, argument pointer) into a queue in memory. On AMD these are HSA AQL queues; `rocminfo` shows up to 128 queues per GPU.
+2. The GPU's command processor reads the packet and hands workgroups to CUs that have room.
+3. A workgroup stays on one CU until it finishes. Its waves are spread over the CU's 4 SIMDs.
+4. When a workgroup ends, its registers and LDS are freed and the next workgroup starts there.
+
+On MI300- and MI355-class GPUs the XCDs are separate dies. In SPX mode (the whole GPU as one device), workgroups are handed to the 8 XCDs **round-robin**, and each XCD has its own 4 MB L2. Neighbouring workgroups therefore do not share an L2. Tuned kernels remap workgroup IDs so tiles that reuse the same data land on the same XCD (ROCm workload optimization guide). → [Memory hierarchy](/learn/gpu-memory-hierarchy/)
+
+## Common misconceptions
+
+- **"A CUDA core is a core."** It is one lane of a vector unit, with no program counter of its own. The closest thing to a CPU core is one SIMD (AMD) or one SM sub-partition (NVIDIA).
+- **"More threads per block is faster."** A block only needs to be a multiple of the warp/wave size and large enough to fill the CU. 256 is a common default on both vendors.
+- **"100 % occupancy is the goal."** Occupancy only needs to be high enough to hide latency. Many of the fastest LLM kernels run 1–2 waves per SIMD.
+- **"Threads in a warp are independent."** They share one instruction stream. Since Volta, NVIDIA lets diverged threads interleave (independent thread scheduling), but they still execute in groups. Code that relies on implicit warp synchronization is a classic porting bug.
+
+## How this shows up in operations
+
+- **Same model, different GPU, different speed.** Kernels are tuned for one CU shape. A kernel tuned for MI300X (64 KB LDS, 304 CUs) is not tuned for MI355X (160 KB, 256 CUs). → [PTX and AMDGCN](/learn/gpu-isa-ptx/) explains why binaries are built per chip.
+- **A busy GPU is not necessarily doing math.** Utilization counters such as `amd-smi metric` GFX activity say the compute engine had work, not that the matrix cores were busy. A memory-bound kernel can look fully busy. → [GPU metrics](/learn/gpu-metrics/)
+- **A hung kernel is a wave that never retires.** `amdgpu` ring timeouts in `dmesg` mean queued work stopped making progress. → [GPU failures](/learn/gpu-failures/)
+
+## Why this matters above
+
+- Matrix multiplies split into tiles; each workgroup computes one tile with matrix-core instructions. → [PTX and AMDGCN](/learn/gpu-isa-ptx/), [GEMM tiling](/learn/gemm-tiling/)
+- Whether a kernel waits on math or on memory decides which hardware suits it. → [Memory hierarchy and roofline](/learn/gpu-memory-hierarchy/)
+
+## Further reading
+
+- [ROCm GPU hardware specifications](https://rocm.docs.amd.com/en/latest/reference/gpu-arch-specs.html): CUs, LDS, VGPR file and caches per AMD GPU
+- [HIP hardware implementation](https://rocm.docs.amd.com/projects/HIP/en/latest/understand/hardware_implementation.html): CU, SIMD, scheduling on AMD
+- [AMD CDNA4 ISA reference guide (PDF)](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf): registers, EXEC, LDS, VGPR allocation (§3.6)
+- [LLVM AMDGPU usage](https://llvm.org/docs/AMDGPUUsage.html): gfx950 target, VGPR and LDS granularity
+- [AMD CDNA4 architecture white paper (PDF)](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf)
+- [MI300 compute and memory partition modes](https://rocm.blogs.amd.com/software-tools-optimization/compute-memory-modes/README.html) (ROCm blog): round-robin workgroup dispatch across XCDs
+- [MI300/MI350 workload optimization](https://rocm.docs.amd.com/en/latest/how-to/rocm-for-ai/inference-optimization/workload.html): XCD-aware tile mapping
+- [Register pressure on AMD CDNA GPUs](https://rocm.blogs.amd.com/software-tools-optimization/register-pressure/README.html) (ROCm blog): VGPRs vs occupancy
+- CUDA compute capabilities: [SM limits](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html#compute-capabilities-table-device-and-streaming-multiprocessor-sm-information-per-compute-capability) and [memory limits](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html#compute-capabilities-table-memory-information-per-compute-capability)
+- [Hopper tuning guide](https://docs.nvidia.com/cuda/hopper-tuning-guide/index.html) · [Blackwell tuning guide](https://docs.nvidia.com/cuda/blackwell-tuning-guide/index.html): occupancy factors per SM
+- [NVIDIA Hopper architecture in depth](https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/): SM layout, 132 SMs on H100 SXM

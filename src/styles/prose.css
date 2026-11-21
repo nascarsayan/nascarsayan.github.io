@@ -1,0 +1,167 @@
+/* ==========================================================================
+   Article typography. Applied to rendered Markdown/MDX inside `.prose`.
+   Metrics mirror the reference design (686px column, 18px body).
+   ========================================================================== */
+.prose {
+  --prose-size: 1.125rem;
+  font-size: var(--prose-size);
+  line-height: 1.5;
+}
+.prose > :first-child { margin-top: 0; }
+
+.prose p { margin-bottom: 1.25em; }
+
+.prose strong { font-weight: var(--font-weight-bold); }
+
+.prose a {
+  font-weight: var(--font-weight-medium);
+  color: var(--color-link);
+  text-decoration: none;
+  box-shadow: 0 1.5px 0 0 var(--color-link-line);
+  transition: box-shadow 200ms, color 200ms;
+}
+.prose a:hover { color: var(--color-link-hover); box-shadow: 0 2.5px 0 0 var(--color-link); }
+.prose a[href^='http']::after {
+  content: '';
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin-left: 3px;
+  background: currentColor;
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M10 14 20 4h-6 6v6'/%3E%3Cpath d='M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'/%3E%3C/svg%3E") center / contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2.5' stroke-linecap='round'%3E%3Cpath d='M10 14 20 4h-6 6v6'/%3E%3Cpath d='M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5'/%3E%3C/svg%3E") center / contain no-repeat;
+  opacity: 0.7;
+}
+
+/* Headings */
+.prose h2, .prose h3 { position: relative; scroll-margin-top: calc(var(--header-height) + 16px); }
+.prose h2 {
+  margin: 56px 0 20px;
+  font-size: 1.75rem;
+  font-weight: var(--font-weight-bold);
+  line-height: 1.3;
+}
+.prose h3 {
+  margin: 36px 0 14px;
+  font-size: 1.3125rem;
+  font-weight: var(--font-weight-bold);
+}
+.prose .heading-anchor {
+  position: absolute;
+  top: 50%;
+  left: -32px;
+  display: grid;
+  place-content: center;
+  width: 28px;
+  height: 28px;
+  box-shadow: none;
+  color: inherit;
+  opacity: 0;
+  transform: translate(4px, -50%);
+  transition: opacity 0.4s 0.25s, transform 0.4s cubic-bezier(0.61, 0.55, 0.24, 0.97) 0.25s;
+}
+.prose .heading-anchor::after { display: none; }
+.prose h2:hover .heading-anchor, .prose h3:hover .heading-anchor, .prose .heading-anchor:focus-visible {
+  opacity: 0.85;
+  transform: translate(0, -50%);
+  transition-delay: 0s;
+}
+
+/* Lists */
+:is(.prose, .prose *) > :is(ol, ul):not([class]) { margin: 0 0 24px; padding: 0; list-style: none; }
+:is(.prose, .prose *) > ol:not([class]) { counter-reset: prose-ol; }
+:is(.prose, .prose *) > :is(ol, ul):not([class]) > li { position: relative; margin-bottom: 10px; padding-left: 30px; }
+:is(.prose, .prose *) > ol:not([class]) > li { counter-increment: prose-ol; }
+:is(.prose, .prose *) > ol:not([class]) > li::before {
+  content: counters(prose-ol, '.') '. ';
+  position: absolute;
+  left: 0;
+  font-weight: var(--font-weight-medium);
+  color: var(--color-primary);
+}
+:is(.prose, .prose *) > ul:not([class]) > li::before {
+  content: '';
+  position: absolute;
+  left: 6px;
+  top: 0.55em;
+  width: 12px;
+  height: 12px;
+  background: var(--color-primary);
+  -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M12 5l7 7-7 7'/%3E%3C/svg%3E") center / contain no-repeat;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M12 5l7 7-7 7'/%3E%3C/svg%3E") center / contain no-repeat;
+}
+
+/* Inline code chips */
+.prose :not(pre) > code {
+  margin: 1px -1px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: var(--color-inline-code-bg);
+  font-family: var(--font-family-mono);
+  font-size: 0.85em;
+  font-weight: 400;
+  letter-spacing: -0.5px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+
+/* Static code blocks (Shiki) */
+.prose pre.astro-code {
+  margin: 32px -32px 48px;
+  padding: 32px;
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px var(--code-border);
+  font-family: var(--font-family-mono);
+  font-size: 0.9375rem;
+  line-height: 1.6;
+  overflow-x: auto;
+}
+.prose pre.astro-code code { font-weight: 400; }
+html[data-color-mode='dark'] .prose pre.astro-code { box-shadow: 0 0 0 1px rgb(69 77 84 / 0.6); }
+/* The panel colour is the site's (--code-bg), not the Shiki theme's: white on a white page in light mode. */
+.prose pre.astro-code, html[data-color-mode='dark'] .prose pre.astro-code { background-color: var(--code-bg) !important; }
+
+.prose blockquote {
+  margin: 32px 0 48px;
+  padding: 4px 0 4px 24px;
+  border-left: 3px solid var(--color-gray-300);
+  color: var(--color-gray-700);
+  font-style: italic;
+}
+.prose blockquote p:last-child { margin-bottom: 0; }
+
+.prose hr { margin: 64px auto; width: 80px; border: none; border-top: 2px dashed var(--color-gray-300); }
+
+.prose img { border-radius: 6px; margin: 32px auto; }
+
+/* Tables */
+.prose table { display: block; max-width: 100%; margin: 24px 0 32px; overflow-x: auto; border-collapse: collapse; font-size: 0.9375rem; }
+.prose th { text-align: left; font-size: 0.75rem; letter-spacing: 0.5px; text-transform: uppercase; color: var(--color-muted); font-weight: var(--font-weight-medium); }
+.prose :is(th, td) { padding: 8px 12px; border-bottom: 1px solid var(--color-gray-100); vertical-align: top; }
+.prose tbody tr:hover { background: var(--color-cloud-100); }
+html[data-color-mode='dark'] .prose tbody tr:hover { background: var(--color-card-bg); }
+.prose td :is(ul, ol):not([class]) { margin-bottom: 0; }
+/* A pros/cons table: wrap it in <div class="pros-cons"> (columns: option, pros, cons). A pinch of colour. */
+.prose .pros-cons td:nth-child(2) { background: color-mix(in srgb, var(--color-success) 7%, transparent); }
+.prose .pros-cons td:nth-child(3) { background: color-mix(in srgb, var(--color-error) 6%, transparent); }
+.prose .pros-cons th:nth-child(2) { color: var(--color-success); }
+.prose .pros-cons th:nth-child(3) { color: var(--color-error); }
+.prose .pros-cons td:first-child { font-weight: var(--font-weight-bold); white-space: nowrap; }
+
+/* Collapsible detail */
+.prose details { margin: 20px 0; border: 1px solid var(--color-gray-100); border-radius: var(--radius); }
+.prose summary { padding: 10px 16px; cursor: pointer; font-weight: var(--font-weight-medium); }
+.prose details[open] summary { border-bottom: 1px solid var(--color-gray-100); }
+.prose details > :not(summary) { margin-inline: 16px; }
+.prose details > :not(summary):first-of-type { margin-top: 12px; }
+
+@media (max-width: 800px) {
+  .prose pre.astro-code { margin-inline: calc(var(--viewport-padding) * -1); border-radius: 0; }
+  .prose .heading-anchor { display: none; }
+}
+
+/* Math (src/lib/math.ts): KaTeX HTML with its own fonts. */
+.prose .katex { font-size: 1.08em; }
+.prose .math-display { margin: 1.1em 0; overflow-x: auto; overflow-y: hidden; }
+.prose .math-display .katex-display { margin: 0; }
+.prose .math-display .katex { font-size: 1.2em; }

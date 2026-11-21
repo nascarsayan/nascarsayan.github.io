@@ -1,0 +1,49 @@
+---
+import IconButton from './IconButton.astro';
+/**
+ * Site-wide search: a round header icon (also `/` or Ctrl/Cmd+K) opens a dialog
+ * that searches /search.json (titles, section headings, text, diagram labels).
+ * Results are built with DOM text nodes; nothing from the index is parsed as HTML.
+ */
+---
+
+<IconButton label="Search (/)" class="search-trigger" data-sound-click="flap" data-search-open>
+  <svg width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="8" /><line x1="21" y1="21" x2="16.65" y2="16.65" /></svg>
+</IconButton>
+
+<dialog class="search" data-search aria-label="Search the site">
+  <div class="box">
+    <div class="field">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="11" cy="11" r="7" /><path d="M20 20l-3.5-3.5" /></svg>
+      <input type="search" placeholder="Search pages, sections, diagrams…" autocomplete="off" spellcheck="false" maxlength="100" aria-controls="search-results" data-search-input />
+      <kbd>Esc</kbd>
+    </div>
+    <ol class="results" id="search-results" role="listbox" data-search-results></ol>
+    <p class="empty" data-search-empty hidden>No matches.</p>
+  </div>
+</dialog>
+
+<style>
+  /* Template "boop": a springy tilt on hover. */
+  :global(.search-trigger) svg { transition: transform 400ms var(--spring-easing); }
+  @media (hover: hover) { :global(.search-trigger:hover) svg { transform: rotate(-15deg) scale(1.1); } }
+  kbd { padding: 0 6px; border-radius: 4px; border: 1px solid var(--color-gray-300); font-family: var(--font-family-mono); font-size: 0.75rem; color: var(--color-muted); }
+  .search { width: min(640px, 94vw); max-height: 80vh; margin: 10vh auto auto; padding: 0; border: 0; border-radius: 12px; background: var(--color-background); color: var(--color-text); box-shadow: var(--shadow-elevation-medium); }
+  .search::backdrop { background: rgb(10 12 16 / 0.45); backdrop-filter: blur(2px); }
+  .field { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--color-gray-100); color: var(--color-muted); }
+  input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 1.0625rem; color: var(--color-text); }
+  .results { list-style: none; margin: 0; padding: 6px; max-height: calc(80vh - 60px); overflow: auto; }
+  .results :global(a) { display: block; padding: 10px 12px; border-radius: 8px; text-decoration: none; color: inherit; }
+  .results :global(a[aria-selected='true']), .results :global(a:hover) { background: var(--color-cloud-100); }
+  :global(html[data-color-mode='dark']) .results :global(a[aria-selected='true']), :global(html[data-color-mode='dark']) .results :global(a:hover) { background: var(--color-card-bg); }
+  .results :global(.r-title) { display: block; font-weight: var(--font-weight-bold); }
+  .results :global(.r-section) { color: var(--color-primary); font-weight: var(--font-weight-medium); }
+  .results :global(.r-snippet) { display: block; margin-top: 2px; font-size: 0.875rem; color: var(--color-gray-700); }
+  .results :global(mark) { background: var(--color-alert-background); color: inherit; border-radius: 2px; }
+  .empty { padding: 16px; color: var(--color-muted); }
+</style>
+
+<script>
+  import { initSearch } from '@/scripts/search';
+  initSearch();
+</script>

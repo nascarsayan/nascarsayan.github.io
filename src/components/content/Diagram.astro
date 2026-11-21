@@ -1,0 +1,325 @@
+---
+/**
+ * A diagram drawn by our own renderer, laid out at build time (graphs by TALA,
+ * sequences by src/diagrams/sequence.ts) and sized to fit the screen.
+ *
+ *   import flow from './flow.diagram';
+ *   <Diagram spec={flow} title="Pull path" mode="build">
+ *     <Step focus="client, client -> proxy">The client asks the proxy.</Step>
+ *   </Diagram>
+ *
+ * Steps get a player inside the frame: prev / play / next / dots, arrow keys,
+ * Space. Focused elements light up, others dim, and active edges carry a moving
+ * dot. `mode="build"` hides elements until their step. Expand shows the diagram
+ * full-window. Sequence diagrams have no player: a <Step>'s text becomes the card
+ * shown when the message it focuses is clicked (like a message's `info`);
+ * `autoSteps` is ignored (it only repeated each arrow's label).
+ */
+import '@/styles/diagram.css';
+import { DiagramSpec, type DiagramInput } from '@/diagrams/spec';
+import { edgeIds } from '@/diagrams/graph';
+import { messageIds } from '@/diagrams/sequence';
+import { renderScene, nodeText } from '@/diagrams/render';
+import { lintScene, lintOverlaps, lintAspect, lintBoxFit, lintGroupFit, lintTextFit } from '@/diagrams/lint';
+import { layoutScene } from '@/diagrams/cache';
+import { T, type SceneNode } from '@/diagrams/scene';
+import { wrap } from '@/diagrams/text';
+
+interface Props {
+  spec: DiagramInput;
+  title?: string;
+  caption?: string;
+  mode?: 'highlight' | 'build';
+  /** Autoplay delay per step, ms. */
+  interval?: number;
+  autoSteps?: boolean;
+  /** false: no prev/play/next bar or caption (something else drives the steps, e.g. <Scrolly>). */
+  player?: boolean;
+  /** Big diagrams: a scrollable viewport with zoom in / out / fit / 1:1 (bottom right), drag to pan, Ctrl/⌘+wheel to zoom. */
+  zoom?: boolean;
+  id?: string;
+  /** Ids of boxes that open into an inside diagram (set by <Drilldown>): magnifier badge, click / Enter opens. */
+  opens?: string[];
+}
+const { spec: input, title, caption, mode = 'highlight', interval = 3200, autoSteps = false, player = true, zoom = false, id, opens = [] } = Astro.props;
+const parsed = DiagramSpec.safeParse(input);
+if (!parsed.success) throw new Error(`Diagram${title ? ` "${title}"` : ''}: ${parsed.error.message}`);
+const spec = parsed.data;
+// Steps first: the text a step's `state` swaps into a box (label, detail, tag) must fit
+// that box too, so the layout sizes each box for all of them.
+const unhtml0 = (v: string) => v.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+let steps = Astro.slots.has('default') ? await Astro.slots.render('default') : '';
+type Alt = { label?: string; detail?: string; tag?: string };
+const alts = new Map<string, Alt[]>();
+for (const m of steps.matchAll(/data-state="([^"]*)"/g)) {
+  for (const [id, o] of Object.entries(JSON.parse(unhtml0(m[1])) as Record<string, Alt>)) {
+    if (o.label === undefined && o.detail === undefined && o.tag === undefined) continue;
+    alts.set(id, [...(alts.get(id) ?? []), { label: o.label, detail: o.detail, tag: o.tag }]);
+  }
+}
+const layoutSpec = spec.kind === 'graph' && alts.size
+  ? { ...spec, nodes: spec.nodes.map((n) => (alts.has(n.id) ? { ...n, alts: alts.get(n.id) } : n)) }
+  : spec;
+// Laid out once per spec (cached across dev-server requests), labels placed clear of boxes.
+const { scene, overlaps } = layoutScene(layoutSpec);
+/** A box with a step's text in place of its own, wrapped to the box's width. */
+const altNode = (nd: SceneNode, a: Alt): SceneNode => {
+  const inner = nd.w - 2 * T.padX - (nd.shape === 'pill' ? 12 : 0);
+  return {
+    ...nd,
+    label: a.label !== undefined ? { ...nd.label, lines: wrap(a.label, inner, T.label.size, T.label.weight) } : nd.label,
+    detail: a.detail !== undefined ? { lines: wrap(a.detail, inner, T.detail.size, T.detail.weight), size: T.detail.size, weight: T.detail.weight, lineHeight: T.detail.lineHeight } : nd.detail,
+    tag: a.tag !== undefined ? { lines: [a.tag], size: T.tag.size, weight: T.tag.weight, lineHeight: T.tag.lineHeight, upper: true } : nd.tag,
+  };
+};
+const sceneNode = new Map(scene.nodes.map((nd) => [nd.id, nd]));
+const altNodes = [...alts].flatMap(([id, as]) => (sceneNode.has(id) ? as.map((a) => ({ id, node: altNode(sceneNode.get(id)!, a) })) : []));
+const textFit = lintTextFit(scene, altNodes);
+
+const issues = lintScene(spec, scene);
+// DIAGRAM_LINT=warn lists every issue without failing (local triage only).
+const report = process.env.DIAGRAM_LINT === 'warn' ? (m: string) => console.warn(m) : (m: string) => { throw new Error(m); };
+if (issues.length) {
+  report(
+    `Diagram lint${title ? ` "${title}"` : ''}: edge runs must be ≥ ${T.minSeg}px (last run ≥ ${T.minLast}px):\n` +
+      issues.map((i) => `  ${i.edge}: runs ${i.runs.join(', ')}`).join('\n') +
+      `\nMove or reorder boxes, or add allowShort: '<reason>' to the edge (or diagram) if it cannot be avoided.`,
+  );
+}
+// Boxes carry a short detail; longer text belongs in `info` (the card behind the box's "i" button).
+const DETAIL_MAX = 48;
+// The same limit holds for the detail a Step swaps in: a box must not grow tall to fit
+// a sentence. At most DETAIL_LINES lines of detail in any box.
+const DETAIL_LINES = 3;
+const wordy = [
+  ...(spec.kind === 'graph' ? spec.nodes : spec.participants).map((n) => ({ id: n.id, d: n.detail })),
+  ...[...alts].flatMap(([id, as]) => as.map((a) => ({ id: `${id} (step state)`, d: a.detail }))),
+].filter((x) => (x.d?.length ?? 0) > DETAIL_MAX);
+if (wordy.length) {
+  report(
+    `Diagram lint${title ? ` "${title}"` : ''}: box detail must be ≤ ${DETAIL_MAX} characters (also in Step state); put the rest in \`info\` (its card, behind the box's "i" button) or the step text:\n` +
+      wordy.map((x) => `  ${x.id} (${x.d!.length}): ${x.d}`).join('\n'),
+  );
+}
+const tallText = [
+  ...scene.nodes.filter((nd) => (nd.detail?.lines.length ?? 0) > DETAIL_LINES).map((nd) => nd.id),
+  ...[...alts].flatMap(([id, as]) => as.filter((a) => sceneNode.has(id) && (altNode(sceneNode.get(id)!, a).detail?.lines.length ?? 0) > DETAIL_LINES).map(() => `${id} (step state)`)),
+];
+if (tallText.length) report(`Diagram lint${title ? ` "${title}"` : ''} on ${Astro.url.pathname}: box detail wraps to more than ${DETAIL_LINES} lines (the box grows tall for text): ${tallText.join(', ')}. Shorten it; long text goes in \`info\`.`);
+const collisions = lintOverlaps(scene, overlaps).filter((c) => !(spec.kind === 'graph' && spec.allowClose && / (run side by side closer than|runs along the border of) /.test(c)));
+const boxFit = [...lintBoxFit(spec, scene, altNodes), ...lintGroupFit(spec, scene)];
+if (boxFit.length) report(`Diagram lint${title ? ` "${title}"` : ''} on ${Astro.url.pathname}: boxes or groups much larger than their content:\n${boxFit.map((x) => `  ${x}`).join('\n')}\nShorten the group label or move the box out of the wide strip/column; allowBoxFit: '<reason>' only if it cannot be fixed.`);
+if (textFit.length) report(`Diagram lint${title ? ` \"${title}\"` : ''} on ${Astro.url.pathname}: text runs out of its box:\n${textFit.map((x) => `  ${x}`).join('\n')}\nShorten the text, or move detail into \`info\` (the hover card).`);
+const aspect = lintAspect(spec, scene);
+if (aspect) report(`Diagram lint${title ? ` "${title}"` : ''} on ${Astro.url.pathname}: shape ${aspect}.\nAim for 16:8 (2:1). Use layout/direction 'auto', regroup boxes into columns or bands, merge duplicate boxes, or shorten labels; add allowAspect: '<reason>' only if it cannot be fixed.`);
+if (collisions.length) {
+  report(
+    `Diagram lint${title ? ` "${title}"` : ''}: nothing may hide a box or a label:\n` +
+      collisions.map((c) => `  ${c}`).join('\n') +
+      `\nReorder boxes, shorten the label, or give the edge a longer run so its label fits clear of the boxes.`,
+  );
+}
+const notBoxes = opens.filter((o) => !scene.nodes.some((nd) => nd.id === o));
+if (notBoxes.length) throw new Error(`Diagram${title ? ` "${title}"` : ''}: inside diagrams for unknown boxes: ${notBoxes.join(', ')}. Known boxes: ${scene.nodes.map((nd) => nd.id).join(' | ')}`);
+const svg = renderScene(scene, title, new Set(opens));
+const known = new Set(
+  spec.kind === 'graph'
+    ? [...spec.nodes.map((n) => n.id), ...spec.groups.map((g) => g.id), ...edgeIds(spec.edges)]
+    : [...spec.participants.map((p) => p.id), ...messageIds(spec)],
+);
+
+const canon = (t: string) => {
+  const s = t.trim().replace(/\s+/g, ' ');
+  const m = s.match(/^(.+?)\s*->\s*(.+?)(\s*#\d+)?$/);
+  return m ? `${m[1]} -> ${m[2]}${m[3] ? ` ${m[3].trim()}` : ''}` : s;
+};
+void autoSteps; // sequences: ignored, see the header
+const unknown: string[] = [];
+steps = steps.replace(/data-focus="([^"]*)"/g, (_, raw: string) => {
+  const tokens = raw.replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&').split(',').map(canon).filter(Boolean);
+  for (const t of tokens) if (!known.has(t)) unknown.push(t);
+  return `data-focus="${JSON.stringify(tokens).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}"`;
+});
+// Packet paths: each hop must follow an edge (forwards, or backwards for a response).
+const hopEdge = new Map<string, { e: string; r: boolean }>();
+if (spec.kind === 'graph') {
+  const ids = edgeIds(spec.edges);
+  spec.edges.forEach((e, i) => {
+    if (!hopEdge.has(`${e.from}|${e.to}`)) hopEdge.set(`${e.from}|${e.to}`, { e: ids[i], r: false });
+  });
+  spec.edges.forEach((e, i) => {
+    if (!hopEdge.has(`${e.to}|${e.from}`)) hopEdge.set(`${e.to}|${e.from}`, { e: ids[i], r: true });
+  });
+}
+// Each step's packet path, checked against the step's state (the spec's tones,
+// plus the step's own `state` overrides).
+//   `a -> b -> c`      a request that goes out and comes back with 2xx (the reply is
+//                      automatic); `a -> b -> a` carries its own reply.
+//   `c:404`, `c:4xx`   the far end answers with a client error (amber reply).
+//   `c:503`, `c:5xx`   the far end answers with a server error (orange reply).
+//   `c:hang`           the request reaches c, which never answers.
+//   `a -x> b`          the request is dropped on that hop; nothing comes back.
+//   `a => b`           a one-way message (e.g. writing a file): it arrives, nothing comes back.
+// Lint (build error): a round trip that is answered (no -x>) must not cross a broken
+// (risk) edge or pass through a broken box; only its two ends may be broken.
+const nodeTone = new Map<string, string>(spec.kind === 'graph' ? spec.nodes.map((n) => [n.id, n.tone ?? 'neutral']) : []);
+const edgeTone = new Map<string, string>();
+if (spec.kind === 'graph') { const ids = edgeIds(spec.edges); spec.edges.forEach((e, i) => edgeTone.set(ids[i], e.tone ?? 'neutral')); }
+const unhtml = (v: string) => v.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&gt;/g, '>').replace(/&lt;/g, '<').replace(/&amp;/g, '&');
+const attr = (v: unknown) => JSON.stringify(v).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+const pathIssues: string[] = [];
+// Attribute by attribute: values may contain ">" (Astro does not escape it, e.g. `a -> b`).
+steps = steps.replace(/<li class="dg-step"((?:\s+[\w-]+(?:="[^"]*")?)*)\s*>/g, (tag: string, attrs: string) => {
+  const pathRaw = /data-path="([^"]*)"/.exec(attrs)?.[1];
+  const stateRaw = /data-state="([^"]*)"/.exec(attrs)?.[1];
+  const state: Record<string, Alt & { tone?: string; svg?: string }> = stateRaw ? JSON.parse(unhtml(stateRaw)) : {};
+  for (const sid of Object.keys(state)) if (!known.has(sid)) unknown.push(`state ${sid}`);
+  // Box text a step swaps in, pre-drawn and wrapped to the box (diagram-player puts it in place).
+  let restated = false;
+  for (const [sid, o] of Object.entries(state)) {
+    const nd = sceneNode.get(sid);
+    if (!nd || (o.label === undefined && o.detail === undefined && o.tag === undefined)) continue;
+    o.svg = nodeText(altNode(nd, o));
+    restated = true;
+  }
+  if (restated) tag = tag.replace(/data-state="[^"]*"/, `data-state="${attr(state)}"`);
+  const sayRaw = /data-say="([^"]*)"/.exec(attrs)?.[1];
+  for (const sid of Object.keys(sayRaw ? JSON.parse(unhtml(sayRaw)) : {})) if (!known.has(sid)) unknown.push(`narration ${sid}`);
+  if (!pathRaw) return tag;
+  const raw = unhtml(pathRaw);
+  if (spec.kind !== 'graph') { unknown.push(`path "${raw}" (paths need a graph)`); return tag.replace(/ data-path="[^"]*"/, ''); }
+  const parts = raw.split(/\s*(-x>|->|=>)\s*/);
+  const names = parts.filter((_, i) => i % 2 === 0).map((x) => x.trim()).filter(Boolean);
+  const arrows = parts.filter((_, i) => i % 2 === 1);
+  if (names.length < 2) unknown.push(`path "${raw}" needs at least two nodes`);
+  const status = names.map((n) => /:(\S+)$/.exec(n)?.[1]);
+  for (const st of status) if (st && !/^([245]\d\d|[245]xx|hang)$/.test(st)) unknown.push(`status "${st}" in path "${raw}" (use 2xx/4xx/5xx, a code like 503, or hang)`);
+  const bare = names.map((n) => n.replace(/:\S+$/, ''));
+  const hops = bare.slice(1).map((to, i) => {
+    const from = bare[i];
+    const h = hopEdge.get(`${from}|${to}`);
+    if (!h) unknown.push(`hop ${from} -> ${to} (no edge between them)`);
+    return {
+      from, to, e: h?.e ?? '', r: h?.r ?? false,
+      ...(arrows[i] === '-x>' ? { x: true } : {}),
+      ...(arrows[i] === '=>' ? { o: true } : {}),
+      ...(status[i + 1] ? { s: status[i + 1] } : {}),
+    };
+  });
+  const toneOf = (id: string, base: Map<string, string>) => state[id]?.tone ?? base.get(id) ?? 'neutral';
+  if (!hops.some((h) => h.x || h.o || h.s === 'hang')) {
+    // The far end of the trip: the turn of an explicit round trip, else the last node.
+    const half = hops.length / 2;
+    const mirrored = hops.length % 2 === 0 && hops.slice(half).every((h, i) => h.from === hops[half - 1 - i].to && h.to === hops[half - 1 - i].from);
+    const out = mirrored ? hops.slice(0, half) : hops;
+    const through = out.slice(0, -1).map((h) => h.to);
+    for (const h of out) if (toneOf(h.e, edgeTone) === 'risk') pathIssues.push(`path "${raw}": answered, but crosses broken edge ${h.e} (mark where it fails: \`:hang\`, \`:5xx\`, or \`-x>\`)`);
+    for (const n of through) if (toneOf(n, nodeTone) === 'risk') pathIssues.push(`path "${raw}": answered, but passes through broken box ${n} (mark where it fails, or give the step a state)`);
+  }
+  return tag.replace(/data-path="[^"]*"/, `data-path="${attr(hops)}"`);
+});
+if (pathIssues.length) report(`Diagram lint${title ? ` "${title}"` : ''}: packet paths must match what the diagram shows:\n${pathIssues.map((x) => `  ${x}`).join('\n')}`);
+if (unknown.length) throw new Error(`Diagram${title ? ` "${title}"` : ''}: unknown focus ${unknown.map((u) => `"${u}"`).join(', ')}.\nKnown ids: ${[...known].join(' | ')}`);
+// Sequence diagrams: no player. Each step's text (build-time HTML from the page) goes in a
+// <template> for the first message it focuses (else the first participant); clicking that
+// message shows it (diagram-player.ts setupHover).
+let infoTemplates: { id: string; html: string }[] = [];
+if (spec.kind === 'sequence' && steps.trim()) {
+  const msgIds = new Set(messageIds(spec));
+  const byId = new Map<string, string>();
+  for (const item of steps.split('<li class="dg-step"').slice(1)) {
+    const focus: string[] = JSON.parse(unhtml(/data-focus="([^"]*)"/.exec(item)?.[1] ?? '[]'));
+    const id = focus.find((f) => msgIds.has(f)) ?? focus[0];
+    if (!id) throw new Error(`Diagram${title ? ` "${title}"` : ''}: a sequence step needs a focus (the message its text explains)`);
+    const html = item.slice(item.indexOf('>') + 1).replace(/<\/li>\s*$/, '');
+    byId.set(id, (byId.get(id) ?? '') + html);
+  }
+  infoTemplates = [...byId].map(([id, html]) => ({ id, html }));
+  steps = '';
+}
+const hasSteps = /class="dg-step/.test(steps);
+// Tall sequence diagrams scroll inside a fixed-height frame with the participant
+// cards pinned on top (scripts/diagram-seq.ts); the player keeps the active message in view.
+const SEQ_TALL = 680;
+const seqTall = !zoom && spec.kind === 'sequence' && scene.height > SEQ_TALL;
+const seqHead = seqTall ? Math.ceil(Math.max(...scene.nodes.map((n) => n.y + n.h)) + 8) : 0;
+---
+
+<figure class="dg" id={id} data-player={player ? undefined : 'external'} data-mode={mode} data-interval={interval} data-steps={hasSteps ? '' : undefined} tabindex="0">
+  {title && <div class="dg-title">{title}</div>}
+  <div class="dg-frame">
+    {zoom ? (
+      <div class="dg-zoomwrap">
+        <div class="dg-viewport" data-zoom tabindex="0" aria-label="Diagram: drag to pan, Ctrl or ⌘ + wheel to zoom">
+          <div class="dg-fit" style={`--w: ${scene.width}; --h: ${scene.height}`} set:html={svg} />
+        </div>
+        <div class="dg-zoom" role="group" aria-label="Zoom">
+          <button type="button" data-zoom-act="out" aria-label="Zoom out" title="Zoom out (−)">−</button>
+          <span class="dg-zoom-val" aria-live="polite">100%</span>
+          <button type="button" data-zoom-act="in" aria-label="Zoom in" title="Zoom in (+)">+</button>
+          <button type="button" data-zoom-act="fit" aria-label="Fit to width" title="Fit (0)">Fit</button>
+          <button type="button" data-zoom-act="one" aria-label="Actual size" title="Actual size (1)">1:1</button>
+        </div>
+      </div>
+    ) : seqTall ? (
+      <div class="dg-seqvp" data-seq-head={seqHead} tabindex="0" aria-label="Sequence: scroll to see later messages; the participants stay on top">
+        <div class="dg-scroll"><div class="dg-fit" style={`--w: ${scene.width}; --h: ${scene.height}`} set:html={svg} /></div>
+      </div>
+    ) : (
+      <div class="dg-scroll"><div class="dg-fit" style={`--w: ${scene.width}; --h: ${scene.height}`} set:html={svg} /></div>
+    )}
+    {spec.legend?.length && (
+      <ul class="dg-legend" role="list" aria-label="Colour key">
+        {spec.legend.map((l) => <li class={`tone-${l.tone}`}><span class="dg-sw" aria-hidden="true"></span>{l.label}</li>)}
+      </ul>
+    )}
+    <div class="dg-bar">
+      {hasSteps && player && (
+        <Fragment>
+          <button type="button" class="dg-btn" data-act="prev" data-sound-click="popDown" aria-label="Previous step" title="Previous (←)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+          </button>
+          <button type="button" class="dg-btn dg-play" data-act="play" data-sound-click="popUpOn" aria-label="Play" title="Play (space)">
+            <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
+            <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h4v14H7zM13 5h4v14h-4z" /></svg>
+          </button>
+          <button type="button" class="dg-btn" data-act="next" data-sound-click="popDown" aria-label="Next step" title="Next (→)">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+          </button>
+          <button type="button" class="dg-btn dg-reset" data-act="reset" data-sound-click="popDown" aria-label="Reset to the whole diagram" title="Reset (r)" disabled>
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 12a8 8 0 1 0 2.3-5.6" /><path d="M4 4v4h4" /></svg>
+          </button>
+          <span class="dg-count" aria-live="polite"></span>
+          <div class="dg-dots" role="group" aria-label="Steps"></div>
+        </Fragment>
+      )}
+      {/* Narration: visual subtitles (aria-hidden, they change every hop); screen readers get one summary per step in .dg-sr. */}
+      {hasSteps && player && <span class="dg-status" aria-hidden="true"></span>}
+      {hasSteps && player && <span class="dg-sr" role="status" aria-live="polite"></span>}
+      {/* Animation speed, shared by every diagram (diagram-player.ts); resets on reload. */}
+      {hasSteps && player && (
+        <div class="dg-speed" role="group" aria-label="Animation speed">
+          <button type="button" data-act="slower" aria-label="Slower" title="Slower">−</button>
+          <button type="button" class="dg-speed-val" data-act="speed-reset" aria-label="Speed 1×; reset to 1×" title="Reset speed">1×</button>
+          <button type="button" data-act="faster" aria-label="Faster" title="Faster">+</button>
+        </div>
+      )}
+      <button type="button" class="dg-btn dg-expand" data-act="expand" data-sound-click="popUpOn" aria-label="Expand" title="Expand (f)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+      </button>
+    </div>
+    {hasSteps && player && <div class="dg-caption" aria-live="polite" hidden></div>}
+  </div>
+  {hasSteps && <ol class="dg-steps" set:html={steps} />}
+  {infoTemplates.map((t) => <template data-dg-info={t.id} set:html={t.html} />)}
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<script>
+  import { initDiagrams } from '@/scripts/diagram-player';
+  import { initZoom } from '@/scripts/diagram-zoom';
+  import { initSeqScroll } from '@/scripts/diagram-seq';
+  initDiagrams();
+  initZoom();
+  initSeqScroll();
+</script>

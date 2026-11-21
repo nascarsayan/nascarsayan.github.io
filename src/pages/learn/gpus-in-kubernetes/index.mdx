@@ -1,0 +1,156 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPUs in Kubernetes (overview)"
+short: "GPUs in Kubernetes"
+description: "From a physical GPU to a running Pod: who installs what, how DRA allocates a specific GPU, how the node turns that into device files through CDI, how the Pod gets its RDMA network, and what it all looks like on one GPU node. The map of the track, with a symptom-to-layer table."
+updated: "2026-11-10"
+track: kubernetes
+hub: true
+order: 9
+requires: [k8s-gpu-allocation, dra-objects, cdi-device-injection, dra-on-the-node, gpu-operators, gpu-pod-networking]
+eyebrow: "Learn · Overview"
+---
+import LearnGraph from '@/components/learn/LearnGraph.astro';
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Callout from '@/components/content/Callout.astro';
+import Yaml from '../k8s-gpu-allocation/_Yaml.astro';
+import chain from './_chain.diagram';
+import layers from './_layers.diagram';
+import * as c from '../k8s-gpu-allocation/_sample';
+import { symptoms } from './_symptoms';
+
+<LearnGraph hub="gpus-in-kubernetes" />
+
+## The idea
+
+Kubernetes has no idea what a GPU is. Four separate pieces of software teach it, and each one fails in its own way:
+
+- an **installer** (the AMD GPU operator) that puts the GPU agents on every GPU node;
+- a **booking system** (DRA) that knows every GPU by name and gives each Pod one, like a theatre seat;
+- a **fitter** (the DRA driver on the node, plus CDI in containerd) that makes the booked GPU's device files appear inside the container, and nothing else;
+- a **cabler** (Multus plus the RDMA device plugin) that gives the Pod a second network interface and RDMA access to a 400G NIC.
+
+If you know Kubernetes well, the short version is: **GPUs are allocated like PersistentVolumeClaims (DRA), injected like CSI volumes (a kubelet plugin over gRPC, then CDI), installed by an operator, and networked through Multus plus a device plugin.** The analogy with storage breaks in one place: there is no external provisioner. The scheduler itself picks the device.
+
+<Kpis items={[
+  { label: "GPU nodes in the sample cluster", value: c.gpuNodes.length },
+  { label: 'MI355X GPUs', value: c.totalGpus, detail: '8 per node, whole GPUs' },
+  { label: 'GPUs in claims', value: c.usedGpus, detail: 'at snapshot time', tone: 'primary' },
+  { label: 'Operator DaemonSets', value: 3, detail: 'DRA driver, labeller, exporter' },
+]} />
+
+## One Pod through every layer
+
+The whole track follows one sample Pod, `…-p4x7k` of `llm-prefill` on `gpu-node-1`. Press play to see who talks to whom, then step through what each layer leaves behind.
+
+<Diagram spec={chain} title="From a physical GPU to a running prefill container" caption="Illustrative names from the sample cluster node gpu-node-1." autoSteps />
+
+<Walkthrough title="What each layer leaves behind for Pod …-p4x7k" caption="Illustrative example objects and files from the sample cluster, trimmed. Each step links to the page that explains it.">
+  <WStep title="1 · Install: the operator renders DaemonSets">
+    <Yaml lang="text" code={"\u0024 kubectl -n kube-amd-gpu get ds\nNAME                       DESIRED  READY  NODE SELECTOR\ndefault-dra-driver         4        4      example.com/gpu-vendor=AMD\ndefault-metrics-exporter   4        4      example.com/gpu-vendor=AMD\ndefault-node-labeller      4        4      example.com/gpu-vendor=AMD"} />
+    The cluster's deployment tooling installs the AMD GPU operator chart. The controller reads `DeviceConfig kube-amd-gpu/default` and renders three DaemonSets on the 4 AMD GPU nodes. Here the host driver (`amdgpu-dkms`) is installed with the OS image, not by the operator. → [GPU operators](/learn/gpu-operators/)
+  </WStep>
+  <WStep title="2 · Publish: 8 GPUs in a ResourceSlice">
+    <Yaml lang="text" code={c.gpus.map((g) => ("" + (g.name.padEnd(11)) + " pciBusID " + (g.pci) + "  numaNode " + (g.numa) + "  memory 294912Mi")).join('\n')} />
+    The DRA driver finds the GPUs in sysfs, registers `gpu.amd.com` with the kubelet and publishes one ResourceSlice for the node, with typed attributes and capacities. → [DRA objects](/learn/dra-objects/)
+  </WStep>
+  <WStep title="3 · Allocate: the claim names gpu-5-132">
+    <Yaml code={c.claimStatusYaml} />
+    The resourceclaim controller stamps a claim out of the Deployment's template; the scheduler picks a free device and writes `(gpu.amd.com, gpu-node-1, gpu-5-132)` into it before binding the Pod. → [GPU allocation](/learn/k8s-gpu-allocation/)
+  </WStep>
+  <WStep title="4 · Prepare: the driver answers with CDI IDs">
+    <Yaml lang="json" code={c.driverCheckpoint} />
+    The kubelet calls `NodePrepareResources` on the driver's socket. The driver writes a CDI spec and its checkpoint, and returns two CDI device IDs. → [DRA on the node](/learn/dra-on-the-node/)
+  </WStep>
+  <WStep title="5 · Inject: three device nodes in the container">
+    <Yaml lang="text" code={c.containerView} />
+    containerd resolves the CDI IDs against `/var/run/cdi` and adds exactly these device nodes, with a device cgroup that allows only them. → [CDI](/learn/cdi-device-injection/)
+  </WStep>
+  <WStep title="6 · Network: eth0 for Kubernetes, net1 for data">
+    <Yaml lang="json" code={JSON.stringify(c.networkStatus, null, 2)} />
+    Multus calls Cilium for `eth0`, then adds `net1` from the NAD `default/multus-data-net-5` (macvlan on a 400G NIC, address from whereabouts). The RDMA shared device plugin hands over the RDMA device files for `rdma/hca_devices: 1`. GPU `gpu-5-132` (GPU index 4) shares a PCIe switch with NIC <code>{c.nicFor(4).netdev}</code> (<code>{c.nicFor(4).rdma}</code>), both on NUMA node 1. → [Pod networking](/learn/gpu-pod-networking/)
+  </WStep>
+  <WStep title={("7 · Ready: " + (c.loadText) + " later")}>
+    <Yaml lang="text" code={c.timeline.map((e) => ("" + (e.clock.padEnd(4)) + " " + (e.t.padEnd(12)) + "  " + (e.what))).join('\n')} />
+    Kubernetes was done within seconds of the Pod's creation; the rest until Ready is model loading. A claim in state `allocated,reserved` says the GPU is assigned, not that the model is loaded.
+  </WStep>
+</Walkthrough>
+
+## Where it breaks
+
+Pick a symptom: the diagram shows where the flow stops, and the first thing to check.
+
+<Explorer id="symptom" options={[{ key: 's', label: 'Symptom', default: 'prepare', values: symptoms.map((x) => ({ value: x.id, label: x.label })) }]} variants={symptoms.map((x) => ({ match: { s: x.id }, id: ("sym-" + (x.id)) }))}>
+  {symptoms.map((x) => (
+    <Variant id={("sym-" + (x.id))}>
+      <Diagram spec={layers} title={("" + (x.label) + ": the " + (x.layer) + " layer")}>
+        <Step path={x.path} state={x.state}>{x.check}</Step>
+      </Diagram>
+      <Callout tone="risk" title={("Layer: " + (x.layer))}>{x.check} See <a href={x.page}>{x.pageLabel}</a>.</Callout>
+    </Variant>
+  ))}
+</Explorer>
+
+## Which object answers which question
+
+| Question | Look at |
+| --- | --- |
+| Which GPUs exist on a node, and what are they? | `kubectl get resourceslices --field-selector spec.nodeName=<node> -o yaml` |
+| Which Pod holds which GPU? | `kubectl get resourceclaims -A -o wide`, then `status.allocation.devices.results` |
+| Is the driver registered on the node? | `/var/lib/kubelet/plugins_registry/gpu.amd.com-reg.sock`; a ResourceSlice exists for the node |
+| Did the device files reach the container? | `/var/run/cdi/*_<claim-uid>.yaml` on the node; the driver's `checkpoint.json` |
+| Which operands are on and at which version? | `kubectl -n kube-amd-gpu get deviceconfig default -o yaml`, `get ds -o wide` |
+| Does the Pod have its data network? | Pod annotation `k8s.v1.cni.cncf.io/network-status` |
+| Is the node fit for new GPU Pods? | `Ready` condition, no `NoSchedule` taints, a ResourceSlice with all GPUs |
+
+## All symptoms at a glance
+
+| Symptom | Layer | First check | Page |
+| --- | --- | --- | --- |
+| Pod `Pending`, event mentions claims or CEL | allocation | free devices on allowed nodes; selector typos | [DRA objects](/learn/dra-objects/) |
+| Pod `Pending`, `Insufficient rdma/hca_devices` | device plugin | RDMA plugin registered on the node | [Pod networking](/learn/gpu-pod-networking/) |
+| Pod `ContainerCreating`, prepare errors | node DRA | DRA driver Pod on that node; kubelet log | [DRA on the node](/learn/dra-on-the-node/) |
+| `CreateContainerError`, unresolvable CDI device | CDI | spec file in `/var/run/cdi` | [CDI](/learn/cdi-device-injection/) |
+| `FailedCreatePodSandBox` | Multus / whereabouts | NAD exists; per-node CNI file; IP pool | [Pod networking](/learn/gpu-pod-networking/) |
+| Node has no ResourceSlice | operator / driver | DRA driver Pod stuck in `Init` (amdgpu not loaded) | [GPU operators](/learn/gpu-operators/) |
+| GPU Pods stuck `Terminating` | node DRA | driver down, cannot unprepare | [DRA on the node](/learn/dra-on-the-node/) |
+| Node tainted not-ready | host readiness | which check failed in the node's conditions | `kubectl describe node` |
+
+## Quick commands
+
+```shell
+kubectl get nodes -l example.com/gpu-node -o wide
+kubectl -n kube-amd-gpu get deviceconfig,ds,deploy
+kubectl get deviceclass,resourceslices
+kubectl get resourceclaims -A -o wide
+kubectl get pods -A -o wide --field-selector spec.nodeName=<gpu-node>
+kubectl get net-attach-def -A
+```
+
+## The sample cluster's choices, in one place
+
+- **DRA only**, device plugin off; whole GPUs, SPX/NPS1, one claim per Pod.
+- **Host driver and ROCm in the OS image** (`amdgpu-dkms`), not from the operator (`driver.enable: false`); NFD, KMM, partitioning, remediation and test runner off.
+- **Readiness** through node conditions and a `NoSchedule` taint while a check fails, with DRA driver registration as one of the checks.
+- **Data network** through file-backed Multus NADs, one per NIC; RDMA through one shared resource that exposes all 8 NICs.
+
+## AMD versus NVIDIA
+
+| | AMD (MI355X nodes) | NVIDIA |
+| --- | --- | --- |
+| Operator resource | `DeviceConfig` | `ClusterPolicy` (device plugin) or `GPUCluster` (DRA), never both |
+| DRA driver name | `gpu.amd.com` | `gpu.nvidia.com`, `mig.nvidia.com`, plus `ComputeDomain` for NVLink across trays |
+| Kernel driver | host RPM (DKMS), or the operator's driver install | host or driver container |
+| CDI content | 3 device nodes, 2 env vars | device nodes, host driver libraries, hooks |
+| RDMA stack | in-box `mlx5`, RDMA shared device plugin | Network Operator (`NicClusterPolicy`) |
+
+## Further reading
+
+- [Kubernetes DRA](https://kubernetes.io/docs/concepts/resource-management/dynamic-resource-allocation/) · [DRA good practices for cluster admins](https://kubernetes.io/docs/concepts/cluster-administration/dra/)
+- [AMD GPU Operator](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/) · [NVIDIA GPU Operator](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/index.html)

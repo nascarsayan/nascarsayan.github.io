@@ -1,0 +1,68 @@
+---
+/**
+ * Page-local view of one allocator snapshot from _example.ts: the physical
+ * block pool (tokens, reference count, hash) and each request's block table.
+ */
+import type { Snap } from './_example';
+interface Props { snap: Snap; bs: number }
+const { snap, bs } = Astro.props;
+const changed = new Set(snap.changed);
+const owners = (id: number) => snap.tables.filter((t) => t.blocks.includes(id)).map((t) => t.id);
+const colour: Record<string, string> = { A: '#6366f1', B: '#14b8a6', C: '#f97316', D: '#ec4899' };
+---
+
+<figure class="pool">
+  <div class="pool-grid">
+    {snap.blocks.map((b) => (
+      <div class:list={['blk', `s-${b.state}`, { 'is-new': changed.has(b.id) }]}>
+        <div class="blk-head"><span class="blk-id">#{b.id}</span><span class="blk-own">{owners(b.id).map((o) => <span class="own" style={`background:${colour[o]}`}>{o}</span>)}</span></div>
+        <div class="blk-toks">
+          {Array.from({ length: bs }, (_, i) => <span class:list={['tok', { empty: !b.tokens[i] }]}>{b.tokens[i] ?? '·'}</span>)}
+        </div>
+        <div class="blk-foot">
+          <span>{b.state === 'free' ? 'free' : `ref ${b.ref}`}</span>
+          <span class="hash">{b.hash ?? (b.state === 'free' ? '' : 'no hash')}</span>
+        </div>
+      </div>
+    ))}
+  </div>
+  <div class="pool-tables">
+    <span class="pt-title">Block tables (logical → physical)</span>
+    {snap.tables.length === 0 && <span class="pt-none">none yet</span>}
+    {snap.tables.map((t) => (
+      <div class="pt-row">
+        <span class="own" style={`background:${colour[t.id]}`}>{t.id}</span>
+        {t.blocks.map((p, i) => <span class="pt-cell"><small>{i}</small>→ #{p}</span>)}
+        <span class="pt-n">{t.tokens} tokens</span>
+      </div>
+    ))}
+    <span class="pt-free">Free list: {snap.free.length ? snap.free.join(', ') : 'empty'}</span>
+  </div>
+</figure>
+
+<style>
+  .pool { display: flex; flex-wrap: wrap; gap: 14px 22px; margin: 6px 0 10px; }
+  .pool-grid { display: grid; grid-template-columns: repeat(4, 150px); gap: 8px; }
+  .blk { padding: 6px 7px; border-radius: 8px; border: 1px solid var(--color-gray-300); background: var(--color-background); font-size: 0.75rem; transition: opacity 150ms; }
+  .blk.s-free { border-style: dashed; opacity: 0.55; }
+  .blk.s-used { background: color-mix(in srgb, #3b82f6 10%, transparent); border-color: color-mix(in srgb, #3b82f6 45%, transparent); }
+  .blk.s-cached { background: color-mix(in srgb, #eab308 14%, transparent); border-color: color-mix(in srgb, #eab308 60%, transparent); }
+  .blk.is-new { outline: 2px solid var(--color-primary); outline-offset: 1px; opacity: 1; }
+  .blk-head, .blk-foot { display: flex; justify-content: space-between; align-items: center; gap: 4px; }
+  .blk-id { font-weight: 700; }
+  .blk-own { display: inline-flex; gap: 2px; }
+  .own { display: inline-block; min-width: 16px; padding: 0 4px; border-radius: 4px; color: #fff; font-size: 0.6875rem; font-weight: 700; text-align: center; }
+  .blk-toks { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px; margin: 4px 0; }
+  .tok { padding: 1px 3px; border-radius: 3px; background: var(--color-gray-100); font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.6875rem; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+  .tok.empty { color: var(--color-gray-500); text-align: center; background: transparent; border: 1px dotted var(--color-gray-300); }
+  .blk-foot { color: var(--color-gray-700); font-variant-numeric: tabular-nums; }
+  .hash { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.6875rem; color: var(--color-muted); }
+  .pool-tables { display: flex; flex-direction: column; gap: 6px; min-width: 230px; font-size: 0.8125rem; }
+  .pt-title { font-weight: 700; font-size: 0.8125rem; }
+  .pt-none, .pt-free { color: var(--color-muted); font-size: 0.75rem; }
+  .pt-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+  .pt-cell { padding: 1px 6px; border-radius: 4px; background: var(--color-cloud-100); font-variant-numeric: tabular-nums; }
+  .pt-cell small { color: var(--color-muted); margin-right: 2px; }
+  .pt-n { color: var(--color-muted); font-size: 0.75rem; }
+  @media (max-width: 720px) { .pool-grid { grid-template-columns: repeat(2, 150px); } }
+</style>

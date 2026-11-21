@@ -1,0 +1,152 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Decode: generating tokens"
+short: "Decode"
+description: "Decode makes one token per sequence per step, re-reading weights and the whole KV cache each time. One user's decode stepped token by token with the bytes read per step, why decode is bandwidth-bound, a batch-size calculator for gpt-oss-120b and Llama 3.3 70B on an MI355X, and the levers that make decode faster."
+updated: "2026-11-10"
+track: inference
+order: 6
+requires: [attention-and-kv-cache, kv-cache-management, mixture-of-experts]
+eyebrow: "Learn · LLM inference"
+links:
+  - { label: "PagedAttention paper", href: "https://arxiv.org/abs/2309.06180" }
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Bars from '../prefill-phase/_Bars.astro';
+import DecodeCalc from './_DecodeCalc.astro';
+import loop from './_loop.diagram';
+import * as ex from './_example';
+
+After [prefill](/learn/prefill-phase/) has filled the KV cache, **decode** produces the answer one token at a time. Each decode step runs the full model on **one new token per sequence**.
+
+## The idea
+
+Picture a clerk who must answer a letter one word at a time, and who works in a huge archive. For every single word they write, they must walk past **every shelf of the rulebook** (the model's weights) and reread **their own notes on this letter** (the KV cache). Only then may they write the next word.
+
+- **The walk is the cost, not the thinking.** Deciding the word takes a moment; walking the archive takes ages. On a GPU, decode spends its time reading bytes from memory, not doing arithmetic. That is what *bandwidth-bound* means.
+- **Words come strictly one after another.** Word 5 depends on word 4, so a 500-word reply needs 500 walks.
+- **Batching is many clerks walking together.** If 64 clerks each need the next word of their own letter, one walk past the rulebook serves all 64. That is why servers batch users.
+
+Where the analogy breaks: each clerk's **notes are private**, so 64 clerks still read 64 sets of notes, and the notes grow by one line per word. And in a mixture-of-experts model like gpt-oss, different clerks need **different shelves** (experts), so a bigger group walks more of the archive. Both effects show up in the numbers below.
+
+<Diagram spec={loop} title="The decode loop" caption="Each step reads the weights it needs and the whole KV cache of every sequence in the batch, and writes one new K and V per layer per sequence.">
+  <Step path="tok => model" narration={{ model: 'One token per sequence enters all 36 layers' }}>The token chosen in the last step is embedded and enters the first layer.</Step>
+  <Step path="kv => model" narration={{ model: ("Reads all " + (ex.n(ex.PROMPT)) + "+ cached K and V rows, every layer") }}>In every layer, attention reads the K and V of **every** earlier token of this sequence from the cache. With a 4k context that is about {ex.MiB(ex.kvRead(ex.PROMPT))} per step.</Step>
+  <Step path="model => kv" narration={{ kv: ("+1 row: " + (ex.KiB(ex.kvWrite)) + " written") }}>The new token's own K and V are appended: one row per layer, {ex.KiB(ex.kvWrite)} in all.</Step>
+  <Step path="model => samp => user" narration={{ samp: 'Logits over 201,088 tokens → pick one', user: 'One token streamed' }}>The last layer's output becomes logits, the sampler picks one token, and it streams to the user.</Step>
+  <Step path="samp => tok" narration={{ tok: 'Feeds the next step' }}>That token is the input of the next step. Repeat until an end token, a stop string or `max_tokens`.</Step>
+</Diagram>
+
+## Worked example: one user, token by token
+
+One user on one MI355X, a {ex.n(ex.PROMPT)}-token prompt already prefilled. The answer tokens are illustrative; every byte count is computed from the gpt-oss-120b config and checkpoint formats. Times are the **bandwidth ceiling** at ~8 TB/s (spec sheet, approximate): real steps are slower.
+
+<Walkthrough title="Decoding “The pod is pending” after a 4,085-token prompt" caption="Bytes per step: attention weights 1.92 GB and unembedding 1.16 GB (16-bit, all read), 4 experts per layer × 36 layers (MXFP4), plus this sequence's KV cache (window-aware, 16-bit).">
+  {ex.steps.map((s) => (
+    <WStep title={("Step " + (s.t) + " · produce “" + (s.token.trim()) + "” (context " + (ex.n(s.ctx)) + ")")}>
+      <Bars max={6.4} unit="GB" ticks={[0, 1, 2, 3, 4, 5, 6]} rows={ex.byteBar(s, s.t === 1 ? 'w' : s.t === 2 ? 'e' : s.t === 3 ? 'kv' : undefined)} />
+      <Kpis items={[
+        { label: 'Bytes read', value: ex.GB(s.bytes), tone: 'primary' },
+        { label: 'KV read', value: ex.MiB(s.kv), detail: ("" + (ex.n(s.ctx)) + " tokens") },
+        { label: 'KV written', value: ex.KiB(ex.kvWrite), detail: '1 row × 36 layers' },
+        { label: 'Step time ≥', value: ex.ms(s.time), detail: 'bytes ÷ 8 TB/s' },
+        { label: 'FLOPs per byte', value: s.intensity.toFixed(1), detail: 'ridge ≈ 625', tone: 'warn' },
+      ]} />
+      {s.t === 1 && <p>The first decode step. The model's shared weights (violet: attention in every layer, indigo: the unembedding) are read in full: <strong>{ex.GB(s.attn + s.unemb)}</strong> for a single token. The arithmetic is only about {(s.flops / 1e9).toFixed(1)} GFLOP, which the GPU could do in {(s.flops / ex.PEAK * 1e6).toFixed(1)} µs. Reading the bytes takes at least {ex.ms(s.time)}.</p>}
+      {s.t === 2 && <p>The router picks 4 of 128 experts in each layer, so only {ex.GB(s.experts)} of the ~61 GB of experts are read (orange). Another token may pick 4 different experts per layer; the bytes stay the same for one user.</p>}
+      {s.t === 3 && <p>The KV part (blue) is this user's private history: {ex.n(s.ctx)} tokens in 18 full-attention layers plus 128 tokens in 18 sliding-window layers. It grows by one token per step, so it creeps up: {ex.MiB(ex.steps[0].kv)} at step 1, {ex.MiB(s.kv)} now.</p>}
+      {s.t === 4 && <p>Four tokens, four complete trips through memory: {ex.GB(ex.steps.reduce((a, x) => a + x.bytes, 0))} read to produce four words. Speed per user is capped at about {ex.n(1 / s.time)} tokens/s, and compute use is {((s.flops / s.time) / ex.PEAK * 100).toFixed(2)}% of peak.</p>}
+    </WStep>
+  ))}
+  {ex.later.map((s) => (
+    <WStep title={("Step " + (ex.n(s.t)) + " · context " + (ex.n(s.ctx)))}>
+      <Bars max={6.4} unit="GB" ticks={[0, 1, 2, 3, 4, 5, 6]} rows={ex.byteBar(s, 'kv')} />
+      <Kpis items={[
+        { label: 'Bytes read', value: ex.GB(s.bytes), tone: 'primary' },
+        { label: 'KV read', value: ex.MiB(s.kv), detail: ("" + (ex.n(s.ctx)) + " tokens") },
+        { label: 'Step time ≥', value: ex.ms(s.time) },
+        { label: 'Per user ≤', value: ("" + (ex.n(1 / s.time)) + " tok/s") },
+      ]} />
+      {s.t === 1000 ? <p>A thousand tokens in, the context is {ex.n(s.ctx)} and the KV read has grown to {ex.MiB(s.kv)}. Weights still dominate for one user.</p> : <p>At a 32k context the KV alone is {ex.GB(s.kv)} per step, about {Math.round(s.kv / s.bytes * 100)}% of the bytes. Long conversations decode measurably slower, even with nothing else on the GPU.</p>}
+    </WStep>
+  ))}
+</Walkthrough>
+
+## The latency metrics
+
+- **Inter-token latency (ITL)**: time between two consecutive output tokens of one request, about one decode step. Also called time per output token (TPOT; vLLM exports `vllm:inter_token_latency_seconds` and `vllm:request_time_per_output_token_seconds`).
+- **Output speed per user** = 1 / ITL. 20 ms ITL is 50 tokens/s.
+- **End-to-end latency** $$\approx \text{TTFT} + (\text{output tokens} - 1) \times \text{ITL}$$. A 500-token answer at 20 ms ITL spends 10 s in decode alone. For long answers and reasoning models, decode dominates.
+- **Throughput** = tokens per second summed over all users of a server; it sets cost per token.
+
+## Why decode is bandwidth-bound
+
+Per step and sequence, from the example: about 9 GFLOP against about {ex.GB(ex.step(4096).bytes)} read. That is under **2 FLOPs per byte**. An MI355X does about 5 PFLOP/s (dense FP8) but reads about 8 TB/s (spec sheet, approximate): its ridge point is about 625 FLOPs per byte ([roofline](/learn/gpu-memory-hierarchy/)). Decode sits 300× below it, so:
+
+$$
+\text{step time} \;\ge\; \frac{\text{bytes read per step}}{\text{memory bandwidth}}
+$$
+
+For one user on one MI355X that is about {ex.ms(ex.step(4096).time)}, a ceiling of about {ex.n(1 / ex.step(4096).time)} tokens/s. Real servers reach well below this (kernel launch gaps, imperfect bandwidth use, sampling, scheduling), but the ratio is what matters: the step costs bytes, not FLOPs. For a **dense** model it is worse: Llama 3.3 70B in 16-bit reads all 141 GB every step, at least 17.8 ms, so at most about 56 tokens/s per user on one MI355X, however idle its compute units are.
+
+## Batching: sharing the weight read
+
+If 64 users each need a decode step, the server runs them **together**: one pass over the weights, each weight matrix multiplied by a 64-row matrix instead of a single vector. The weight bytes are paid once for all 64. Two things are **not** shared:
+
+- **KV cache**: each sequence attends over its own history, so KV bytes grow linearly with the batch.
+- **Experts** (MoE): different users route to different experts, so more experts are read as the batch grows ([Mixture of experts](/learn/mixture-of-experts/#what-routing-does-to-batching)).
+
+Try it. Move the batch from 1 to 64 with gpt-oss-120b, then switch to Llama 3.3 70B:
+
+<DecodeCalc />
+
+The same model in a table, every user at a 4k context:
+
+<table>
+  <thead><tr><th>Batch</th><th>gpt-oss experts read per layer</th><th>gpt-oss bytes per step</th><th>Step time</th><th>Total tokens/s</th><th>Per user</th><th>Llama 3.3 70B step time</th><th>Llama per user</th></tr></thead>
+  <tbody>{ex.BATCHES.map((r) => { const l = ex.llama.find((x) => x.B === r.B); return <tr><td>{r.B}</td><td>~{Math.round(r.ex)}</td><td>{ex.GB(r.bytes)}</td><td>{ex.ms(r.time)}</td><td>~{ex.n(r.B / r.time)}</td><td>~{ex.n(1 / r.time)}</td><td>{l ? ex.ms(l.time) : 'KV does not fit'}</td><td>{l ? ("~" + (ex.n(1 / l.time))) : '—'}</td></tr>; })}</tbody>
+</table>
+
+<Bars title="Bytes per step for gpt-oss-120b, by batch (GB)" max={110} unit="GB" ticks={[0, 20, 40, 60, 80, 100]} rows={ex.BATCHES.map((r) => ({ label: ("batch " + (r.B)), segs: [
+  { from: 0, to: (r.attn + r.unemb) / 1e9, tone: 'violet', text: '' },
+  { from: (r.attn + r.unemb) / 1e9, to: (r.attn + r.unemb + r.experts) / 1e9, tone: 'peach', text: r.B > 1 ? ("experts " + (ex.GB(r.experts))) : '' },
+  { from: (r.attn + r.unemb + r.experts) / 1e9, to: r.bytes / 1e9, tone: 'note', text: r.B >= 64 ? ("KV " + (ex.GB(r.kv))) : '' },
+] }))} note="Violet: shared weights. Orange: experts woken by the batch. Blue: every user's own KV." />
+
+The pattern: **batching multiplies throughput but lowers per-user speed**. For the dense model, 64× the users costs only 1.6× the step time: batching is almost free. For MoE, batching first wakes up more experts, so per-user speed drops faster. At large batches the **KV reads** take over, and KV memory also caps how many sequences fit at all. Even at batch 256, compute use stays at a few percent of peak: on HBM GPUs decode is a bandwidth problem at every batch size people actually run.
+
+## Continuous batching
+
+Requests start and finish at different times. **Static batching** waits for a full batch and runs it until the longest answer ends, leaving finished slots idle. **Continuous batching** (iteration-level scheduling, from the Orca system) re-forms the batch at **every step**: finished sequences leave, new ones join after their prefill. vLLM, SGLang and TensorRT-LLM all do this. Details: [Batching and scheduling](/learn/batching-and-scheduling/).
+
+## What makes decode faster
+
+Decode speed per user is bounded by **$$\text{bandwidth} / \text{bytes per token}$$**. On an MI355X the weights live in HBM at about 8 TB/s, so the example step above takes at least {ex.ms(ex.steps[0].time)} ({ex.GB(ex.steps[0].bytes)} read). Every lever attacks one side of that fraction:
+
+- **Fewer bytes per token.** Quantize weights (MXFP4 experts) and the KV cache (FP8); MoE already reads only the chosen experts.
+- **More tokens per byte read.** Batch users so each weight read serves many sequences; [speculative decoding](/learn/speculative-decoding/) verifies several tokens of one user per weight read.
+- **More bandwidth.** Newer HBM generations, splitting the model across GPUs so each reads only its share, or accelerators that keep weights in on-chip SRAM.
+- **No interference.** Running decode on its own pool, apart from prefill, keeps long prompts from stretching decode steps ([Batching and scheduling](/learn/batching-and-scheduling/)).
+
+<Callout tone="note" title="How this shows up when operating a server">
+- User-visible output speed (ITL) depends on the decode side; TTFT depends mostly on prefill and queueing. When users report "slow", ask which one.
+- A decode-heavy GPU shows high memory-bandwidth use with low compute use. That is the expected pattern, not a fault.
+</Callout>
+
+## Common misconceptions
+
+- **"More FLOPs make decode faster."** Not below the ridge point. Bandwidth (or keeping weights on-chip) does.
+- **"Batching is free throughput."** It costs per-user speed and KV memory; for MoE models it also costs extra weight reads.
+- **"Decode only reads the new token."** It reads the KV of every earlier token every step, so it slows as the context grows.
+- **"Tokens per second" is one number.** Per-user speed and server throughput can move in opposite directions.
+
+## Further reading
+
+- [Efficient memory management for LLM serving with PagedAttention](https://arxiv.org/abs/2309.06180) (batching limited by KV memory)
+- [vLLM metrics](https://docs.vllm.ai/en/latest/usage/metrics.html) (ITL and TPOT histograms)
+- [Roofline model](https://en.wikipedia.org/wiki/Roofline_model)

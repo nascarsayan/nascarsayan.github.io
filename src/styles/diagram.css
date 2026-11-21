@@ -1,0 +1,426 @@
+/*
+ * <Diagram>: our own SVG (src/diagrams/render.ts), sized to fit the screen,
+ * plus step states and the player. Tone classes set --f (fill), --s (stroke)
+ * and --x (text); everything else follows the site tokens.
+ */
+/* Off-screen diagrams skip layout and paint until scrolled near (a page can hold
+   twenty diagrams and thousands of SVG nodes). The browser remembers each size. */
+.dg:not(.is-expanded) { content-visibility: auto; contain-intrinsic-size: auto 640px; }
+.dg {
+  --dg-ink: var(--color-text);
+  --dg-muted: var(--color-gray-700);
+  --dg-edge: rgb(128 136 156);
+  --dg-accent: var(--color-primary);
+  --dg-bg: var(--color-background);
+  --dg-ok: rgb(0 138 57);   /* a reply came back (2xx) */
+  --dg-c4: rgb(196 132 0);  /* a client error came back (4xx) */
+  --dg-c5: rgb(222 84 10);  /* a server error came back (5xx) */
+  --dg-msg: rgb(56 120 210); /* a one-way message */
+  --dg-bad: rgb(194 5 68);  /* the connection broke */
+  margin: 32px 0;
+}
+html[data-color-mode='dark'] .dg { --dg-edge: rgb(120 132 148); --dg-ok: rgb(0 204 136); --dg-bad: rgb(250 56 121); --dg-c4: rgb(255 200 80); --dg-c5: rgb(255 146 72); --dg-msg: rgb(120 170 240); }
+.dg .tone-neutral { --f: rgb(252 252 255); --s: rgb(166 170 204); --x: rgb(38 42 72); }
+.dg .tone-primary { --f: rgb(237 240 255); --s: rgb(66 66 250); --x: rgb(44 11 142); }
+.dg .tone-good { --f: rgb(236 248 242); --s: rgb(0 138 57); --x: rgb(0 92 38); }
+.dg .tone-warn { --f: rgb(253 246 214); --s: rgb(204 112 0); --x: rgb(120 66 0); }
+.dg .tone-risk { --f: rgb(253 235 241); --s: rgb(194 5 68); --x: rgb(140 0 50); }
+.dg .tone-note { --f: rgb(234 243 253); --s: rgb(56 120 210); --x: rgb(25 60 120); }
+.dg .tone-muted { --f: rgb(246 246 252); --s: rgb(206 208 228); --x: rgb(88 92 124); }
+.dg .tone-violet { --f: rgb(245 239 254); --s: rgb(136 57 239); --x: rgb(90 31 168); }
+.dg .tone-teal { --f: rgb(236 246 247); --s: rgb(23 146 153); --x: rgb(11 95 99); }
+.dg .tone-sky { --f: rgb(235 246 251); --s: rgb(10 143 208); --x: rgb(6 87 127); }
+.dg .tone-pink { --f: rgb(252 240 247); --s: rgb(212 72 159); --x: rgb(138 31 99); }
+.dg .tone-peach { --f: rgb(253 242 235); --s: rgb(226 88 10); --x: rgb(143 54 4); }
+.dg .tone-lime { --f: rgb(242 247 236); --s: rgb(90 158 18); --x: rgb(56 102 9); }
+html[data-color-mode='dark'] .dg .tone-neutral { --f: rgb(30 32 48); --s: rgb(98 102 138); --x: rgb(220 224 244); }
+html[data-color-mode='dark'] .dg .tone-primary { --f: rgb(30 36 72); --s: rgb(128 159 255); --x: rgb(205 215 255); }
+html[data-color-mode='dark'] .dg .tone-good { --f: rgb(17 40 33); --s: rgb(0 204 136); --x: rgb(160 235 205); }
+html[data-color-mode='dark'] .dg .tone-warn { --f: rgb(45 36 18); --s: rgb(255 190 80); --x: rgb(255 222 160); }
+html[data-color-mode='dark'] .dg .tone-risk { --f: rgb(48 18 28); --s: rgb(250 56 121); --x: rgb(255 175 205); }
+html[data-color-mode='dark'] .dg .tone-note { --f: rgb(23 36 54); --s: rgb(120 170 240); --x: rgb(185 212 250); }
+html[data-color-mode='dark'] .dg .tone-muted { --f: rgb(22 24 36); --s: rgb(58 62 86); --x: rgb(160 166 196); }
+html[data-color-mode='dark'] .dg .tone-violet { --f: rgb(46 45 65); --s: rgb(203 166 247); --x: rgb(219 193 249); }
+html[data-color-mode='dark'] .dg .tone-teal { --f: rgb(38 53 61); --s: rgb(148 226 213); --x: rgb(180 235 226); }
+html[data-color-mode='dark'] .dg .tone-sky { --f: rgb(37 52 64); --s: rgb(137 220 235); --x: rgb(172 230 241); }
+html[data-color-mode='dark'] .dg .tone-pink { --f: rgb(51 49 63); --s: rgb(245 194 231); --x: rgb(248 212 238); }
+html[data-color-mode='dark'] .dg .tone-peach { --f: rgb(52 47 51); --s: rgb(250 179 135); --x: rgb(252 202 171); }
+html[data-color-mode='dark'] .dg .tone-lime { --f: rgb(43 53 51); --s: rgb(181 226 138); --x: rgb(203 235 173); }
+
+/* Frame: the drawing keeps its proportions and never exceeds the column or
+   the viewport height (no scrolling). --w / --h are the natural size in px. */
+.dg-frame {
+  position: relative;
+  padding: 20px;
+  border: 1px solid var(--color-gray-100);
+  border-radius: 14px;
+  background: var(--dg-bg);
+}
+.dg-fit {
+  margin-inline: auto;
+  aspect-ratio: var(--w) / var(--h);
+  width: min(100%, calc(var(--w) * 1px), calc((100vh - 180px) * var(--w) / var(--h)));
+  /* Readable floor: never below 0.8 scale (box labels >= 11px); wider ones scroll sideways in .dg-scroll. */
+  min-width: min(calc(var(--w) * 0.8px), calc(var(--w) * 1px));
+}
+.dg-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
+.dg-scene { display: block; width: 100%; height: 100%; overflow: visible; }
+.dg-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); font-size: 0.9375rem; }
+/* The figure's description: body-size text in the text colour (it carries meaning, not decoration). */
+.dg > figcaption { margin-top: 10px; font-size: 1rem; line-height: 1.55; color: var(--color-text); }
+/* Colour key (spec.legend): inside the frame, under the drawing, swatches drawn like the boxes. */
+.dg-legend { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 4px 16px 10px; padding: 10px 14px; border-radius: 10px; background: var(--color-gray-100); list-style: none; font-size: 0.95rem; line-height: 1.4; color: var(--color-text); }
+.dg-legend li { display: inline-flex; align-items: center; gap: 8px; margin: 0; padding: 0; }
+.dg-legend li::before, .dg-legend li::marker { content: none; }
+.dg-legend .dg-sw { flex: none; width: 20px; height: 16px; border-radius: 5px; background: var(--f, var(--color-background)); border: 2px solid var(--s, var(--color-gray-300)); }
+.dg:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 4px; border-radius: 14px; }
+
+/* Drawing. */
+.dg-scene text { font-family: var(--font-family); }
+.dg-label { font-size: 14px; font-weight: 600; fill: var(--x); }
+.dg-detail { font-size: 12px; font-weight: 400; fill: var(--dg-muted); }
+.dg-tag { font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; fill: var(--s); }
+.dg-shape { fill: var(--f); stroke: var(--s); stroke-width: 1.4; }
+.dg-node .dg-shape { filter: drop-shadow(0 1px 1.5px rgb(30 40 70 / 0.10)); }
+html[data-color-mode='dark'] .dg-node .dg-shape { filter: none; }
+.dg-shape-line { fill: none; stroke: var(--s); stroke-width: 1.4; }
+.dg-external { fill: transparent; stroke-dasharray: 5 4; }
+.dg-group-box { fill: var(--f); stroke: var(--s); stroke-width: 1; }
+.dg-group-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; fill: var(--x); }
+.dg-line { fill: none; stroke: var(--dg-edge); stroke-width: 1.6; }
+/* Sequence messages keep their tone. Graph edges stay neutral at rest: green
+   and red only show what happens (a reply came back, a connection broke). */
+.dg-scene[data-diagram='sequence'] .dg-edge:not(.tone-neutral) .dg-line { stroke: var(--s); }
+.dg-scene[data-diagram='sequence'] .dg-edge:not(.tone-neutral) .dg-arrow { fill: var(--s); }
+.dg-edge.is-dashed .dg-line { stroke-dasharray: 6 5; }
+.dg-arrow { fill: var(--dg-edge); }
+/* A box with info: an "i" button on its top-left corner, always shown. */
+.dg-info-btn { cursor: pointer; outline: none; }
+.dg .dg-info-btn:focus, .dg .dg-info-btn:focus-visible { outline: none; }
+.dg-info-bg { fill: var(--dg-bg); stroke: var(--s); stroke-width: 1.6; transition: transform 140ms ease; transform-box: fill-box; transform-origin: center; }
+.dg-info-dot { fill: var(--s); }
+.dg-info-ic { fill: none; stroke: var(--s); stroke-width: 2; stroke-linecap: round; }
+.dg-info-btn:hover .dg-info-bg { transform: scale(1.15); }
+.dg-info-btn:focus-visible .dg-info-bg { stroke-width: 3; }
+.dg-node.is-info-open .dg-info-bg { fill: var(--s); }
+.dg-node.is-info-open .dg-info-dot { fill: var(--dg-bg); }
+.dg-node.is-info-open .dg-info-ic { stroke: var(--dg-bg); }
+.dg-hit { fill: none; stroke: transparent; stroke-width: 12; }
+.dg-edge-label-bg { fill: var(--dg-bg); stroke: var(--color-gray-100); }
+.dg-edge-label { font-size: 11.5px; font-weight: 500; fill: var(--dg-muted); }
+.dg-lifeline line { stroke: var(--color-gray-300); stroke-width: 1.2; stroke-dasharray: 4 5; }
+.dg-packet { fill: var(--dg-accent); opacity: 0; pointer-events: none; }
+
+/* Lit-up elements glow in their own colour: each node/edge overrides the
+   accent with its tone's stroke. Neutral and muted tones are pale, so they
+   light up as a deeper shade of their own grey. */
+.dg :is(.dg-node, .dg-edge, .dg-elabel) { --dg-accent: var(--s); }
+.dg :is(.dg-edge, .dg-elabel).tone-neutral { --dg-accent: var(--dg-edge); }
+.dg :is(.dg-node, .dg-edge, .dg-elabel):is(.tone-neutral, .tone-muted) { --dg-accent: color-mix(in srgb, var(--s) 45%, var(--dg-ink)); }
+.dg-scene[data-diagram='graph'] :is(.dg-edge, .dg-elabel) { --dg-accent: color-mix(in srgb, var(--dg-edge) 40%, var(--dg-ink)); }
+
+/* Step states. Nothing is hidden: the active edges brighten and carry a moving
+   dot, their endpoints light up, focused boxes glow. Build mode only ghosts
+   parts that have not been reached yet. */
+.dg [data-el] { transition: opacity 350ms var(--ease-out); }
+.dg .dg-shape, .dg .dg-line { transition: stroke 250ms, stroke-width 250ms, fill 250ms; }
+.dg[data-active][data-mode='build'] [data-el]:not(.is-seen, .is-focus, .is-end, .is-context) { opacity: 0.28; }
+.dg[data-active] .dg-node:is(.is-focus, .is-end) .dg-shape { stroke: var(--dg-accent); stroke-width: 2.4; fill: color-mix(in srgb, var(--dg-accent) 9%, var(--f)); }
+.dg[data-active] .dg-node.is-end:not(.is-focus) .dg-shape { animation: dg-glow 700ms var(--ease-soft) forwards; }
+.dg[data-active] .dg-edge.is-focus .dg-line { stroke: var(--dg-accent); stroke-width: 2.8; }
+.dg[data-active] .dg-edge.is-focus .dg-arrow { fill: var(--dg-accent); }
+.dg[data-active] .dg-edge.is-focus .dg-packet { opacity: 1; }
+.dg[data-active] .dg-elabel.is-focus .dg-edge-label-bg { stroke: var(--dg-accent); }
+.dg[data-active] .dg-elabel.is-focus .dg-edge-label { fill: var(--dg-ink); }
+/* Broken (red) connections carry no packets. Lit outside a packet path, they
+   show the failure: connected (green), a flicker, then red. */
+.dg .dg-edge.tone-risk .dg-packet { display: none; }
+/* A broken (risk) edge lit outside a packet path is simply red: nothing flows over it. */
+.dg[data-active]:not(.is-pathing) .dg-scene[data-diagram='graph'] .dg-edge.tone-risk.is-focus .dg-line { stroke: var(--dg-bad); stroke-width: 2.8; }
+.dg[data-active]:not(.is-pathing) .dg-scene[data-diagram='graph'] .dg-edge.tone-risk.is-focus .dg-arrow { fill: var(--dg-bad); }
+.dg[data-active]:not(.is-pathing) .dg-scene[data-diagram='graph'] .dg-edge.tone-good.is-focus .dg-line { stroke: var(--dg-ok); }
+.dg[data-active]:not(.is-pathing) .dg-scene[data-diagram='graph'] .dg-edge.tone-good.is-focus .dg-arrow { fill: var(--dg-ok); }
+
+/* Round trips (packet paths, see diagram-player.ts). */
+/* Sent a request, waiting for the reply: outlined, with typing dots. */
+.dg[data-active] .dg-node.is-wait:not(.is-end) .dg-shape { stroke: var(--dg-accent); stroke-width: 2.2; }
+.dg-wait rect { fill: var(--dg-bg); stroke: var(--dg-accent); stroke-width: 1.4; }
+.dg-wait circle { fill: var(--dg-accent); animation: dg-typing calc(1100ms / var(--dg-speed, 1)) ease-in-out infinite; }
+@keyframes dg-typing { 0%, 60%, 100% { opacity: 0.25; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-2px); } }
+.dg-wait { animation: dg-fade 200ms ease; }
+/* The reply got back to this node: a green tick, drawn once. */
+.dg-done rect { fill: var(--dg-bg); stroke: var(--dg-ok); stroke-width: 1.4; }
+.dg-done path { fill: none; stroke: var(--dg-ok); stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; stroke-dasharray: 1; stroke-dashoffset: 1; animation: dg-tick calc(380ms / var(--dg-speed, 1)) ease-out calc(60ms / var(--dg-speed, 1)) forwards; }
+@keyframes dg-tick { to { stroke-dashoffset: 0; } }
+/* An error came back: the status code in an amber (4xx) / orange (5xx) pill. */
+.dg-code { animation: dg-badge-pop 320ms var(--ease-spring) both; }
+.dg-code rect { fill: var(--dg-bg); stroke-width: 1.4; }
+.dg-code text { font-size: 9px; font-weight: 700; letter-spacing: 0.02em; }
+.dg-code.is-c4 rect { stroke: var(--dg-c4); } .dg-code.is-c4 text { fill: var(--dg-c4); }
+.dg-code.is-c5 rect { stroke: var(--dg-c5); } .dg-code.is-c5 text { fill: var(--dg-c5); }
+.dg-code.is-c5 { animation: dg-badge-pop 320ms var(--ease-spring) both, dg-shake 360ms ease 320ms; }
+@keyframes dg-badge-pop { from { opacity: 0; scale: 0.6; } }
+@keyframes dg-shake { 25% { translate: -2px 0; } 50% { translate: 2px 0; } 75% { translate: -1px 0; } }
+/* Waiting with no answer coming (a hang or a drop): the dots turn red and slow down. */
+.dg-wait.is-stale rect { stroke: var(--dg-bad); }
+.dg-wait.is-stale circle { fill: var(--dg-bad); animation-duration: calc(2600ms / var(--dg-speed, 1)); }
+/* The node that never answers: a red clock whose hand keeps turning; its outline pulses. */
+.dg-hang rect { fill: var(--dg-bg); stroke: var(--dg-bad); stroke-width: 1.4; }
+.dg-hang circle, .dg-hang path { fill: none; stroke: var(--dg-bad); stroke-width: 1.4; stroke-linecap: round; }
+.dg-hang .hand { transform-box: fill-box; transform-origin: 50% 100%; animation: dg-spin calc(2400ms / var(--dg-speed, 1)) linear infinite; }
+@keyframes dg-spin { to { rotate: 360deg; } }
+/* Timed out: the hand stops, the clock face gives way to a cross. */
+.dg-hang.is-out .hand { animation: none; }
+.dg-hang.is-out circle, .dg-hang.is-out path:not(.cross) { opacity: 0; transition: opacity 200ms; }
+.dg-hang .cross { stroke-dasharray: 1; stroke-dashoffset: 1; animation: dg-tick 260ms ease-out forwards; }
+.dg[data-active] .dg-node.is-hung .dg-shape { stroke: var(--dg-bad); stroke-width: 2.4; animation: dg-hung 1600ms ease-in-out infinite; }
+@keyframes dg-hung { 50% { stroke-width: 1.4; } }
+/* The reply came back over this hop. */
+.dg[data-active] .dg-edge.is-ok .dg-line { stroke: var(--dg-ok); stroke-width: 2.8; }
+.dg[data-active] .dg-edge.is-ok .dg-arrow { fill: var(--dg-ok); }
+.dg[data-active] .dg-elabel.is-ok .dg-edge-label-bg { stroke: var(--dg-ok); }
+/* Arrows fill in behind the dot (diagram-player.ts adds a .dg-trail per hop):
+   red on the way out (sent, no reply yet), green on the way back (answered).
+   A broken hop's red stops where the request was lost. */
+.dg-trail { fill: none; stroke-width: 2.8; stroke-linecap: round; pointer-events: none; }
+.dg-trail.is-out { stroke: var(--dg-bad); }
+.dg-trail.is-back { stroke: var(--dg-ok); }
+.dg-trail.is-c4 { stroke: var(--dg-c4); }
+.dg-trail.is-c5 { stroke: var(--dg-c5); }
+.dg-trail.is-msg { stroke: var(--dg-msg); }
+/* On a dashed edge the trail is an exact copy of the dashed line (same dash
+   phase), revealed by a mask path that grows with the dot. */
+.dg-trail.is-dashed { stroke-dasharray: 6 5; stroke-linecap: butt; }
+.dg-reveal { fill: none; stroke: #fff; stroke-width: 14; stroke-linecap: butt; stroke-linejoin: round; }
+.dg[data-active] .dg-edge.is-sent:not(.is-acked, .is-acked-c4, .is-acked-c5) .dg-arrow { fill: var(--dg-bad); }
+.dg[data-active] .dg-edge.is-acked .dg-arrow { fill: var(--dg-ok); }
+.dg[data-active] .dg-edge.is-acked-c4 .dg-arrow { fill: var(--dg-c4); }
+.dg[data-active] .dg-edge.is-acked-c5 .dg-arrow { fill: var(--dg-c5); }
+.dg[data-active] .dg-edge.is-delivered .dg-arrow { fill: var(--dg-msg); }
+.dg[data-active] .dg-edge.is-c4 .dg-line { stroke: var(--dg-c4); stroke-width: 2.8; }
+.dg[data-active] .dg-edge.is-c5 .dg-line { stroke: var(--dg-c5); stroke-width: 2.8; }
+.dg[data-active] .dg-elabel.is-broken .dg-edge-label-bg { stroke: var(--dg-bad); }
+.dg.is-rewinding .dg-trail { opacity: 0; transition: opacity 300ms; }
+
+.dg-runner.is-reply { --dg-accent: var(--dg-ok) !important; }
+.dg-runner.is-reply.is-c4 { --dg-accent: var(--dg-c4) !important; }
+.dg-runner.is-reply.is-c5 { --dg-accent: var(--dg-c5) !important; }
+.dg-runner.is-msg { --dg-accent: var(--dg-msg) !important; }
+.dg-runner.is-lost { fill: var(--dg-bad); stroke: color-mix(in srgb, var(--dg-bad) 35%, transparent); animation: dg-lost calc(1200ms / var(--dg-speed, 1)) ease forwards; }
+@keyframes dg-lost { 0% { opacity: 1; stroke-width: 9; } 30% { opacity: 1; stroke-width: 18; } 100% { opacity: 0; stroke-width: 2; } }
+/* Dark mode: a brighter core so the dot stands out from the lines. */
+html[data-color-mode='dark'] .dg-runner { fill: color-mix(in srgb, var(--dg-accent) 65%, #fff); stroke: color-mix(in srgb, var(--dg-accent) 50%, transparent); }
+/* Rewind before a replay: the lit run dims away, then starts again. */
+.dg.is-rewinding :is(.dg-overlay, .dg-runner) { opacity: 0 !important; transition: opacity 300ms; }
+.dg.is-rewinding :is(.dg-node, .dg-edge, .dg-elabel):is(.is-ok, .is-c4, .is-c5, .is-end, .is-wait, .is-broken, .is-hung) { opacity: 0.5; }
+@media (prefers-reduced-motion: reduce) { .dg .dg-packet { display: none; } }
+/* Path steps: one runner dot travels the hops in order; looping dots are off. */
+.dg.is-pathing .dg-packet { display: none; }
+.dg-runner { fill: var(--dg-accent); stroke: color-mix(in srgb, var(--dg-accent) 42%, transparent); stroke-width: 9; paint-order: stroke; transition: fill 200ms, stroke 200ms, opacity 200ms; opacity: 0; pointer-events: none; will-change: transform; }
+
+/* Intro: the first time a diagram enters the viewport (figure.dg.is-in, see
+   reveal.ts) groups fade, nodes pop in reading order, edges draw themselves.
+   `backwards` fill only: once done, step states own opacity again. */
+@keyframes dg-pop { 0% { opacity: 0; transform: scale(0.82); } 65% { opacity: 1; transform: scale(1.03); } 100% { opacity: 1; transform: none; } }
+@keyframes dg-fade { from { opacity: 0; } }
+@keyframes dg-draw { from { stroke-dasharray: calc(var(--len) * 1px) calc(var(--len) * 1px); stroke-dashoffset: calc(var(--len) * 1px); } to { stroke-dasharray: calc(var(--len) * 1px) calc(var(--len) * 1px); stroke-dashoffset: 0; } }
+html.js .dg:not(.is-in) :is(.dg-node, .dg-group, .dg-lifeline, .dg-edge, .dg-elabel, .dg-junction) { opacity: 0; }
+.dg.is-in .dg-group, .dg.is-in .dg-lifeline { animation: dg-fade 500ms var(--ease-soft) var(--d) backwards; }
+.dg.is-in .dg-node { transform-box: fill-box; transform-origin: center; animation: dg-pop 560ms var(--ease-spring) var(--d) backwards; }
+.dg.is-in .dg-edge .dg-line { animation: dg-draw 650ms var(--ease-soft) var(--d) backwards; }
+.dg.is-in .dg-edge .dg-arrow, .dg.is-in .dg-elabel { animation: dg-fade 300ms ease calc(var(--d) + 450ms) backwards; }
+@keyframes dg-glow {
+  0% { filter: drop-shadow(0 0 0 transparent); }
+  40% { filter: drop-shadow(0 0 12px color-mix(in srgb, var(--dg-accent) 70%, transparent)); }
+  100% { filter: drop-shadow(0 0 5px color-mix(in srgb, var(--dg-accent) 40%, transparent)); }
+}
+.dg[data-active] .dg-node.is-focus .dg-shape { animation: dg-glow 700ms var(--ease-soft) forwards; }
+@media (prefers-reduced-motion: reduce) {
+  .dg.is-in :is(.dg-group, .dg-lifeline, .dg-node, .dg-elabel), .dg.is-in .dg-edge *, .dg-wait circle { animation: none !important; }
+  .dg-done path { stroke-dashoffset: 0; }
+  .dg-code, .dg-hang .hand, .dg-node.is-hung .dg-shape { animation: none !important; }
+  html.js .dg:not(.is-in) :is(.dg-node, .dg-group, .dg-lifeline, .dg-edge, .dg-elabel, .dg-junction) { opacity: 1; }
+}
+
+/* Player (inside the frame). */
+.dg-reset[disabled] { opacity: 0.4; cursor: default; }
+.dg.has-player .dg-steps { display: none; }
+.dg-steps { margin-top: 12px; padding-left: 1.5em; font-size: 0.9375rem; }
+.dg-steps > li + li { margin-top: 6px; }
+.dg-step-title { display: block; }
+.dg-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 14px; }
+.dg-btn {
+  display: grid; place-content: center;
+  width: 34px; height: 34px;
+  border-radius: 999px;
+  border: 1px solid var(--color-gray-300);
+  background: var(--color-background);
+  color: var(--color-text);
+  transition: border-color 150ms, color 150ms, background 150ms;
+}
+.dg-btn:hover { border-color: var(--color-primary); color: var(--color-primary); }
+.dg-btn svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
+.dg-play svg { fill: currentColor; stroke: none; }
+.dg-play { background: var(--color-primary); border-color: var(--color-primary); color: var(--color-background); }
+.dg-play:hover { color: var(--color-background); filter: brightness(1.1); }
+.dg-play .i-pause, .dg.is-playing .dg-play .i-play { display: none; }
+.dg.is-playing .dg-play .i-pause { display: block; }
+.dg-count { min-width: 9ch; margin-left: 4px; font-size: 0.8125rem; color: var(--color-muted); font-variant-numeric: tabular-nums; }
+.dg-dots { display: flex; flex-wrap: wrap; gap: 6px; }
+.dg-dot { width: 10px; height: 10px; border-radius: 999px; background: var(--color-gray-300); transition: background 150ms, transform 200ms var(--spring-easing); }
+.dg-dot:hover { background: var(--color-gray-500); }
+.dg-dot[aria-current='true'] { background: var(--color-primary); transform: scale(1.3); }
+.dg-expand { margin-left: auto; }
+/* Speed control (− 1× +), shared by every diagram; sits before the expand button. */
+.dg-speed { display: inline-flex; align-items: center; margin-left: auto; border: 1px solid var(--color-gray-300); border-radius: 999px; overflow: hidden; }
+.dg-speed + .dg-expand { margin-left: 8px; }
+.dg-speed button { min-width: 30px; height: 30px; padding: 0 8px; background: var(--color-background); color: var(--color-text); font-size: 0.875rem; font-variant-numeric: tabular-nums; transition: color 150ms, background 150ms; }
+.dg-speed button:hover:not(:disabled) { color: var(--color-primary); background: var(--color-cloud-100); }
+.dg-speed button:disabled { opacity: 0.35; cursor: default; }
+.dg-speed .dg-speed-val { min-width: 44px; border-inline: 1px solid var(--color-gray-100); font-weight: var(--font-weight-medium); }
+/* Narration (subtitles) for the running step, right after the step dots. */
+.dg-status {
+  margin-left: 8px; max-width: min(56ch, 55%);
+  padding: 4px 12px; border-radius: 999px;
+  border: 1px solid var(--color-gray-100); background: var(--color-background);
+  font-size: 0.8125rem; color: var(--color-text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  opacity: 0; transition: opacity 250ms, border-color 200ms, color 200ms;
+}
+.dg-status:empty { display: none; }
+.dg-status.is-on { opacity: 1; }
+.dg-status.is-new { animation: dg-say 280ms var(--ease-out); }
+@keyframes dg-say { from { opacity: 0; translate: 0 6px; } }
+.dg-status.is-ok { color: var(--dg-ok); border-color: color-mix(in srgb, var(--dg-ok) 45%, transparent); }
+.dg-status.is-c4 { color: var(--dg-c4); border-color: color-mix(in srgb, var(--dg-c4) 45%, transparent); }
+.dg-status.is-c5 { color: var(--dg-c5); border-color: color-mix(in srgb, var(--dg-c5) 45%, transparent); }
+.dg-status.is-bad { color: var(--dg-bad); border-color: color-mix(in srgb, var(--dg-bad) 45%, transparent); }
+.dg-status.is-msg { color: var(--dg-msg); border-color: color-mix(in srgb, var(--dg-msg) 45%, transparent); }
+/* Important outcomes: large over the diagram, which blurs behind them. */
+.dg-fit { position: relative; }
+.dg-fit .dg-scene { transition: filter 300ms ease, opacity 300ms ease; }
+.dg-fit.is-outcome .dg-scene { filter: blur(3px); opacity: 0.4; }
+.dg-outcome {
+  position: absolute; inset: 0; display: grid; place-content: center; gap: 6px;
+  text-align: center; pointer-events: none; opacity: 0; transition: opacity 250ms ease;
+}
+.dg-outcome.is-on { opacity: 1; }
+.dg-outcome-big { font-size: clamp(1.6rem, 4.5vw, 3rem); font-weight: 700; letter-spacing: -0.01em; line-height: 1.1; }
+.dg-outcome-small { font-size: clamp(0.9rem, 1.6vw, 1.1rem); color: var(--color-text); }
+.dg-outcome.is-on .dg-outcome-big { animation: dg-outcome-in 420ms var(--ease-spring) both; }
+@keyframes dg-outcome-in { from { opacity: 0; scale: 0.85; } }
+.dg-outcome.is-ok .dg-outcome-big { color: var(--dg-ok); }
+.dg-outcome.is-c4 .dg-outcome-big { color: var(--dg-c4); }
+.dg-outcome.is-c5 .dg-outcome-big { color: var(--dg-c5); }
+.dg-outcome.is-bad .dg-outcome-big { color: var(--dg-bad); }
+@media (prefers-reduced-motion: reduce) { .dg-outcome.is-on .dg-outcome-big { animation: none; } }
+/* Screen-reader summary of the step (visually hidden). */
+.dg-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@media (prefers-reduced-motion: reduce) { .dg-status.is-new { animation: none; } }
+.dg-caption {
+  margin-top: 12px;
+  padding: 10px 14px;
+  border-left: 3px solid var(--color-primary);
+  background: var(--color-cloud-100);
+  border-radius: 0 var(--radius) var(--radius) 0;
+  font-size: 0.9375rem;
+  min-height: 2.6em;
+}
+html[data-color-mode='dark'] .dg-caption { background: var(--color-card-bg); }
+.dg-caption .dg-step-title { margin-bottom: 2px; }
+.dg-caption > :last-child { margin-bottom: 0; }
+
+/* Expanded: the figure fills the window, still fitted. */
+.dg.is-expanded { position: fixed; inset: 0; z-index: var(--z-overlay); margin: 0; padding: 8px 10px; overflow: auto; background: var(--color-background); }
+.dg.is-expanded .dg-title { margin-bottom: 4px; padding-inline: 6px; }
+.dg.is-expanded .dg-frame { border: 0; padding: 4px 6px 6px; }
+.dg.is-expanded .dg-bar { margin-top: 8px; }
+.dg.is-expanded .dg-caption { margin-top: 8px; }
+/* Full window: as big as fits, leaving room only for the title, bar and caption. */
+.dg.is-expanded .dg-fit { width: min(100%, calc(var(--w) * 2.4px), calc((100vh - 170px) * var(--w) / var(--h))); }
+html:has(.dg.is-expanded) { overflow: hidden; }
+
+/* Hover card for boxes with `info` (see setupHover in diagram-player.ts). */
+.dg-card {
+  position: absolute; z-index: 2;
+  padding: 12px 14px 13px;
+  border: 1px solid color-mix(in srgb, var(--s, var(--color-gray-300)) 40%, transparent);
+  border-top: 3px solid var(--s, var(--color-primary));
+  border-radius: 12px;
+  background: var(--color-background);
+  box-shadow: var(--shadow-elevation-medium);
+  font-size: 0.84rem; line-height: 1.45;
+  /* Takes the pointer so its text can be selected and copied (it stays open while hovered). */
+  cursor: auto; user-select: text;
+  opacity: 0; transform: translateY(4px);
+  transition: opacity 160ms ease, transform 220ms var(--ease-out);
+}
+.dg-card.is-on { opacity: 1; transform: none; }
+.dg-card-x {
+  float: right; margin: -4px -6px 4px 10px; padding: 2px 10px; border: 1px solid var(--color-gray-200); border-radius: 999px;
+  background: var(--color-background); color: var(--color-muted); font: inherit; font-size: 0.75rem; font-weight: 600; cursor: pointer;
+}
+.dg-card-x:hover, .dg-card-x:focus-visible { border-color: var(--s, var(--color-primary)); color: var(--color-text); }
+.dg-card-tag { margin-bottom: 2px; font-size: 0.68rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--s, var(--color-muted)); }
+.dg-card-title { font-size: 0.95rem; font-weight: 600; color: var(--x, var(--color-text)); }
+.dg-card-detail { margin-top: 1px; color: var(--color-muted); }
+.dg-card-info { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--color-gray-100); color: var(--color-text); }
+.dg-card-info p + p, .dg-card-info p + ul, .dg-card-info ul + p { margin-top: 6px; }
+.dg-card-info ul { margin: 4px 0 0; padding-left: 18px; list-style: disc; }
+.dg-card-info li + li { margin-top: 2px; }
+.dg-card-info code { padding: 0 4px; border-radius: 4px; font-family: var(--font-mono); font-size: 0.92em; background: var(--color-gray-100); }
+.dg-card-info a { color: var(--color-link); text-decoration: underline; text-decoration-color: var(--color-link-line); text-underline-offset: 2px; }
+/* A box held under the pointer for 2 s, drawn above everything. */
+
+/* Zoomable diagrams (<Diagram zoom>): scroll viewport, controls bottom right. */
+.dg-zoomwrap { position: relative; }
+/* No overscroll-behavior: contain here or on .dg-seqvp: a frame with nothing (left) to scroll
+   must hand the wheel to the page. Ctrl/⌘ + wheel is the only wheel the diagram keeps (zoom). */
+.dg-viewport { max-height: min(76vh, 960px); overflow: auto; cursor: grab; border-radius: 10px; background: var(--color-background); }
+.dg-viewport.is-panning { cursor: grabbing; user-select: none; }
+.dg-viewport .dg-fit { width: calc(var(--w) * var(--z, 1) * 1px); min-width: 0; max-width: none; margin: 0 auto; }
+.dg.is-expanded .dg-viewport { max-height: calc(100vh - 170px); }
+.dg.is-expanded .dg-viewport .dg-fit { width: calc(var(--w) * var(--z, 1) * 1px); min-width: 0; }
+.dg-zoom {
+  position: absolute; right: 12px; bottom: 12px; z-index: 2;
+  /* Same look as the player's speed control (.dg-speed): one outlined pill, no shadow. */
+  display: inline-flex; align-items: center; overflow: hidden;
+  border: 1px solid var(--color-gray-300); border-radius: 999px; background: var(--color-background);
+}
+.dg-zoom button { min-width: 30px; height: 30px; padding: 0 8px; background: var(--color-background); color: var(--color-text); font-size: 0.875rem; font-variant-numeric: tabular-nums; transition: color 150ms, background 150ms; }
+.dg-zoom button + button, .dg-zoom-val + button { border-left: 1px solid var(--color-gray-100); }
+.dg-zoom button:hover { color: var(--color-primary); background: var(--color-cloud-100); }
+.dg-zoom-val { min-width: 46px; height: 30px; display: inline-grid; place-content: center; border-inline: 1px solid var(--color-gray-100); font-size: 0.875rem; font-weight: var(--font-weight-medium); font-variant-numeric: tabular-nums; color: var(--color-text); }
+
+/* Tall sequence diagrams: fixed-height frame, participant cards pinned (scripts/diagram-seq.ts). */
+.dg-seqvp { position: relative; max-height: min(72vh, 760px); overflow-y: auto; border-radius: 10px; }
+.dg-seqvp:focus-visible { outline: 2px solid var(--color-primary); }
+.dg-seqhead { position: sticky; top: 0; z-index: 2; margin: 0 auto; aspect-ratio: var(--w) / var(--hh); background: var(--dg-bg); box-shadow: 0 6px 8px -8px rgb(0 0 0 / 0.25); }
+.dg-seqhead-svg { display: block; width: 100%; height: 100%; }
+.dg-seqvp .dg-scroll { margin-top: calc(-1 * var(--seq-head-px, 0px)); }
+/* Inside the frame the diagram fits the width only; height scrolls. */
+.dg-seqvp .dg-fit { width: min(100%, calc(var(--w) * 1px)); }
+.dg.is-expanded .dg-seqvp { max-height: calc(100vh - 170px); }
+
+/* Wires: `wires: 'nets'` colours each wire by its source box. Junction dots mark where wires
+   from one port split (connected); a hop (half circle in the line) marks a crossing (not connected). */
+.dg-scene[data-wires='nets'] .dg-edge:not(.tone-neutral) .dg-line { stroke: var(--s); }
+.dg-scene[data-wires='nets'] .dg-edge:not(.tone-neutral) .dg-arrow { fill: var(--s); }
+.dg-junction { fill: var(--dg-edge); stroke: var(--dg-bg); stroke-width: 1.2; transition: opacity 160ms; }
+.dg-scene[data-wires='nets'] .dg-junction:not(.tone-neutral) { fill: var(--s); }
+
+/* Tracing (diagram-player.ts): hovering or focusing a box lights its wires and the boxes at
+   their other ends; hovering a wire lights it and its two ends. Nothing else changes. */
+.dg.is-tracing .dg-scene .dg-edge.is-trace .dg-line { stroke-width: 2.8; }
+.dg.is-tracing .dg-scene .dg-edge.is-trace:is(.tone-neutral, .tone-muted) .dg-line,
+.dg.is-tracing .dg-scene:not([data-wires='nets']) .dg-edge.is-trace .dg-line { stroke: var(--color-primary); }
+.dg.is-tracing .dg-scene .dg-edge.is-trace:is(.tone-neutral, .tone-muted) .dg-arrow,
+.dg.is-tracing .dg-scene:not([data-wires='nets']) .dg-edge.is-trace .dg-arrow { fill: var(--color-primary); }
+.dg.is-tracing .dg-scene .dg-node.is-trace-end .dg-shape { stroke: var(--s); stroke-width: 2.2; }
+.dg .dg-edge { cursor: default; }
+
+/* Arrows with a card (info, or a sequence step's text): click to show. */
+.dg :is(.dg-edge, .dg-elabel):is([data-info], [data-has-info]) { cursor: help; }
+.dg .dg-edge:is([data-info], [data-has-info]) .dg-hit { pointer-events: stroke; }
+.dg-card-info a { color: var(--color-link); text-decoration: underline; text-decoration-color: var(--color-link-line); }
+.dg-card-info .dg-step-title { display: block; margin-bottom: 4px; font-weight: 600; }

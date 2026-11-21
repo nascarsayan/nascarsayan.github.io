@@ -1,0 +1,16 @@
+---
+/** A few lines of example terminal output inside a walkthrough step (stays inside the step box). */
+interface Props { lines: string[]; title?: string }
+const { lines, title } = Astro.props;
+---
+
+<figure class="lg">
+  {title && <figcaption>{title}</figcaption>}
+  <pre>{lines.join('\n')}</pre>
+</figure>
+
+<style>
+  .lg { margin: 10px 0; max-width: 100%; }
+  .lg figcaption { font-size: 0.75rem; color: var(--color-muted); margin-bottom: 2px; }
+  .lg pre { margin: 0; padding: 10px 12px; overflow-x: auto; border-radius: 8px; background: var(--code-bg); color: var(--code-fg); box-shadow: 0 0 0 1px var(--code-border); font-family: var(--font-family-mono, ui-monospace, monospace); font-size: 0.8125rem; line-height: 1.55; white-space: pre; }
+</style>

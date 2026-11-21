@@ -1,0 +1,28 @@
+---
+layout: ../../layouts/ArticleLayout.astro
+title: "Diagram page title"
+eyebrow: "Diagrams"
+description: "A walkthrough built around diagrams."
+updated: "2026-01-01"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import pipeline from './_pipeline.diagram';
+import handshake from './_handshake.diagram';
+
+One sentence on what the diagrams show. Use the player (or arrow keys) to step through.
+
+## The pipeline
+
+<Diagram spec={pipeline} title="Build and release" mode="build">
+  <Step focus="src, src -> build" title="Commit">A push starts the build.</Step>
+  <Step focus="build, build -> test, test" title="Check">The build runs, then the tests.</Step>
+  <Step path="test => publish => site" title="Release">One-way: the artifact is published and the site updates.</Step>
+  <Step path="test -> publish -> site:503" title="Failure">The same path when the site answers 503.</Step>
+</Diagram>
+
+## The conversation
+
+Sequence diagrams have no player: click a message to read its card.
+
+<Diagram spec={handshake} title="Login exchange" />

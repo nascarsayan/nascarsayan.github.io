@@ -1,0 +1,66 @@
+---
+/**
+ * A terminal window whose commands type themselves out when it scrolls into view.
+ *   <Terminal title="local" lines={[{ cmd: 'npm run build', out: '[build] Complete!' }]} />
+ * Without JavaScript (or with reduced motion) everything is shown at once.
+ */
+interface Line { cmd?: string; out?: string; prompt?: string }
+interface Props { title?: string; lines: Line[] }
+const { title, lines } = Astro.props;
+---
+
+<figure class="tty" data-terminal data-reveal>
+  <div class="bar" aria-hidden="true"><span></span><span></span><span></span>{title && <em>{title}</em>}</div>
+  <pre><code>{lines.map((l) => (
+    <span class="line">{l.cmd !== undefined && <span class="cmd"><span class="prompt">{l.prompt ?? '$'} </span><span class="typed" data-text={l.cmd}>{l.cmd}</span></span>}{l.out !== undefined && <span class="out">{l.out}</span>}</span>
+  ))}</code></pre>
+</figure>
+
+<style>
+  .tty { margin: 24px 0; border-radius: 12px; overflow: hidden; background: var(--code-bg); box-shadow: 0 0 0 1px var(--code-border), var(--shadow-elevation-medium); color: var(--code-fg); }
+  :global(html[data-color-mode='dark']) .tty { box-shadow: 0 0 0 1px rgb(69 77 84 / 0.6); }
+  .bar { display: flex; align-items: center; gap: 6px; padding: 10px 12px; background: var(--code-bar); }
+  .bar span { width: 11px; height: 11px; border-radius: 999px; background: rgb(255 95 86); }
+  .bar span:nth-child(2) { background: rgb(255 189 46); }
+  .bar span:nth-child(3) { background: rgb(39 201 63); }
+  .bar em { margin-left: 8px; font-style: normal; font-size: 0.75rem; color: var(--code-muted); }
+  pre { margin: 0; padding: 14px 16px; overflow-x: auto; font-family: var(--font-family-mono); font-size: 0.875rem; line-height: 1.6; }
+  .line { display: block; }
+  .cmd, .out { display: block; white-space: pre-wrap; }
+  .prompt { color: var(--code-prompt); user-select: none; }
+  .out { color: var(--code-muted); }
+  .typed.is-typing::after { content: '▋'; margin-left: 1px; color: var(--code-caret); animation: t-blink 1s steps(1) infinite; }
+  :global(html.js) .tty:not(.is-done) .out { opacity: 0; }
+  .tty .out.is-shown { opacity: 1; transition: opacity 250ms; }
+  @keyframes t-blink { 50% { opacity: 0; } }
+</style>
+
+<script>
+  const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  document.querySelectorAll<HTMLElement>('[data-terminal]').forEach((term) => {
+    if (term.dataset.ready) return;
+    term.dataset.ready = '1';
+    const lines = [...term.querySelectorAll<HTMLElement>('.line')];
+    if (reduced) { term.classList.add('is-done'); return; }
+    lines.forEach((l) => l.querySelectorAll<HTMLElement>('.typed').forEach((t) => (t.textContent = '')));
+    const run = async () => {
+      for (const l of lines) {
+        const t = l.querySelector<HTMLElement>('.typed');
+        if (t) {
+          t.classList.add('is-typing');
+          const text = t.dataset.text ?? '';
+          for (let i = 1; i <= text.length; i++) {
+            t.textContent = text.slice(0, i);
+            await new Promise((r) => setTimeout(r, 18 + Math.random() * 30));
+          }
+          await new Promise((r) => setTimeout(r, 250));
+          t.classList.remove('is-typing');
+        }
+        l.querySelector('.out')?.classList.add('is-shown');
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      term.classList.add('is-done');
+    };
+    new IntersectionObserver((es, o) => es.forEach((e) => { if (e.isIntersecting) { o.disconnect(); run(); } }), { rootMargin: '0px 0px -20% 0px' }).observe(term);
+  });
+</script>

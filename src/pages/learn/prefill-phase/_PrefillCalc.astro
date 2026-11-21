@@ -1,0 +1,96 @@
+---
+/**
+ * Prefill cost calculator. Same formula as _example.ts: linear FLOPs per new
+ * token plus causal attention over the context. Peak is MI355X dense FP8
+ * (spec sheet, approximate).
+ */
+const models = {
+  'gpt-oss-120b': { lin: 9e9, att: 4 * 64 * 64, full: 18, slide: 18, win: 128, kvFull: 18 * 2048, kvSlide: 18 * 2048, note: '9 GFLOP/token linear; 18 full + 18 sliding (128) layers, 64 query heads × 64; KV 36 KiB/token + 4.5 MiB window' },
+  'llama-3.3-70b': { lin: 140e9, att: 4 * 64 * 128, full: 80, slide: 0, win: 0, kvFull: 80 * 4096, kvSlide: 0, note: '~140 GFLOP/token linear; 80 full layers, 64 query heads × 128; KV 320 KiB/token' },
+};
+---
+
+<figure class="pfc" data-pfc={JSON.stringify(models)}>
+  <figcaption class="pfc-title">Prefill cost calculator</figcaption>
+  <div class="pfc-in">
+    <label>Model <select data-k="model">{Object.keys(models).map((m) => <option value={m}>{m}</option>)}</select></label>
+    <label>Prompt <input data-k="n" type="range" min="0" max="9" step="1" value="4" /> <output data-o="n"></output></label>
+    <label>Already in prefix cache <input data-k="hit" type="range" min="0" max="95" step="5" value="50" /> <output data-o="hit"></output></label>
+    <label>Token budget per step <select data-k="budget"><option value="2048">2,048</option><option value="8192" selected>8,192</option><option value="16384">16,384</option></select></label>
+    <label>Share of peak reached (MFU) <input data-k="mfu" type="range" min="5" max="60" step="5" value="15" /> <output data-o="mfu"></output></label>
+  </div>
+  <div class="pfc-out">
+    <div><span class="k">Tokens to compute</span><span class="v" data-o="u"></span></div>
+    <div><span class="k">Engine steps (chunks)</span><span class="v" data-o="steps"></span></div>
+    <div><span class="k">Linear FLOPs</span><span class="v" data-o="lin"></span></div>
+    <div><span class="k">Attention FLOPs</span><span class="v" data-o="att"></span></div>
+    <div><span class="k">Time at 100% of 5 PFLOP/s</span><span class="v" data-o="ideal"></span></div>
+    <div><span class="k">Time at chosen MFU</span><span class="v" data-o="real"></span></div>
+    <div><span class="k">KV to push (16-bit)</span><span class="v" data-o="kv"></span></div>
+  </div>
+  <div class="pfc-bar" aria-hidden="true"><span class="lin" data-o="barlin"></span><span class="att" data-o="baratt"></span></div>
+  <p class="pfc-note" data-o="msg"></p>
+  <p class="pfc-src" data-o="src"></p>
+</figure>
+
+<style>
+  .pfc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .pfc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .pfc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .pfc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .pfc-in select, .pfc-in input { accent-color: var(--color-primary); }
+  .pfc-in output { min-width: 60px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .pfc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .pfc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .pfc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .pfc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .pfc-bar { display: flex; height: 18px; margin-top: 14px; border-radius: 999px; overflow: hidden; background: var(--color-gray-100); }
+  .pfc-bar .lin { background: #94a3b8; }
+  .pfc-bar .att { background: #ec4899; }
+  .pfc-note { margin-top: 6px; font-size: 0.875rem; }
+  .pfc-src { margin-top: 2px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const N = [256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+  const PEAK = 5e15;
+  const fl = (v: number) => (v >= 1e15 ? `${(v / 1e15).toFixed(2)} PFLOP` : `${(v / 1e12).toFixed(1)} TFLOP`);
+  const tm = (s: number) => (s >= 1 ? `${s.toFixed(2)} s` : `${(s * 1000).toFixed(1)} ms`);
+  const sz = (b: number) => (b >= 2 ** 30 ? `${(b / 2 ** 30).toFixed(2)} GiB` : `${(b / 2 ** 20).toFixed(0)} MiB`);
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-pfc]')) {
+    const models = JSON.parse(fig.dataset.pfc!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const out = (k: string) => $<HTMLElement>(`[data-o=${k}]`);
+    const update = () => {
+      const name = $<HTMLSelectElement>('[data-k=model]').value, m = models[name];
+      const n = N[Number($<HTMLInputElement>('[data-k=n]').value)];
+      const share = Number($<HTMLInputElement>('[data-k=hit]').value) / 100;
+      const budget = Number($<HTMLSelectElement>('[data-k=budget]').value);
+      const mfu = Number($<HTMLInputElement>('[data-k=mfu]').value) / 100;
+      // Hits come in whole 128-token blocks, and the last prompt token is always computed.
+      const c = Math.min(Math.floor((n * share) / 128) * 128, Math.floor((n - 1) / 128) * 128);
+      const u = n - c;
+      const tri = (p: number) => (p * (p + 1)) / 2;
+      const sl = (p: number) => (p <= m.win ? tri(p) : tri(m.win) + (p - m.win) * m.win);
+      const lin = m.lin * u;
+      const att = m.att * (m.full * (tri(n) - tri(c)) + (m.slide ? m.slide * (sl(n) - sl(c)) : 0));
+      const tot = lin + att;
+      out('n').textContent = `${n.toLocaleString('en-US')} tokens`;
+      out('hit').textContent = `${Math.round(share * 100)}% → ${c.toLocaleString('en-US')} cached`;
+      out('mfu').textContent = `${Math.round(mfu * 100)}%`;
+      out('u').textContent = u.toLocaleString('en-US');
+      out('steps').textContent = String(Math.ceil(u / budget));
+      out('lin').textContent = fl(lin);
+      out('att').textContent = `${fl(att)} (${Math.round((att / tot) * 100)}%)`;
+      out('ideal').textContent = tm(tot / PEAK);
+      out('real').textContent = tm(tot / (PEAK * mfu));
+      out('kv').textContent = sz(m.kvFull * n + m.kvSlide * Math.min(n, m.win));
+      out('barlin').style.width = `${(lin / tot) * 100}%`;
+      out('baratt').style.width = `${(att / tot) * 100}%`;
+      out('msg').textContent = `Bar: linear layers (grey) vs attention (pink). Attention grows with the square of the context, so it takes over for long prompts. Real kernels reach well below peak, and short prompts hit a near-fixed floor set by reading the weights.`;
+      out('src').textContent = `${name}: ${m.note}. Peak is MI355X dense FP8, spec sheet, approximate; one GPU assumed.`;
+    };
+    fig.querySelectorAll('select, input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

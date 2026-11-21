@@ -1,0 +1,208 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPU number formats: FP16 to FP4 and MX"
+short: "Number formats"
+description: "How a GPU stores a number in 16, 8, 6 or 4 bits, why fewer bits mean more speed and a smaller model, and what block scaling (OCP MXFP, NVIDIA NVFP4) adds. With an interactive encoder, one weight encoded bit by bit, one 32-value MXFP4 block worked end to end, and MI355X and Blackwell Ultra numbers."
+updated: "2026-11-10"
+track: fundamentals
+order: 2
+requires: []
+eyebrow: "Learn · GPU fundamentals"
+---
+import Callout from '@/components/content/Callout.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import MatRow from '@/components/content/MatRow.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import FpEncoder from './_FpEncoder.astro';
+import ModelCalc from './_ModelCalc.astro';
+import NumberLine from './_NumberLine.astro';
+import * as ex from './_example';
+
+A model is billions of numbers (its **weights**). How many bits each number takes decides three things at once: how much GPU memory the model needs, how many bytes each generated token must read from memory, and how fast the matrix engines run. Datacenter GPUs now compute on numbers as small as **4 bits**. This page shows what those formats are, encodes real values in them, and shows what they cost in accuracy.
+
+## The idea first
+
+**A float is scientific notation with a fixed number of digits.** Write 0.3 as $$1.2 \times 2^{-2}$$. A floating-point number stores exactly those pieces, in binary, in a fixed number of bits:
+
+| Field | The question it answers | In $$0.3 = 1.2 \times 2^{-2}$$ | What more bits buy |
+| --- | --- | --- | --- |
+| **sign** | positive or negative? | + | (always 1 bit) |
+| **exponent** | roughly how big: which power of two? | $$2^{-2}$$ | a wider **range**: bigger and smaller numbers |
+| **mantissa** | where exactly between that power of two and the next? | 1.2 | finer **precision**: more digits |
+
+A format is named by how it splits its bits: `E4M3` is 4 exponent bits and 3 mantissa bits, plus the sign, 8 bits in total.
+
+**A float is a ruler whose ticks spread out as numbers grow.** With 3 mantissa bits, every power-of-two interval (1 to 2, 2 to 4, 4 to 8 …) gets the same **8 ticks**. So between 1 and 2 the step is 0.125; between 8 and 16 it is 1. Every value you store snaps to the nearest tick. These are all the values FP8 E4M3 can hold between 0 and 16:
+
+<NumberLine ticks={ex.e4m3Ticks} min={0} max={16} labels={[0, 1, 2, 4, 8, 16]} title="FP8 E4M3: every value it can hold from 0 to 16" note={("Step size: " + (ex.e4m3Steps.map((s) => ("" + (s.step) + " near " + (s.at))).join(' · ')) + ". The relative error stays about the same everywhere; the absolute error grows with the value.")} />
+
+**Scaling is choosing the unit.** A 4-bit float holds only 0, 0.5, 1, 1.5, 2, 3, 4 and 6 (and their negatives). A real weight such as 0.0137 is far below all of them. The fix is the one you use when you write a length in millimetres instead of metres: store the small numbers in a **unit** (a *scale factor*) that fits the data, and write the unit down once next to them. $$\text{Real value} = \text{stored number} \times \text{scale}$$.
+
+**Where the analogy breaks.** The unit is not chosen per number: one scale is shared by a **block** of neighbouring weights (32 in the OCP MX formats), and in MX it must be a power of two. If one weight in the block is much bigger than the rest, the unit has to fit that one, and the small ones lose their digits. The second worked example below shows exactly that.
+
+## The formats
+
+| Format | Bits | Layout | Range and precision, roughly | Typical use |
+| --- | --- | --- | --- | --- |
+| FP32 | 32 | E8M23 | huge range, about 7 decimal digits | accumulators, optimizer state |
+| BF16 | 16 | E8M7 | FP32's range, about 2–3 digits | training, most served weights today |
+| FP16 | 16 | E5M10 | small range (max 65,504), more digits | older training, some inference |
+| FP8 E4M3 | 8 | E4M3 | max ±448 | inference weights and activations |
+| FP8 E5M2 | 8 | E5M2 | max ±57,344, fewer digits | gradients in training |
+| FP6 | 6 | E2M3 or E3M2 | max 7.5 or 28 | weights, with block scales |
+| FP4 | 4 | E2M1 | only 0, ±0.5, ±1, ±1.5, ±2, ±3, ±4, ±6 | weights, with block scales |
+
+BF16 keeps FP32's 8 exponent bits and drops mantissa bits: same range, fewer digits. FP16 makes the opposite trade. FP4 has exactly 16 bit patterns.
+
+## Worked example: one weight in FP8 E4M3
+
+<Walkthrough title={("Encode w = " + (ex.w) + " in FP8 E4M3, bit by bit")} caption="E4M3: 1 sign bit, 4 exponent bits with bias 7, 3 mantissa bits. Computed by the same encoder as the tool below.">
+  <WStep title="1 · Sign">
+    <p>{ex.w} is positive, so the sign bit is <strong>{ex.one.sign}</strong>. A negative weight would flip only this bit.</p>
+  </WStep>
+  <WStep title="2 · Exponent: which power of two?">
+    <p>The largest power of two not above {ex.w} is 2<sup>{ex.one.pow}</sup> = {2 ** ex.one.pow}, so {ex.w} = {ex.one.frac} × 2<sup>{ex.one.pow}</sup>. The exponent field stores the power plus a fixed <strong>bias</strong> of 7, so that negative powers fit in an unsigned field: {ex.one.pow} + 7 = {ex.one.expField} = binary <code>{ex.one.expBits}</code>.</p>
+  </WStep>
+  <WStep title="3 · Mantissa: where between 2⁻² and 2⁻¹?">
+    <p>The leading 1 of {ex.one.frac} is implied and not stored. The rest, {ex.one.frac} − 1, must be written in eighths (3 bits): ({ex.one.frac} − 1) × 8 = {ex.one.manExact}. That is not a whole number, so it <strong>rounds</strong> to {ex.one.man} = binary <code>{ex.one.manBits}</code>. This rounding is the only place information is lost.</p>
+  </WStep>
+  <WStep title="4 · Decode and measure the error">
+    <p>Stored bits: <code>{ex.one.sign} {ex.one.expBits} {ex.one.manBits}</code>. Reading them back: {ex.one.decodeText}. The weight changed from {ex.w} to {ex.one.value}, an error of <strong>{ex.one.errPct} %</strong>. Between 0.25 and 0.5 E4M3's ticks are 1/32 apart, and 0.3 falls between 0.28125 and 0.3125.</p>
+  </WStep>
+  <WStep title="5 · The same weight in every format">
+    <table>
+      <thead><tr><th>Format</th><th>Bits</th><th>Sign</th><th>Exponent</th><th>Mantissa</th><th>Stored</th><th>Error</th></tr></thead>
+      <tbody>{ex.allFormats.map((r) => <tr><td>{r.name}</td><td>{r.bits}</td><td><code>{r.s}</code></td><td><code>{r.e}</code></td><td><code>{r.m}</code></td><td>{r.stored}</td><td>{r.err} %</td></tr>)}</tbody>
+    </table>
+    <p>Each halving of the bits costs digits. FP4 can only say "0.5": a 67 % error on its own. That is why 6- and 4-bit formats are never used without a scale.</p>
+  </WStep>
+</Walkthrough>
+
+Try your own values. Watch where each format runs out of range (500 in E4M3, 70000 in FP16) or of digits (0.00001 becomes 0 in E4M3):
+
+<FpEncoder />
+
+## Scaling: one shared multiplier per block
+
+- **Per-tensor scaling** (classic FP8): one scale for the whole tensor. One outlier anywhere forces a large scale, and the small values lose their digits.
+- **Block scaling** (microscaling): one scale per small **block** of neighbouring values. An outlier only hurts its own block.
+
+The industry standard for block scaling is the **OCP Microscaling (MX)** specification, written by AMD, Arm, Intel, Meta, Microsoft, NVIDIA, Qualcomm and others. In every concrete MX format a block is **32 elements** and the shared scale is **E8M0**: an 8-bit power of two, with no mantissa.
+
+| MX format | Element | Bits per value including the scale |
+| --- | --- | --- |
+| MXFP8 | E4M3 or E5M2 | 8 + 8/32 = 8.25 |
+| MXFP6 | E2M3 or E3M2 | 6.25 |
+| MXFP4 | E2M1 | 4.25 |
+| MXINT8 | 8-bit integer | 8.25 |
+
+NVIDIA's own 4-bit format, **NVFP4**, uses two levels of scale: an FP8 (E4M3) scale for every **16** values, plus one FP32 scale for the whole tensor. The smaller block and the finer scale (E4M3 has mantissa bits; E8M0 does not) cost a little more space, about 4.5 bits per value, and NVIDIA states the accuracy is close to FP8. AMD CDNA 4 (MI350 series) supports the OCP MX formats in hardware. NVIDIA documents NVFP4 as the Blackwell 4-bit format; this page did not verify which OCP MX formats Blackwell runs natively.
+
+## Worked example: one MXFP4 block of 32 weights
+
+<Walkthrough title="32 weights → one E8M0 scale + 32 four-bit numbers" caption="The 32 weights are made up (seeded random, a typical size for an LLM weight matrix) with one outlier, 0.0234. The rule is the OCP MX v1.0 one: scale = 2^(floor(log2(largest |w|)) − 2), elements rounded to FP4 with saturation. All numbers computed at build time.">
+  <WStep title="1 · The block: 32 neighbouring weights">
+    <MatRow>
+      <Matrix title="w: 32 weights (4 rows of 8)" data={ex.r4(ex.block)} scale="div" digits={4} highlight={{ cells: [[1, 5], [0, 2]] }} />
+    </MatRow>
+    <p>In BF16 these take 32 × 2 = <strong>{ex.mx.bf16Bytes} bytes</strong>. Most are a few thousandths. One (outlined, {ex.mx.outlier.v}) is several times bigger than the typical value. Follow it and a small one, {ex.mx.small.v} (also outlined).</p>
+  </WStep>
+  <WStep title="2 · Pick the scale from the largest value">
+    <p>The largest magnitude is {ex.amax}, and its power of two is 2<sup>{ex.amaxLog}</sup>. FP4's largest exponent is 2 (6 = 1.5 × 2²), so the shared exponent is {ex.amaxLog} − 2 = <strong>{ex.sharedExp}</strong>: scale = {ex.mx.scaleText}. Stored as E8M0 that is the exponent plus 127, <code>{ex.mx.e8m0}</code>: one byte for the whole block.</p>
+  </WStep>
+  <WStep title="3 · Divide every weight by the scale">
+    <MatRow>
+      <Matrix title="w ÷ scale" data={ex.r4(ex.scaled, 2)} scale="div" highlight={{ cells: [[1, 5], [0, 2]] }} />
+    </MatRow>
+    <NumberLine ticks={ex.fp4Grid} points={ex.scaled} snapped={ex.codes} min={-6.5} max={6.5} title="The 32 scaled weights (dots) and the FP4 value each snaps to (ticks)" />
+    <p>In units of the scale, the weights now span about −3 to +6: the range FP4 covers. The outlier lands at {ex.mx.outlier.s}, right at FP4's top; the small one at {ex.mx.small.s}.</p>
+  </WStep>
+  <WStep title="4 · Round each one to the nearest FP4 value">
+    <MatRow>
+      <Matrix title="FP4 elements (4 bits each)" data={ex.rows4(ex.codes)} scale="div" digits={1} highlight={{ cells: [[1, 5], [0, 2]] }} />
+    </MatRow>
+    <p>{ex.mx.small.s} rounds to {ex.mx.small.c}; {ex.mx.outlier.s} rounds to {ex.mx.outlier.c}. {ex.mx.zeros} of the 32 weights round to <strong>0</strong>: they were smaller than a quarter of the scale. None had to saturate.</p>
+  </WStep>
+  <WStep title="5 · Decode: element × scale, and the error">
+    <MatRow>
+      <Matrix title="Decoded = element × scale" data={ex.r4(ex.decoded, 4)} scale="div" digits={4} highlight={{ cells: [[1, 5], [0, 2]] }} />
+      <Matrix title="Error = decoded − w" data={ex.r4(ex.err, 4)} scale="div" digits={4} highlight={{ cells: [[1, 5], [0, 2]] }} />
+    </MatRow>
+    <p>The outlier comes back almost exactly ({ex.mx.outlier.d}). The small weight comes back as {ex.mx.small.d}, {ex.mx.small.e} % off. Over the block the error is <strong>{ex.mx.relErr} %</strong> (root-mean-square, relative to the weights' size). Models trained or calibrated for this keep their quality close to the original, but the error is real: low-bit serving is a model-quality decision, not only a hardware setting.</p>
+  </WStep>
+  <WStep title="6 · What it saved">
+    <Kpis items={[
+      { label: 'BF16 block', value: ("" + (ex.mx.bf16Bytes) + " B"), detail: '32 × 16 bits' },
+      { label: 'MXFP4 block', value: ("" + (ex.mx.bytes) + " B"), detail: ("32 × 4 bits + 8-bit scale = " + (ex.mx.bits) + " bits"), tone: 'primary' },
+      { label: 'Smaller by', value: ("" + ((ex.mx.bf16Bytes / ex.mx.bytes).toFixed(1)) + "×"), detail: 'memory and bytes read per token', tone: 'good' },
+      { label: 'Error', value: ("" + (ex.mx.relErr) + " %"), detail: 'RMS, this block', tone: 'warn' },
+    ]} />
+    <p>3.8× less memory and bandwidth, and on MI355X the matrix cores run MXFP4 at 4× the BF16 rate (next section).</p>
+  </WStep>
+  <WStep title="7 · Why per block: the same weights with one scale for the tensor">
+    <MatRow>
+      <Matrix title="Decoded with the tensor's scale" data={ex.r4(ex.perTensor, 4)} scale="div" digits={4} highlight={{ cells: [[1, 5]] }} />
+    </MatRow>
+    <p>Suppose another block of the same tensor holds a weight of {ex.tensorAmax}, 16× our outlier. One scale for the whole tensor must fit that one: {ex.pt.scaleText}. In those units <strong>{ex.pt.zeros} of our 32 weights round to 0</strong> and the error is {ex.pt.relErr} %: the block is gone. A scale per 32 weights keeps an outlier's damage inside its own block.</p>
+  </WStep>
+  <WStep title="8 · NVFP4 on the same weights">
+    <p>NVFP4 splits the 32 weights into two blocks of 16, each with an E4M3 scale, times one FP32 scale for the tensor. With the tensor scale chosen so that the largest block scale lands at E4M3's maximum, 448 (one common recipe, not the only one), the two scales are {ex.nvf.scales[0]} and {ex.nvf.scales[1]}. The second half has no outlier, so it gets a finer unit. Error: <strong>{ex.nvf.relErr} %</strong> against MXFP4's {ex.mx.relErr} %, for {ex.nvf.bits} bits instead of {ex.mx.bits}. On this block the gain is small; it grows when one half has a much smaller range than the other, and because an E4M3 scale need not be a power of two.</p>
+  </WStep>
+</Walkthrough>
+
+## Why fewer bits are faster
+
+Two separate effects:
+
+1. **Memory and bandwidth.** Half the bits means half the bytes to store and half the bytes to read per token. Decode (generating one token at a time) reads every weight once per step, so it gets faster almost in proportion. See [memory and roofline](/learn/gpu-memory-hierarchy/).
+2. **Math throughput.** A matrix engine has fixed wires. Narrower numbers let it do more multiply-adds per clock. AMD's CDNA 4 white paper lists the rate per CU per clock; times 256 CUs and 2.4 GHz that gives the spec-sheet peaks:
+
+<table>
+  <thead><tr><th>Format on MI355X</th><th>FLOPs per clock per CU</th><th>Per matrix core (4 per CU)</th><th>× 256 CUs × 2.4 GHz</th><th>Spec sheet, approximate</th></tr></thead>
+  <tbody>{ex.rates.map((r) => <tr><td>{r.f}</td><td>{r.perCU.toLocaleString('en-US')}</td><td>{r.perCore.toLocaleString('en-US')}</td><td>{r.peak}</td><td>{r.spec}</td></tr>)}</tbody>
+</table>
+
+FP32 matrix math runs at 157.3 TFLOPS and FP64 at 78.6 TFLOPS: a GPU built for AI gives up wide-number speed. MI355X runs MXFP6 at the MXFP4 rate. NVIDIA states 15 PFLOPS dense NVFP4 and 5 PFLOPS dense FP8 for one Blackwell Ultra GPU (the GPU in GB300); it lists FP6 support for Blackwell Ultra Tensor Cores, but this page did not verify its rate. All of these are vendor peaks: real kernels reach a fraction.
+
+"Sparsity" numbers on spec sheets are double the dense ones. They apply only when a tensor follows a 2:4 pattern (two of every four values are zero). LLM weights normally do not, so use the dense figures.
+
+## How big is the model?
+
+A 70-billion-parameter dense model is 140 GB in BF16, 70 GB in FP8 and about 37 GB in MXFP4. Reading it once at 8 TB/s takes at least 17.5, 8.8 and 4.6 ms. Halving the bits halves the floor on time per token, and the memory freed goes to the [KV cache](/learn/attention-and-kv-cache/), which decides how many requests fit at once. Try other sizes:
+
+<ModelCalc />
+
+## Where the format lives in the stack
+
+- The **checkpoint** (model files) is stored in some format, for example BF16 or a pre-quantized FP8 or MXFP4 release.
+- The **serving engine** (vLLM) chooses kernels for that format. A flag or the model's config picks the quantization method.
+- The **kernels** use matrix-core instructions for that format: MFMA (matrix fused multiply-add) on AMD, Tensor Core MMA on NVIDIA. See [PTX and AMDGCN ISA](/learn/gpu-isa-ptx/).
+- **Accumulation** happens in wider precision (FP32), so only the inputs are narrow.
+
+If a GPU lacks native support for a format, software can still unpack it to a wider type before the math. That saves memory but not math time. MI300X (CDNA 3), for example, has FP8 but no FP4 or FP6 matrix support; MI355X (CDNA 4) adds them.
+
+<Callout tone="note" title="How this shows up in operations">
+
+- **Memory per Pod** depends on the format. An inference server Pod often holds most of an MI355X's 288 GB; most of that is the serving engine pre-reserving memory for KV cache, not weights alone.
+- **The same image can behave differently** on MI300X and MI355X if the model uses FP4: one has hardware for it, one does not.
+- **A model change can be a hardware-fit change.** Moving a model from FP8 to BF16 doubles weight memory; it may stop fitting on the planned number of GPUs.
+- **Metrics do not show the format.** `amd-smi` and `nvidia-smi` report memory used and activity, not which number format the kernels use. Ask the inference team or read the serving config.
+
+</Callout>
+
+## Common misconceptions
+
+- "**FP4 is 4× faster than FP16 everywhere.**" Only the matrix math is. Attention, normalization and communication do not speed up the same way.
+- "**MXFP4 and NVFP4 are the same.**" Both are 4-bit E2M1 elements, but the block size (32 vs 16) and scale type (E8M0 vs E4M3) differ. A checkpoint is quantized for one of them.
+- "**FP8 is one format.**" There are two (E4M3, E5M2), and older non-OCP variants also exist. The OCP names are the standard ones.
+- "**Peak PFLOPS tell you the speed.**" Decode is limited by memory bandwidth, so HBM TB/s usually matters more than PFLOPS for it.
+
+## Further reading
+
+- [AMD CDNA 4 architecture white paper](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/white-papers/amd-cdna-4-architecture-whitepaper.pdf): MX formats and per-CU throughput (pages 6–7)
+- [AMD Instinct MI355X specifications](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html)
+- [Microscaling data formats for deep learning](https://arxiv.org/abs/2310.10537): the paper behind the OCP MX v1.0 specification (the OCP-hosted PDF blocks scripted downloads, so it is not linked here)
+- [Inside NVIDIA Blackwell Ultra](https://developer.nvidia.com/blog/inside-nvidia-blackwell-ultra-the-chip-powering-the-ai-factory-era/): NVFP4 and Tensor Core rates
+- [ROCm GPU hardware specifications](https://rocm.docs.amd.com/en/latest/reference/gpu-arch-specs.html)

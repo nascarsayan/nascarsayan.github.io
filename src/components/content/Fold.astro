@@ -1,0 +1,59 @@
+---
+/**
+ * A section of detail the reader can open: <details>, styled like the site's other
+ * collapsible parts (Learn topic groups, walkthroughs).
+ *
+ *   <Fold summary="Setup steps: test node, save state, …">…Markdown…</Fold>
+ *
+ * Closed by default (`open` to start open). Open, its summary sticks under the site
+ * header while you read, so it can be collapsed from anywhere; collapsing scrolls back
+ * to it. A link to anything inside opens it first (ArticleLayout).
+ */
+interface Props { summary: string; open?: boolean }
+const { summary, open = false } = Astro.props;
+---
+
+<details class="fold" open={open}>
+  <summary><span class="chev" aria-hidden="true"></span><span class="t">{summary}</span><span class="hint" aria-hidden="true"></span></summary>
+  <div class="fold-body"><slot /></div>
+</details>
+
+<style>
+  .fold { margin: 16px 0 24px; border: 1px solid var(--color-gray-100); border-radius: 12px; background: var(--color-background); }
+  .fold > summary {
+    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
+    list-style: none; cursor: pointer; user-select: none; border-radius: 12px;
+    transition: background 150ms;
+  }
+  .fold > summary::-webkit-details-marker { display: none; }
+  .fold > summary:hover { background: var(--color-cloud-100); }
+  .fold > summary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .chev { flex: none; width: 8px; height: 8px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform 150ms; color: var(--color-gray-700); }
+  .fold[open] > summary .chev { transform: rotate(45deg); }
+  .t { font-weight: var(--font-weight-bold); color: var(--color-text); }
+  .fold > summary:hover .t { color: var(--color-primary); }
+  .hint { margin-left: auto; font-size: 0.8125rem; color: var(--color-muted); white-space: nowrap; }
+  .hint::after { content: 'Show'; }
+  .fold[open] > summary .hint::after { content: 'Hide'; }
+  .fold[open] > summary {
+    position: sticky; top: var(--header-height); z-index: 3;
+    background: var(--color-background); border-bottom: 1px solid var(--color-gray-100); border-radius: 12px 12px 0 0;
+    transition: top 320ms var(--ease-soft), background 150ms;
+  }
+  .fold[open] > summary:hover { background: var(--color-cloud-100); }
+  :global(html.header-hidden) .fold[open] > summary { top: 0; }
+  .fold-body { padding: 4px 20px 16px; }
+  .fold-body > :global(:first-child) { margin-top: 12px; }
+</style>
+
+<script>
+  // Collapsing an open fold from further down: bring its summary back into view.
+  for (const d of document.querySelectorAll<HTMLDetailsElement>('details.fold')) {
+    d.addEventListener('toggle', () => {
+      if (d.open) return;
+      const s = d.querySelector('summary');
+      const top = s?.getBoundingClientRect().top ?? 0;
+      if (s && (top < 0 || top > innerHeight)) s.scrollIntoView({ block: 'start' });
+    });
+  }
+</script>

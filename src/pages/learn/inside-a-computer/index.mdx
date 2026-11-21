@@ -1,0 +1,35 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Inside a computer, level by level"
+short: "Inside a computer"
+description: "A desktop computer as one diagram you can open up: CPU down to a single transistor, RAM down to one capacitor, the SSD down to one flash cell, plus the GPU, chipset, keyboard, microphone and power supply."
+updated: "2026-11-11"
+track: silicon
+order: 0
+eyebrow: "Learn · Kernels & silicon"
+---
+import Drilldown from '@/components/content/Drilldown.astro';
+import computer from './_computer.drill';
+
+A computer is a few big parts wired together, and each part is smaller parts wired together, down to switches a few dozen atoms wide. The diagram below lets you walk that whole way. Each box with a magnifier badge opens what is inside it, below the diagram. Open a box inside that, and so on.
+
+<Drilldown tree={computer} id="computer" />
+
+## How to read it
+
+- **Click a box with the badge** (or focus it and press Enter) to open it. Click it again, or press Esc, to close it. One box per level is open at a time.
+- The **dotted lens** joins the open box to the panel that shows its inside.
+- The **breadcrumb** at the top of each panel goes back up. **Map** lists every level; **Close all** goes back to the top.
+- **Click the i** on a box's top-left corner for a longer explanation; *Hide* closes it. The URL names the deepest open level, so you can share a link to it.
+
+## The same few ideas at every level
+
+| Idea | Where you see it |
+| --- | --- |
+| **An address picks one thing out of many** | the cache splits an address into tag, set and byte; a DRAM chip into bank, row and column; the SSD maps logical to physical pages |
+| **Small and fast, or big and cheap** | registers and SRAM caches (6 transistors per bit) next to the cores; DRAM (1 transistor and 1 capacitor per bit) further out; flash (charge trapped in a layer) furthest |
+| **Many copies working at once** | 8 cores, 4 ALUs per core, 32 DRAM banks, 8 SSD channels, thousands of GPU lanes |
+| **A controller in the middle** | memory controller, PCIe root complex, chipset, SSD firmware, the keyboard's microcontroller: each turns simple requests into the exact signals a part needs |
+| **Everything is switches** | every gate, cell and register at the bottom is the same transistor: a voltage on the gate lets current flow, or not |
+
+Numbers are typical for a 2025–2026 desktop (8-core CPU, DDR5, PCIe 5, TLC flash), rounded. Real chips differ in the details; the structure is the same. For the GPU side in depth, see [What a GPU is](/learn/what-is-a-gpu/).

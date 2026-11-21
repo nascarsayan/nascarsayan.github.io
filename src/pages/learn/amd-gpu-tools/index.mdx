@@ -1,0 +1,256 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "AMD GPU tools: amd-smi, rocm-smi, sysfs, RVS, AGFHC"
+short: "AMD tools"
+description: "A field guide to looking at AMD Instinct GPUs on a GPU node: a step-by-step reading of example amd-smi output for one MI355X GPU, every useful subcommand, rocm-smi, rocminfo, the sysfs files behind them, kernel-log patterns, and the disruptive validation tools (RVS, AGFHC, TransferBench)."
+updated: "2026-11-10"
+track: operations
+order: 1
+requires: [gpu-software-stack, gpu-partitioning]
+eyebrow: "Learn · Operating GPU nodes"
+links:
+  - { label: "amd-smi CLI reference", href: "https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html" }
+  - { label: "amdgpu RAS (kernel docs)", href: "https://docs.kernel.org/gpu/amdgpu/ras.html" }
+---
+import Callout from '@/components/content/Callout.astro';
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Out from './_Out.astro';
+import stack from './_stack.diagram';
+import * as d from './_sample';
+
+This page is the toolbox for AMD GPU nodes. Every command runs **on the GPU node** (reach it with `ssh` from the management node). The output is illustrative: made-up but realistic values for one example 8× MI355X node called `gpu-node-1`, trimmed to the lines that matter.
+
+## The idea
+
+A GPU node is like a server with eight very expensive, very hot disks in it. You want to know the same things you would ask about disks: *which one is this, what model is it, how is it doing right now, who is using it, is it damaged, are its cables up?* `amd-smi` is one tool that answers all six, the way `lsblk`, `smartctl`, `iostat`, `lsof` and `ethtool` do between them for storage and network.
+
+| Question | amd-smi subcommand | The disk-world equivalent |
+| --- | --- | --- |
+| Which card is this? | `list -e` | `ls -l /dev/disk/by-path` |
+| What is it, and what are its limits? | `static` | the spec sheet, `smartctl -i` |
+| How is it doing now? | `metric`, `monitor` | `iostat`, `sensors` |
+| Who is using it? | `process` | `lsof /dev/sdX` |
+| Is it damaged? | `bad-pages`, `ras` | SMART reallocated sectors |
+| Are its links up? | `xgmi`, `topology` | `ethtool`, `ip link` |
+
+Where the analogy breaks: disks fail one at a time, and you can reset one without touching the others. The eight GPUs in an MI355X node are wired into one shared fabric, called a **hive**. Resetting one resets all eight. That is why everything below starts read-only.
+
+Under every tool sits one fact: **only the `amdgpu` kernel driver talks to the chip.** Every tool is a reader of what the driver exposes. Step through the diagram to see which path each tool takes.
+
+<Diagram spec={stack} title="Every AMD tool reads through the driver">
+  <Step title="amd-smi" path="cli -> lib -> sysfs -> drv -> gpu">`amd-smi metric` calls the AMD SMI library, which reads sysfs files that the driver fills by asking the GPU's firmware.</Step>
+  <Step title="The metrics exporter" path="exp -> lib -> sysfs -> drv -> gpu">The exporter Pod uses the same library, on every Prometheus scrape (every 30 s). Same data, same path: if amd-smi is wrong, the metrics are wrong too.</Step>
+  <Step title="rocminfo" path="rinfo -> kfd -> drv -> gpu">rocminfo asks the ROCm runtime through `/dev/kfd`, the interface programs use to run work on the GPU. A GPU that amd-smi lists but rocminfo misses is visible to the driver and unusable by programs.</Step>
+  <Step title="The kernel log" focus="drv, drv -> klog, klog, jctl, jctl -> klog">The driver also writes events (errors, resets, hangs) to the kernel log. `journalctl -k` reads only the host's log, so it still works when the GPU does not answer.</Step>
+  <Step title="A wedged GPU" path="cli -> lib -> sysfs -> drv -> gpu:hang" state={{ gpu: { tone: 'risk', detail: 'firmware not answering' } }}>When the GPU's firmware stops answering, amd-smi blocks. Run it under `timeout 30`, and read `journalctl -k` first.</Step>
+</Diagram>
+
+## What is on the node
+
+<Kpis items={[
+  { label: 'GPUs per node', value: '8', detail: 'one XGMI hive', tone: 'primary' },
+  { label: 'HBM per GPU', value: ("" + (d.vramTotalGiB.toFixed(0)) + " GiB"), detail: ("" + (d.vramTotalMiB) + " \"MB\" in amd-smi") },
+  { label: 'Power cap', value: '1400 W', detail: 'idle draw ≈ 250 W' },
+  { label: 'Hotspot slowdown', value: '100 °C', detail: 'shutdown at 110 °C', tone: 'warn' },
+  { label: 'Bad-page budget', value: '128', detail: 'retired HBM pages', tone: 'note' },
+]} />
+
+| Item | Example version | How to check |
+| --- | --- | --- |
+| `amd-smi` tool and library | 26.0.0 | `amd-smi version` |
+| ROCm (user-space runtime) | 7.0.0 | `amd-smi version` |
+| `amdgpu` kernel driver | 6.14.0 | `cat /sys/module/amdgpu/version` |
+| GPU firmware package | `amdgpu-firmware-1.0.0-example` | `dpkg -l \| grep amdgpu` |
+| RVS, TransferBench, AGFHC | 1.2.0, 1.60.0, 1.30.0 | `dpkg -l \| grep -iE 'rvs\|transferbench\|agfhc'` |
+
+<Callout tone="warn" title="Read-only first">`amd-smi reset`, `amd-smi set`, partition changes, RVS, AGFHC and TransferBench stress or reset GPUs. On MI35x, resetting **one** GPU resets **all eight** in the hive. It also kills every process that holds `/dev/kfd`, even on other GPUs (AMD documents this in the amd-smi reset section). Never run them on a node that serves prefill.</Callout>
+
+## Worked example: reading one GPU, field by field
+
+Follow GPU 4 on `gpu-node-1`, which a prefill engine is using. Each step is one command, example output trimmed, with the lines to read highlighted and explained. Common flags on every subcommand: `-g <index|BDF|UUID|all>` picks GPUs, `--json` or `--csv` gives machine-readable output, `-h` lists the subcommand's flags.
+
+<Walkthrough title="GPU 4 on gpu-node-1, one command at a time" caption="Illustrative output with made-up values. Derived numbers are computed from the output shown.">
+  <WStep title="1 · Which card is it? amd-smi list -e">
+    <Out host={d.host} cmd="amd-smi list -e -g 4" out={d.list} marks={[
+      { at: 'BDF:', note: '<b>BDF</b> (PCI bus:device.function). The kernel log, the DRA ResourceSlice (<code>pciBusID</code>) and RMA tickets use it.' },
+      { at: 'RENDER:', note: '<b>Render node</b> <code>/dev/dri/renderD132</code>: the device file a container gets.' },
+      { at: 'CARD:', note: '<b>DRM card</b> <code>card5</code>. With the render number it makes the DRA device name <code>gpu-5-132</code>.' },
+      { at: 'HIP_ID:', note: '<b>HIP ID</b>: the number programs see. Inside a container it renumbers from 0.' },
+      { at: 'OAM_ID:', note: '<b>OAM slot 6</b>: the physical slot on the baseboard, the number DC Ops sees. GPU index 4 is not slot 4.', tone: 'warn' },
+    ]} />
+    One GPU has five names, and ops work is mostly translating between them. The index order follows the BDF, not the slot: in this example GPU 0 sits in slot 2. Use `-e` whenever you must point at hardware. The full join to Pods is in [GPU process ↔ Pod](/learn/gpu-process-to-pod/).
+  </WStep>
+  <WStep title="2 · What is it, and where are its limits? amd-smi static">
+    <Out host={d.host} cmd="amd-smi static -g 4 -a -B -l -r -p -u -v" out={d.staticOut} marks={[
+      { at: 'SLOWDOWN_HOTSPOT', note: 'Clocks slow down at <b>100 °C</b> hotspot (junction) and 105 °C HBM. The GPU shuts down at 110 °C and 115 °C. A health check can alarm a little below these, for example at 100 °C junction and 95 °C memory.', tone: 'warn' },
+      { at: 'PRODUCT_SERIAL', note: '<b>Board serial</b>: what AMD wants on an RMA. The exporter label <code>serial_number</code> carries the same value.' },
+      { at: 'BAD_PAGE_THRESHOLD:', note: 'Up to <b>128</b> HBM pages may be retired before the GPU is condemned. See <a href="/learn/amd-ras-and-ecc/">AMD RAS and ECC</a>.' },
+      { at: 'ACCELERATOR_PARTITION', note: '<b>SPX / NPS1</b>: one whole GPU with one memory pool, the usual mode for one large model per GPU. See <a href="/learn/gpu-partitioning/">partitioning</a>.' },
+      { at: 'NODE: 1', note: 'The closest <b>CPU NUMA node</b>. A Pod pinned to far CPUs pays an extra hop on every host copy.' },
+      { at: 'SIZE:', note: ("<b>" + (d.vramTotalMiB) + " MB</b> is really MiB: " + (d.vramTotalGiB.toFixed(1)) + " GiB (computed from sysfs in step 7).") },
+    ]} />
+    `static` prints facts that do not change while the node runs: sections `-a` ASIC, `-b` bus, `-I` firmware image, `-d` driver, `-v` VRAM, `-B` board, `-r` RAS, `-l` limits, `-u` NUMA, `-p` partition. The driver reports the thermal trip points itself, so nobody needs to guess thresholds.
+  </WStep>
+  <WStep title="3 · Which GPUs are busy? amd-smi monitor">
+    <Out host={d.host} cmd="amd-smi monitor -p -t -u -m -e" out={d.monitor} marks={[
+      { at: '  0    0  250 W', note: '<b>Idle</b>: about 250 W even doing nothing, clock near 100 MHz.' },
+      { at: '  4    0  400 W', note: '<b>Busy</b>: GPU 4 runs at 2400 MHz and 400 W. Its <code>GFX%</code> is only 12 %: prefill works in bursts.', tone: 'good' },
+    ]} />
+    `monitor` is the `top` of GPUs: one line per GPU, printed once (add `-w 5` to repeat every 5 s, `-q` for processes). The columns that matter: power against the 1400 W cap, the two temperatures, and the ECC and PCIe replay counts, which should be 0. Rows 1, 2 and 6 (idle) are cut here.
+  </WStep>
+  <WStep title="4 · How is it doing? amd-smi metric">
+    <Out host={d.host} cmd="amd-smi metric -g 4 -p -t -P -e -E -m -v" out={d.metric} marks={[
+      { at: 'EDGE: N/A', note: '<b>No edge sensor</b> on MI35x. Use HOTSPOT. A tool that alarms on edge temperature reads the "unsupported" value (65535) and fires on healthy hardware; an easy mistake in a first set of health-check rules.', tone: 'warn' },
+      { at: 'REPLAY_COUNT', note: '<b>PCIe replays</b>: the host link retransmitting packets. Rising means a riser, retimer or slot problem.' },
+      { at: 'TOTAL_UNCORRECTABLE', note: '<b>ECC totals</b>, all 0. Per block: <code>-k</code>.', tone: 'good' },
+      { at: 'TOTAL_ENERGY', note: '<b>Energy</b> only goes up while the chip is powered: the best "is this data fresh?" signal (step 5).' },
+      { at: 'USED_VRAM', note: '<b>256,000 MiB in use</b>: the prefill engine pre-allocates its weights and KV cache. VRAM, not GFX%, is the reliable "someone owns this GPU" signal.' },
+      { at: 'PPT_VIOLATION', note: '<b>Throttle status</b>: why clocks are below maximum. PPT is the power cap; SOCKET_THERMAL and HBM_THERMAL are heat. NOT ACTIVE is good.' },
+    ]} />
+    With no flags, `metric` prints everything (two screens). Narrow it: `-u` usage, `-p` power, `-t` temperature, `-P` PCIe, `-e` ECC totals, `-k` ECC per block, `-m` memory, `-v` throttling, `-E` energy, `-x` XGMI errors.
+  </WStep>
+  <WStep title="5 · Power bounces; energy tells the truth">
+    <Out host={d.host} cmd="amd-smi metric -g 4 -E -p     # twice, 10 s apart" out={d.energyOut} marks={[
+      { at: 'SOCKET_POWER: 520', note: 'First power reading: 520 W.' },
+      { at: 'SOCKET_POWER: 400', note: 'Ten seconds later: 400 W. Each is an instant snapshot of a bursty load.', tone: 'warn' },
+      { at: ("" + (d.energy[1].joules.toFixed(3))), note: 'The energy counter grew. Divide by the time between the reads to get the true average power.', tone: 'good' },
+    ]} />
+    Average power over those 10 seconds: {d.energyText}. Neither snapshot (520 W, 400 W) was the average. Prometheus does the same division with `rate()`; [GPU metrics](/learn/gpu-metrics/) follows this exact counter into a query.
+  </WStep>
+  <WStep title="6 · Who is using it? amd-smi process">
+    <Out host={d.host} cmd="amd-smi process -g 4" out={d.processOut} marks={[
+      { at: 'PID: 41234', note: 'The <b>prefill driver</b> process (<code>inference_api.prefill_driver.main</code>): 2 MB of GPU memory.' },
+      { at: 'PID: 41567', note: 'The <b>vLLM engine</b> (<code>VLLM::EngineCore</code>) that holds the memory.' },
+      { at: 'VRAM_MEM: 240.0', note: '240.0 GB of the 256,000 MiB in use belong to this one process.' },
+    ]} />
+    PIDs are **host** PIDs, not container PIDs. Two processes per GPU is normal for vLLM. Process names may need root. To get from these PIDs to the Pod, see [GPU process ↔ Pod](/learn/gpu-process-to-pod/).
+  </WStep>
+  <WStep title="7 · The files under the tools: sysfs">
+    <Out host={d.host} cmd="cd /sys/class/drm/card5/device; cat …" out={d.sysfsOut} marks={[
+      { at: 'mem_info_vram_total', note: d.sysfsText.vram },
+      { at: 'mem_info_vram_used', note: d.sysfsText.used },
+      { at: 'temp2_input', note: ("Millidegrees: " + (d.sysfsText.temp) + ".") },
+      { at: 'power1_input', note: ("Microwatts: " + (d.sysfsText.power) + ".") },
+      { at: 'ras/event_state', note: 'No fatal events since boot.', tone: 'good' },
+    ]} />
+    amd-smi is a view over these files. They are cheap to read and keep working in scripts when the tools are slow. Units are raw: bytes, millidegrees, microwatts.
+  </WStep>
+  <WStep title="8 · Is it damaged? Are the links up?">
+    <Out host={d.host} cmd="amd-smi bad-pages -g 4" out={d.badPages} marks={[{ at: 'RETIRED', note: '<b>Retired</b> HBM pages, taken out of use after an uncorrectable error. Zero is normal. The list lives in an EEPROM on the board and survives reboots.', tone: 'good' }]} />
+    <Out host={d.host} cmd="amd-smi xgmi -l" out={d.xgmi} marks={[{ at: 'GPU4   0000:8b', note: 'Seven <b>U</b>: GPU 4 has a direct, up link to each of the other seven. A <b>D</b> means down: the GPU still works alone, but peer traffic and the hive reset are at risk.', tone: 'good' }]} />
+    GPU 4 is healthy: no damage, all links up. **Pending** pages are marked bad but not yet removed; **unreservable** (`UN_RES`) ones could not be removed.
+  </WStep>
+</Walkthrough>
+
+## Other subcommands
+
+`amd-smi --help` on 26.0.0 lists: `version`, `list`, `static`, `firmware`, `bad-pages`, `metric`, `process`, `event`, `topology`, `set`, `reset`, `monitor`, `xgmi`, `partition`, `ras`, `node`, `fabric`. Beyond the walkthrough:
+
+| Subcommand | What it shows (example) | Read it for |
+| --- | --- | --- |
+| `firmware` | per-GPU firmware list, e.g. `PSP_SOSDRV 00.00.00.10`, `PM 00.01.02.03`, `PLDM_BUNDLE 01.00.00.00` | version drift across the 8 GPUs and across nodes after a repair |
+| `topology -t` / `-o` / `-b` | `XGMI` between every pair, 1 hop, NUMA bandwidth 50000-50000 | all 8 GPUs connect directly: one hive |
+| `xgmi` (no flags) | bit rate 32 Gb/s, max bandwidth 512 Gb/s per link, read/write counters | a slow or erroring link; `metric -x` for errors |
+| `partition` | `NPS1`, `SPX`, memory caps `NPS1,NPS2` | partition mode; other profiles (`DPX`, `QPX`, `CPX`) split a GPU into 2, 4 or 8 |
+| `ras --cper`, `ras --afid --cper-file <f>` | error records and AMD Field IDs (needs `sudo`) | evidence for AMD support; `--cper --folder` **writes files** |
+| `node` | baseboard (UBB) temperatures, retimer regulators, node power threshold 12000 W, node power management disabled | the board around the GPUs |
+
+Two firmware pieces matter most when things break. The **PSP** (Platform Security Processor) boots the chip and loads every other firmware. The **SMU**, shown as `PM`, manages power and clocks and executes resets. `amd-smi firmware` only reads; flashing goes through the BMC (Redfish) during provisioning or maintenance. Details of `ras` and the missing records for fatal ATHUB events are in [AMD RAS and ECC](/learn/amd-ras-and-ecc/).
+
+## rocm-smi and rocminfo
+
+`rocm-smi` is the older tool, kept for scripts. With no flags it gives a compact table:
+
+```text
+$ rocm-smi                     # example output, trimmed
+Device  Node  IDs              Temp        Power     Partitions          SCLK     MCLK     Fan  Perf  PwrCap   VRAM%  GPU%
+              (DID,     GUID)  (Junction)  (Socket)  (Mem, Compute, ID)
+0       2     0x75a3,   12345  45.0°C      250.0W    NPS1, SPX, 0        100Mhz   2000Mhz  0%   auto  1400.0W  0%     0%
+4       6     0x75a3,   45678  50.0°C      320.0W    NPS1, SPX, 0        2400Mhz  2000Mhz  0%   auto  1400.0W  87%    0%
+```
+
+`rocminfo` lists **agents**: each CPU NUMA node first (two on the example node), then each GPU. A GPU in `amd-smi list` but missing from `rocminfo` points at the runtime layer (KFD, `/dev/kfd` permissions, a wedged device), not at the PCI link.
+
+## sysfs: the files under the tools
+
+The full set used in this track (example values for GPU 4):
+
+| File (under `/sys/class/drm/card5/device/`) | Example value | Meaning |
+| --- | --- | --- |
+| `current_compute_partition`, `current_memory_partition` | `SPX`, `NPS1` | partition mode |
+| `mem_info_vram_total`, `mem_info_vram_used` | `309237645312`, `268435456000` (bytes) | HBM size and use |
+| `gpu_busy_percent` | `0` | engine busy, % |
+| `serial_number`, `product_name` | `SN-EXAMPLE-0005`, `AMD Instinct MI355X OAM` | board identity |
+| `current_link_speed`, `current_link_width` | `32.0 GT/s PCIe`, `16` | PCIe link; fewer lanes or lower speed is a degraded link |
+| `ras/features` | `feature mask: 0xfffff` | which RAS blocks are on |
+| `ras/aca_umc` (also `aca_gfx`, `aca_xgmi_wafl`, …) | `ue: 0 ce: 0 de: 0` | per-block error counts on this driver |
+| `ras/event_state` | `Fatal Error: count:0` | fatal and poison events since boot |
+| `ras/gpu_vram_bad_pages` | empty | bad pages, `pfn : size : R/P/F` |
+| `xgmi_hive_info/xgmi_hive_id` | (number) | GPUs with the same id share a hive |
+| `xgmi_physical_id` | `6` | position in the hive |
+| `hwmon/hwmon*/temp2_input`, `temp3_input` | `50000`, `38000` | junction, memory, in millidegrees |
+| `hwmon/hwmon*/power1_input` | `320000000` | socket power, µW |
+| `aer_dev_correctable`, `aer_dev_nonfatal`, `aer_dev_fatal` | all `0` | PCIe Advanced Error Reporting counters |
+
+The kernel documentation names the per-block files `<block>_err_count`. On recent amdgpu drivers (6.14.0 in this example) they do not exist; the counts are in `ras/aca_<block>` instead. Scripts that hard-code the old names silently read nothing.
+
+## The kernel log
+
+`journalctl -k` is the most reliable record of a GPU fault. After a couple of weeks of uptime, `dmesg` can return no `amdgpu` lines at all (the ring buffer has wrapped), while `journalctl -k` still has the boot messages. Use journald.
+
+```shell
+journalctl -k --since -1d | grep -iE 'amdgpu.*(ras|reset|hang|timeout|fault|poison|fatal)'
+```
+
+A healthy boot shows one RAS line per GPU:
+
+```text
+amdgpu 0000:e5:00.0: RAS INFO: ras initialized successfully, hardware ability[fffff] ras_mask[fffff]
+amdgpu 0000:e5:00.0: AMDGPU RAS Is Ready.
+```
+
+Patterns that mean trouble:
+
+| Pattern | Meaning |
+| --- | --- |
+| `RAS Intr triggered` / `ERREVENT_ATHUB_INTERRUPT` | a fatal hardware event; on a failing GPU it can repeat thousands of times |
+| `GPU reset begin` | the driver started a reset; printed once |
+| `ring … timeout` | a queue stopped making progress: a hang |
+| `GPU reset succeeded, trying to resume` | only means the reinit path ran; **not** proof of recovery |
+| `PSP resume failed` / `-62` | the GPU's boot processor did not come back; needs a cold power cycle |
+| `bad page` / `poison` | memory errors being contained |
+| `AER:` | PCIe errors on the link |
+
+
+## Validation and diagnostics (disruptive, described only)
+
+These tools load the GPUs to the limit or push traffic between them. They need the node **cordoned and drained**, and the workload owner must confirm the GPUs are free first. They were not run for this page.
+
+| Tool | What it does | Runtime | Notes |
+| --- | --- | --- | --- |
+| **RVS** (ROCm Validation Suite, `rvs`) | modules that stress compute, memory, PCIe and peer links, and check results against limits | minutes per module | public docs; config files choose the tests |
+| **AGFHC** (AMD GPU Field Health Check, `/opt/amd/agfhc/agfhc`) | AMD's field diagnostic, run before an RMA and for burn-in; adds multi-GPU XGMI tests | `single_pass` about 6 min; a burn-in recipe about 6 h | distributed by AMD; no public docs found. Recipes include `hbm_lvl5`, `pcie_lvl2`, `all_lvl5` |
+| **TransferBench** | measures copy bandwidth between GPUs and host | minutes | finds a slow XGMI link or PCIe path |
+
+
+Two limits to remember:
+
+- A clean AGFHC pass does not prove a part is healthy. An intermittent fault that comes every 3 days on average is caught by a 2-hour test only about 3 % of the time.
+- A passing burn-in is not a performance test. AGFHC checks health, not throughput.
+
+## Misconceptions
+
+- *"`amd-smi reset -G -g 3` resets only GPU 3."* On MI35x it resets the hive, all 8 GPUs, and kills every process holding `/dev/kfd`.
+- *"GPU index = slot."* No. Use `amd-smi list -e` and the OAM ID.
+- *"No lines in dmesg means no errors."* The ring buffer wraps. Read `journalctl -k`.
+- *"0 % GFX means the GPU is free."* Look at VRAM and `amd-smi process`, then the [claim](/learn/gpu-process-to-pod/).
+
+## Further reading
+
+- [AMD SMI CLI tool](https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html) (reset scope, ras, monitor) · [AMD SMI docs](https://rocm.docs.amd.com/projects/amdsmi/en/latest/)
+- [AMDGPU RAS support](https://docs.kernel.org/gpu/amdgpu/ras.html) (sysfs and debugfs interfaces) · [MI350 architecture](https://rocm.docs.amd.com/en/latest/reference/gpu-arch/mi350.html)
+- [ROCm Validation Suite](https://rocm.docs.amd.com/projects/ROCmValidationSuite/en/latest/) · [TransferBench](https://rocm.docs.amd.com/projects/TransferBench/en/latest/) · [rocminfo](https://rocm.docs.amd.com/projects/rocminfo/en/latest/) · [ROCm SMI library](https://rocm.docs.amd.com/projects/rocm_smi_lib/en/latest/)

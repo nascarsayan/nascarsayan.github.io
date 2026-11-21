@@ -1,0 +1,32 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Inside a model, level by level"
+short: "Inside a model"
+description: "One forward pass of gpt-oss-120b as a diagram you can open up: a layer as GPU kernels, attention with the KV cache, FlashAttention, the MoE router, and a GEMM down to one workgroup's K loop."
+updated: "2026-11-11"
+track: inference
+order: 0.5
+eyebrow: "Learn · LLM inference"
+---
+import Drilldown from '@/components/content/Drilldown.astro';
+import model from './_model.drill';
+
+What the model computes, from tokens down to the loops a GPU runs. Every level is a diagram from another page, so this page and those pages always show the same picture.
+
+<Drilldown tree={model} id="model" />
+
+## How to read it
+
+- **Click a box with the badge** to open it below; click it again, or press Esc, to close it. The breadcrumb goes back up; **Map** lists every level.
+- Boxes that lead to the same thing open the **same** panel: attention and MoE both open the layer's kernels; every GEMM opens one GEMM view.
+
+## Where each level comes from
+
+| Level | Page |
+| --- | --- |
+| The forward pass | [Tokens and transformers](/learn/tokens-and-transformers/) |
+| One layer as kernels | [Prefill and decode kernels](/learn/llm-kernels/) |
+| Attention and the KV cache | [Attention and the KV cache](/learn/attention-and-kv-cache/), [KV cache management](/learn/kv-cache-management/) |
+| FlashAttention | [FlashAttention](/learn/flash-attention/) |
+| The router | [Mixture of experts](/learn/mixture-of-experts/) |
+| A GEMM | [GEMM tiling](/learn/gemm-tiling/) |

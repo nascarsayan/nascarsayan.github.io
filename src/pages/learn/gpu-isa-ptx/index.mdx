@@ -1,0 +1,451 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "From source to silicon: PTX, SASS and AMDGCN"
+short: "PTX & AMDGCN ISA"
+description: "What the GPU actually executes and how it gets there. NVIDIA compiles CUDA to PTX (a virtual ISA) and then SASS per architecture, packed in a fatbinary with JIT fallback; AMD compiles HIP through LLVM to AMDGCN code objects per gfx target (gfx950 for MI355X) in an offload bundle. Real compiler output for loads, LDS, matrix-core ops (mma, wgmma, tcgen05, v_mfma), and how to dump and disassemble them yourself."
+updated: "2026-11-10"
+track: silicon
+order: 2
+requires: [gpu-execution-model]
+eyebrow: "Learn · Kernels & silicon"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import pipeline from './_pipeline.diagram';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Columns from '@/components/content/Columns.astro';
+import Column from '@/components/content/Column.astro';
+import Loader from './_Loader.astro';
+import * as px from './_pipe';
+
+A GPU does not run C++. It runs a vendor-specific instruction set, and the compiler must produce that instruction set for the exact chip family. This page follows one kernel from source to machine code on both vendors, shows example instructions, and explains why that makes container images per GPU model.
+
+<Callout tone="note" title="Example output vs syntax">
+Blocks marked **example** are illustrative compiler or tool output (trimmed, comments added), of the kind `nvcc` (example CUDA 12.8) produces for `sm_90` and `hipcc`/`amdclang++` (example ROCm 7.0.0) produce for `gfx950`, from the small kernels shown on this page and on [How a GPU runs code](/learn/gpu-execution-model/). Blocks marked **syntax** are copied from the vendor ISA documents. Nothing here was run on production GPUs.
+</Callout>
+
+## The idea first
+
+You already know this problem from container images. One tag, `nginx:1.27`, holds a **manifest list**: an `amd64` image, an `arm64` image. The node's runtime pulls the one that matches its CPU. GPU binaries work the same way, with one twist: GPU instruction sets change with **every chip generation**, not every decade.
+
+| Piece | Container picture | The question it answers |
+| --- | --- | --- |
+| **ISA**: SASS (NVIDIA), AMDGCN (AMD) | the CPU architecture, `amd64` vs `arm64` | "Which instructions does this exact chip understand?" |
+| **cubin** / **code object** | one platform image in the list | "What does one chip family run?" |
+| **fat binary** (`.nv_fatbin`, `.hip_fatbin`) | the manifest list, packed inside the `.so` | "Which GPUs was this build made for?" |
+| **target** (`sm_90`, `gfx950:sramecc+:xnack-`) | the platform string, `linux/arm64/v8` | "Does this entry fit this GPU, in this mode?" |
+| **PTX** (NVIDIA only) | shipping the build recipe along, so a new platform can build its own image on the spot | "Can a GPU newer than the build still run it?" |
+| **driver / HIP runtime** | the container runtime choosing a platform | "Which entry runs, or does it fail?" |
+
+**Where the picture breaks.** The entries are not separate downloads: every entry sits inside every copy of the library, so each extra GPU target makes the image bigger. And only NVIDIA ships a "recipe" (PTX) that a newer GPU can compile at first use (**JIT**, just in time). AMD's normal builds have no such fallback: no matching code object means the kernel cannot run.
+
+<Diagram spec={pipeline} title="Source to machine code" caption="Click the i on a box for details. Both vendors embed device code in the normal host ELF (.so or executable).">
+  <Step title="Same source" focus="cu, hip">One C++ file. `nvcc` and `hipcc` both accept it (with HIP's header).</Step>
+  <Step title="A portable middle" focus="ptx, ir, cu -> ptx, hip -> ir">NVIDIA lowers it to PTX, a documented virtual ISA that it can keep. AMD lowers it to LLVM IR, which stays inside the compiler.</Step>
+  <Step title="Machine code per chip" focus="sass, co, ptx -> sass, ir -> co">Then the real instruction set for one chip family: SASS for `sm_90`, an AMDGCN code object for `gfx950`.</Step>
+  <Step title="Packed into the host binary" focus="fat, bund, sass -> fat, co -> bund">All targets go into one fat binary section of the `.so`. At load the runtime picks the entry for the GPU in the node.</Step>
+</Diagram>
+
+## Worked example: one kernel, source to silicon
+
+The same `axpy` kernel, built for `sm_90` (H100) and `gfx950` (MI355X) with example toolchain versions (CUDA 12.8, ROCm 7.0.0). Every block is **example** tool output (trimmed, illustrative); the sizes are representative, and the page derives its totals from them.
+
+<Walkthrough title="axpy from .cu to the bytes the GPU runs" caption="Compiler output only, nothing run on a GPU.">
+  <WStep title="1 · One source file">
+
+```cpp
+// axpy.cu = axpy.hip, 278 bytes
+extern "C" __global__ void axpy(float a, const float* x, float* y, int n) {
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) y[i] = a * x[i] + y[i];
+}
+```
+
+    `__global__` marks a kernel: host code launches it, the GPU runs it. `extern "C"` keeps the symbol name plain (`axpy`), so it is easy to find in every later step. Source: **{px.fmt.source} bytes**.
+  </WStep>
+  <WStep title="2 · The middle form: PTX vs LLVM IR">
+    <Columns>
+      <Column title="NVIDIA: PTX (nvcc -ptx)">
+
+```ptx
+.visible .entry axpy(.param .f32 axpy_param_0, ...)
+  mov.u32      %r3, %ctaid.x;      // blockIdx.x
+  mov.u32      %r4, %ntid.x;       // blockDim.x
+  mov.u32      %r5, %tid.x;        // threadIdx.x
+  mad.lo.s32   %r1, %r3, %r4, %r5; // i
+  setp.ge.s32  %p1, %r1, %r2;      // i >= n ?
+  @%p1 bra     $L__BB0_2;
+  ld.global.f32  %f2, [%rd6];      // x[i]
+  ld.global.f32  %f3, [%rd7];      // y[i]
+  fma.rn.f32     %f4, %f2, %f1, %f3;
+  st.global.f32  [%rd7], %f4;
+```
+
+      </Column>
+      <Column title="AMD: LLVM IR (-emit-llvm, -O3)">
+
+```llvm
+define amdgpu_kernel void @axpy(float %0,
+    ptr addrspace(1) %1, ptr addrspace(1) %2, i32 %3) {
+  %5  = call i32 @llvm.amdgcn.workgroup.id.x()
+  %11 = call i32 @llvm.amdgcn.workitem.id.x()
+  %12 = add i32 %10, %11            ; i
+  %13 = icmp slt i32 %12, %3        ; i < n ?
+  br i1 %13, label %14, label %22
+14:
+  %17 = load float, ptr addrspace(1) %16
+  %18 = fmul contract float %0, %17
+  %20 = load float, ptr addrspace(1) %19
+  %21 = fadd contract float %18, %20
+  store float %21, ptr addrspace(1) %19
+```
+
+      </Column>
+    </Columns>
+
+    Both still read like one thread's program, with unlimited virtual registers (`%r1`, `%12`). The difference is what happens to this form. PTX (**{px.fmt.ptx} bytes**) is a stable, documented format that NVIDIA can **ship inside the binary**. LLVM IR is the compiler's private working form; `addrspace(1)` is GPU global memory. AMD does not ship it.
+  </WStep>
+  <WStep title="3 · Machine code: SASS vs AMDGCN">
+    <Columns>
+      <Column title="NVIDIA: SASS sm_90 (cuobjdump -sass)">
+
+```text
+S2R R0, SR_TID.X ;
+S2UR UR4, SR_CTAID.X ;
+LDC R7, c[0x0][RZ] ;
+IMAD R7, R7, UR4, R0 ;
+ULDC UR4, c[0x0][0x228] ;
+ISETP.GE.AND P0, PT, R7, UR4, PT ;
+@P0 EXIT ;
+LDG.E R2, desc[UR4][R2.64] ;
+LDG.E R7, desc[UR4][R4.64] ;
+FFMA R7, R2, UR6, R7 ;
+STG.E desc[UR4][R4.64], R7 ;
+EXIT ;
+```
+
+      </Column>
+      <Column title="AMD: gfx950 (llvm-objdump -d)">
+
+```amdgcn
+s_load_dword s4, s[0:1], 0x18   ; n
+s_mul_i32 s2, s2, s3            ; blockIdx*blockDim
+v_add_u32_e32 v0, s2, v0        ; i
+v_cmp_gt_i32_e32 vcc, s4, v0    ; n > i ?
+s_and_saveexec_b64 s[2:3], vcc  ; mask lanes
+s_load_dwordx4 s[4:7], s[0:1], 0x8 ; x, y
+global_load_dword v4, v[2:3], off
+global_load_dword v5, v[0:1], off
+s_waitcnt vmcnt(0)
+v_fmac_f32_e32 v5, s0, v4       ; y += a*x
+global_store_dword v[0:1], v5, off
+s_endpgm
+```
+
+      </Column>
+    </Columns>
+
+    Now physical registers and one chip family's instructions (both trimmed). The SASS has **{px.sassCount} instructions × 16 bytes = {px.sassBytes} bytes**; every sm_90 instruction is 128 bits. The gfx950 code has **{px.amdCount} instructions in {px.fmt.amdSym} bytes**: AMD instructions are 4 or 8 bytes. NVIDIA tests `i >= n` per thread with a predicate (`@P0 EXIT`); AMD switches lanes off in the `EXEC` mask (→ [How a GPU runs code](/learn/gpu-execution-model/#divergence-one-wave-through-an-ifelse-step-by-step)).
+  </WStep>
+  <WStep title="4 · Where the arguments come from">
+    <table>
+      <thead><tr><th>Argument</th><th>NVIDIA: constant bank 0</th><th>AMD: kernarg segment</th></tr></thead>
+      <tbody>{px.params.map((p) => <tr><td>{p.name}</td><td><code>c[0x0][{p.nv}]</code></td><td><code>s[0:1] + {p.amd}</code></td></tr>)}</tbody>
+    </table>
+
+    The host copies `a, x, y, n` into a small buffer at launch. **NVIDIA** puts it in constant bank 0, and the SASS reads it directly as an operand (`ULDC UR4, c[0x0][0x228]` is `n`). **AMD** puts it in memory and passes its address in `s[0:1]`; the code loads it with scalar loads (`s_load_dword s4, s[0:1], 0x18` is `n`). Both are scalar (one value per wave), because every thread sees the same arguments.
+  </WStep>
+  <WStep title="5 · The device ELF: cubin vs code object">
+    <Columns>
+      <Column title="NVIDIA: axpy_sm90.cubin">
+
+```text
+$ readelf -S -W axpy_sm90.cubin   (trimmed)
+  .nv.info.axpy      size 0x084
+  .text.axpy         size 0x200
+  .nv.constant0.axpy size 0x22c
+$ cuobjdump -res-usage axpy_sm90.cubin
+  Function axpy:
+  REG:10 STACK:0 SHARED:0 LOCAL:0 CONSTANT[0]:556
+```
+
+      </Column>
+      <Column title="AMD: gfx950 code object">
+
+```text
+$ llvm-readelf -h   (trimmed)
+  Machine: EM_AMDGPU
+  Flags:   0x54f, gfx950, xnack, sramecc
+$ llvm-readelf -S -W   (trimmed)
+  .note    size 0x514   metadata
+  .rodata  size 0x040   kernel descriptor axpy.kd
+  .text    size 0x4c0
+$ llvm-readelf --notes   (trimmed)
+  .name: axpy   .vgpr_count: 6   .sgpr_count: 14
+  .kernarg_segment_size: 288   .wavefront_size: 64
+```
+
+      </Column>
+    </Columns>
+
+    Each vendor wraps the machine code in an ordinary ELF file for the GPU: a **cubin** ({px.fmt.cubin} bytes) or a **code object** ({px.fmt.codeObject} bytes). Besides the code (`.text`), it carries what the hardware needs to start the kernel: registers per thread (10 on sm_90; 6 VGPRs on gfx950), the parameter bank ({px.fmt.nvConst0} bytes, matching `CONSTANT[0]:556`), and on AMD a {px.fmt.amdKd}-byte **kernel descriptor** that the command processor reads at dispatch. The ELF flags name the exact chip: `gfx950`.
+  </WStep>
+  <WStep title="6 · Packed into the host binary: the fat binary">
+    <Columns>
+      <Column title="NVIDIA: axpy_nv.o">
+
+```text
+$ nvcc -c -gencode arch=compute_90,code=sm_90 \
+          -gencode arch=compute_90,code=compute_90 ...
+$ cuobjdump --list-elf --list-ptx axpy_nv.o
+PTX file    1: axpy_nv.1.sm_90.ptx
+ELF file    1: axpy_nv.1.sm_90.cubin
+$ readelf -S -W axpy_nv.o
+  .nv_fatbin   size 0x1128
+```
+
+      </Column>
+      <Column title="AMD: libaxpy_amd.so">
+
+```text
+$ hipcc --offload-arch=gfx942 --offload-arch=gfx950 \
+        -O3 -fPIC -shared axpy.hip -o libaxpy_amd.so
+$ roc-obj-ls -v libaxpy_amd.so
+host-x86_64-unknown-linux-gnu-   offset=8192  size=0
+hipv4-amdgcn-amd-amdhsa--gfx942  offset=8192  size=5632
+hipv4-amdgcn-amd-amdhsa--gfx950  offset=16384 size=5632
+$ llvm-readelf -S -W libaxpy_amd.so
+  .hip_fatbin  size 0x4600
+```
+
+      </Column>
+    </Columns>
+
+    The host compiler builds the CPU side as usual, and the device ELFs go into one read-only section of the same file: `.nv_fatbin` ({px.fmt.nvFatbinObj} bytes, one cubin + its PTX) or `.hip_fatbin` ({px.fmt.hipFatbinSo} bytes, one code object per `--offload-arch`). This is the manifest list. Each extra GPU target adds one more full set of device code to every copy of the library, so a build for many targets makes the image bigger.
+  </WStep>
+  <WStep title="7 · Load time: the runtime picks an entry">
+    When the program starts, a small registration section (`.nvFatBinSegment`, `.hipFatBinSegment`) hands the fat binary to the CUDA driver or HIP runtime. At the first launch of `axpy`, it looks for an entry that fits the GPU: a matching cubin, else JIT from PTX (NVIDIA); a code object whose target ID matches (AMD). Then it uploads that code to GPU memory and writes a dispatch packet that points at it. Try the rules in the explorer below.
+  </WStep>
+</Walkthrough>
+
+<Loader />
+
+What to try: keep **MI355X** with only `gfx942` checked: that is the "image built for MI300X" failure, `hipErrorNoBinaryForGpu`. Then pick **B200** with `sm_90` + `compute_90`: the cubin does not fit (different major version), so the driver JIT-compiles the PTX. Uncheck the PTX and it fails.
+
+## The two pipelines side by side
+
+| Step | NVIDIA | AMD |
+| --- | --- | --- |
+| Source | CUDA C++ (`.cu`), or Triton / other DSLs | HIP C++ (`.hip`), or Triton / other DSLs |
+| Compiler driver | `nvcc` | `hipcc` → `amdclang++` (LLVM `clang -x hip`) |
+| Portable middle | **PTX**: a documented virtual ISA, plain text, forward compatible | LLVM IR, internal to the compiler, not shipped in normal builds |
+| Machine code | **SASS** per architecture: `sm_90` (H100), `sm_100` (B200) | **AMDGCN** per target: `gfx942` (MI300X), `gfx950` (MI355X) |
+| Container in the host ELF | section `.nv_fatbin`: cubins for listed archs + optional PTX | section `.hip_fatbin`: an offload bundle with one code object per target |
+| GPU newer than the build | driver JIT-compiles embedded PTX, caches it in `~/.nv/ComputeCache` | no fallback in a normal build: `hipErrorNoBinaryForGpu`, "no kernel image is available for execution on the device" |
+
+### NVIDIA: PTX, SASS, fatbinary, JIT
+
+`nvcc` first lowers CUDA to **PTX** for a *virtual* architecture (`compute_90`). Then `ptxas` turns PTX into **SASS** for a *real* architecture (`sm_90`). You choose what goes into the binary with `-gencode`:
+
+```bash
+# example commands, CUDA 12.8
+nvcc -c -gencode arch=compute_90,code=sm_90 \
+        -gencode arch=compute_100,code=sm_100 \
+        -gencode arch=compute_100,code=compute_100 axpy.cu -o axpy_fat.o
+cuobjdump --list-elf --list-ptx axpy_fat.o
+```
+
+```text
+ELF file    1: axpy_fat.1.sm_90.cubin
+PTX file    1: axpy_fat.1.sm_100.ptx
+ELF file    2: axpy_fat.2.sm_100.cubin
+```
+
+At load time the CUDA driver picks the cubin that matches the GPU. If none matches but compatible PTX is present, the driver **JIT-compiles** it (just-in-time, at first use) and caches the result in `~/.nv/ComputeCache` (`CUDA_CACHE_PATH`, default size 1 GiB). That is why a CUDA image built before Blackwell can still start on a B200: slower on first launch, and without Blackwell-only instructions.
+
+Some instructions exist only on one architecture. `wgmma` requires the architecture-specific target `sm_90a`. `tcgen05.mma` requires `sm_100a`, or the family target `sm_100f` and later in that family (PTX ISA guide). Code built for those targets has no forward-compatible PTX path.
+
+### AMD: LLVM, code objects, offload bundles
+
+`hipcc` compiles the same source twice: once for the host (x86-64) and once per `--offload-arch`. The AMDGPU backend of LLVM emits an ELF **code object** per target. `clang-offload-bundler` packs them into a bundle in the host object:
+
+```bash
+# example commands, ROCm 7.0.0
+amdclang++ -x hip --offload-arch=gfx942 --offload-arch=gfx950 -O3 -c axpy.hip -o axpy_multi.o
+clang-offload-bundler --list --type=o --input=axpy_multi.o
+```
+
+```text
+host-x86_64-unknown-linux-gnu-
+hipv4-amdgcn-amd-amdhsa--gfx942
+hipv4-amdgcn-amd-amdhsa--gfx950
+```
+
+At load the HIP runtime compares each code object's **target ID** with the GPU's. An MI355X reports target IDs like these (example `rocminfo` output):
+
+```text
+      Name:                    amdgcn-amd-amdhsa--gfx950:sramecc+:xnack-
+      Name:                    amdgcn-amd-amdhsa--gfx9-4-generic:sramecc+:xnack-
+```
+
+- `gfx950` is the processor. `sramecc+` means on-chip SRAM ECC is on. `xnack-` means retry-on-page-fault is off. A code object built for `gfx950` without feature suffixes runs in either mode; one built for `gfx950:xnack+` does not load here (LLVM AMDGPU target ID rules).
+- `gfx9-4-generic` is a **generic target**: one code object that runs on gfx942 and gfx950. The price: per the LLVM AMDGPU docs, FP8/BF8 instructions are not available in it. LLM kernels that need FP8 are therefore built per chip.
+
+ROCm packages can be named for the chip (gfx950 builds for MI355X), and inference images likewise ship gfx950 code. → [GPU software stack](/learn/gpu-software-stack/)
+
+### JIT compilers: Triton
+
+Many LLM kernels are written in **Triton**, a Python DSL. Triton compiles at run time, the first time a kernel is called with a new shape class, through MLIR and LLVM to PTX/cubin (NVIDIA) or AMDGCN (AMD). It caches results under `~/.triton/cache` (override: `TRITON_CACHE_DIR`). For a server like vLLM this means start-up does real compilation work, and that a read-only or fresh home directory makes every cold start pay it again.
+
+## What the instructions look like
+
+The plain `axpy` instructions on both vendors are in the [worked example](#worked-example-one-kernel-source-to-silicon) above. The rest of this section shows the instructions that matter for LLM kernels: the ones that feed the matrix cores.
+
+### Feeding the matrix cores: NVIDIA
+
+A **matrix core** (NVIDIA: **Tensor Core**) multiplies small matrix tiles in one instruction. Each generation added a bigger, more asynchronous form:
+
+| Instruction | Introduced | Who issues it | Operands live in |
+| --- | --- | --- | --- |
+| `mma.sync` / `wmma.mma.sync` | Volta–Ampere, still valid | one warp (32 threads) | registers |
+| `wgmma.mma_async` | Hopper, `sm_90a` | one **warpgroup** (4 contiguous warps, 128 threads) | A in registers or shared memory, B in shared memory (via descriptors), accumulator in registers |
+| `tcgen05.mma` | Blackwell, `sm_100a` | one thread on behalf of the CTA | A/B in shared memory, accumulator in **Tensor Memory** |
+
+Data movement instructions go with them:
+
+- `cp.async` (Ampere+, `sm_80`) copies global → shared memory without passing through registers, so the warp can keep computing. Completion is tracked with `cp.async.commit_group` / `cp.async.wait_group N`.
+- `ldmatrix` (`sm_75`+) loads 8×8 matrix fragments from shared memory into the register layout `mma` expects.
+- `cp.async.bulk.tensor` (Hopper+) drives the **TMA** (Tensor Memory Accelerator), a copy engine that moves whole 1D–5D tiles between global and shared memory from one thread's request.
+- **Tensor Memory** (Blackwell) is a per-SM accumulator store, 128 lanes × 512 columns of 32-bit cells per CTA (256 KB), allocated with `tcgen05.alloc` and read with `tcgen05.ld`.
+
+**Example** PTX and SASS from a small one-warp tile kernel (`wmma` 16×16×16, FP16 in, FP32 accumulate, `cp.async` into shared memory), `sm_90`:
+
+```ptx
+// PTX
+cp.async.cg.shared.global [%r2], [%rd4], 16, 16;     // 16 B global -> shared, async
+cp.async.commit_group;
+cp.async.wait_group 0;
+wmma.load.a.sync.aligned.row.m16n16k16.shared.f16  {%r36, ..., %r43}, [%r20], %r34;
+wmma.mma.sync.aligned.row.col.m16n16k16.f32.f32    {%f82, ..., %f89}, {%r36, ...}, {%r45, ...}, {%f145, ...};
+```
+
+```text
+// SASS (instruction counts from cuobjdump -sass)
+LDGSTS.E.BYPASS.128 [R2], desc[UR8][R12.64]   // cp.async
+LDGDEPBAR / DEPBAR.LE SB0, 0x0                // commit_group / wait_group
+LDSM.16.M88.4 R12, [R20]                      // ldmatrix: the compiler lowered wmma.load to it
+HMMA.16816.F32 R4, R12, R16, R4               // mma m16n8k16; one wmma 16x16x16 = 2 HMMAs
+```
+
+**Syntax** from the PTX ISA guide for the newer forms (operand lists shortened):
+
+```ptx
+ldmatrix.sync.aligned.m8n8.x4.b16 {d0, d1, d2, d3}, [addr];
+mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {d0..d3}, {a0..a3}, {b0, b1}, {c0..c3};
+wgmma.mma_async.sync.aligned.m64n8k16.f32.f16.f16 {f32d0, f32d1, f32d2, f32d3}, {f16a0, ..., f16a3}, descB, 1, -1, -1, 1;
+wgmma.commit_group.sync.aligned;  wgmma.wait_group.sync.aligned 0;
+tcgen05.mma.cta_group::1.kind::f16 [taddr0], a-desc, b-desc, idesc, p;
+tcgen05.commit.cta_group::1.mbarrier::arrive::one.b64 [mbarObj0];
+```
+
+The trend: each generation moves operands further from per-thread registers (registers → shared memory → Tensor Memory) and makes the multiply asynchronous, so a few threads can keep the Tensor Cores busy while others move data.
+
+### Feeding the matrix cores: AMD
+
+AMD's matrix instructions are **MFMA** (Matrix Fused Multiply-Add), `v_mfma_*`. A whole wavefront issues one, and each lane holds a slice of A, B and the accumulator. The accumulator usually lives in **AGPRs** (`a[...]`, accumulation VGPRs), a second register bank next to the normal `v` registers.
+
+**Example** gfx950 assembly from a small one-wavefront tile kernel (`__builtin_amdgcn_mfma_f32_32x32x16_f16`, A and B staged through LDS):
+
+```amdgcn
+.LBB0_2:                                       ; K loop
+  global_load_dwordx4      v[6:9], v[14:15], off      ; 16 B per lane of A from HBM
+  global_load_dwordx4      v[10:13], v[16:17], off    ; 16 B per lane of B
+  s_waitcnt                vmcnt(1)
+  ds_write_b128            v1, v[6:9]                 ; A slice -> LDS
+  s_waitcnt                vmcnt(0)
+  ds_write_b128            v4, v[10:13]               ; B slice -> LDS
+  s_waitcnt                lgkmcnt(0)
+  ; wave barrier                                      ; __syncthreads() with 1 wave: no instruction needed
+  ds_read_b128             v[6:9], v1                 ; LDS -> registers
+  ds_read_b128             v[10:13], v4
+  s_waitcnt                lgkmcnt(0)
+  v_mfma_f32_32x32x16_f16  a[0:15], v[6:9], v[10:13], a[0:15]   ; C[32x32] += A[32x16] * B[16x32]
+  s_cbranch_scc0           .LBB0_2
+```
+
+Resource report for it: 18 VGPRs, 16 AGPRs, 2,048 bytes of LDS, 8 waves per SIMD possible. The 16 AGPRs are the 32 × 32 = 1,024 FP32 results spread over 64 lanes (16 per lane).
+
+**What one MFMA is worth.** `32×32×16` means 32 × 32 × 16 multiply-adds = **32,768 FLOPs** per instruction. MI355X peak dense FP16 matrix is 2.5 PFLOP/s (AMD spec, approximate). $$2.5 \times 10^{15} \div (256\ \text{CUs} \times 2.4 \times 10^{9}\ \text{Hz}) \approx 4{,}070$$ FLOPs per CU per clock, about 1,024 per SIMD. So each SIMD must finish one such MFMA roughly every 32 cycles to reach peak (derived from the spec sheet, not measured).
+
+**gfx950-only instructions.** CDNA4 added instructions that gfx942 does not have. Assembling them with LLVM's `llvm-mc` shows the boundary (**example**):
+
+```shell
+$ llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx950 -show-encoding t.s
+  v_mfma_f32_32x32x64_f8f6f4 a[0:15], v[0:7], v[8:15], a[0:15]           ; FP8/FP6/FP4 inputs
+  v_mfma_scale_f32_32x32x64_f8f6f4 a[0:15], v[0:7], v[8:15], a[0:15], v16, v17   ; with MX block scales
+  v_mfma_f32_16x16x32_bf16 a[0:3], v[0:3], v[4:7], a[0:3]
+  global_load_lds_dwordx4 v[2:3], off                                    ; HBM -> LDS, skipping registers
+  ds_read_b64_tr_b16 v[0:1], v2                                          ; LDS read with transpose
+$ llvm-mc -triple=amdgcn-amd-amdhsa -mcpu=gfx942 t.s
+t.s:1:1: error: instruction not supported on this GPU
+...                                                                       (same for all five)
+```
+
+`v_mfma_scale_*_f8f6f4` multiplies 8-, 6- or 4-bit values with per-block scale factors (the OCP **MX** formats). That is what MI355X's 10 PFLOP/s MXFP4 figure refers to, and why 4-bit-weight models such as gpt-oss-120b (MXFP4 weights in the published checkpoint) suit it.
+
+### AMD memory instruction families
+
+| Prefix | Path | Example | Notes |
+| --- | --- | --- | --- |
+| `s_load_*` | scalar unit, scalar cache | `s_load_dwordx4 s[4:7], s[0:1], 0x8` | one value per wave: kernel arguments, pointers |
+| `global_*` | vector memory, 64-bit address per lane | `global_load_dwordx4 v[6:9], v[14:15], off` | the common load/store |
+| `buffer_*` | vector memory through a **buffer resource** (128-bit descriptor in 4 SGPRs: base, size, stride, format) | `buffer_load_dwordx4 v[0:3], v4, s[8:11], 0 offen` | hardware bounds check: out-of-range loads return 0; used by tuned GEMM/attention kernels |
+| `ds_*` | LDS | `ds_read_b128`, `ds_write_b128` | "data share"; counted by `lgkmcnt` |
+| `flat_*` | any address space | `flat_load_dword` | the compiler uses it when it cannot prove where a pointer points |
+
+## Seeing it yourself
+
+| Want | NVIDIA | AMD |
+| --- | --- | --- |
+| Emit the intermediate / assembly | `nvcc -ptx k.cu` | `hipcc --offload-arch=gfx950 -O3 --save-temps -c k.hip` (keeps `k-hip-amdgcn-amd-amdhsa-gfx950.s`) |
+| Register / LDS use per kernel | `nvcc -Xptxas -v` | `-Rpass-analysis=kernel-resource-usage` |
+| List what a binary contains | `cuobjdump --list-elf --list-ptx a.out` | `clang-offload-bundler --list --type=o --input=k.o` |
+| Extract device code | `cuobjdump -xelf all a.out` | `llvm-objdump --offloading k.o` (writes one file per bundle entry) |
+| Disassemble | `cuobjdump -sass`, `nvdisasm` | `llvm-objdump -d --mcpu=gfx950 <code object>` |
+| Kernel metadata | `cuobjdump -res-usage` | `llvm-readelf --notes <code object>` (`.vgpr_count`, `.agpr_count`, `.group_segment_fixed_size`, `.wavefront_size`) |
+| Profile instructions | Nsight Compute (`ncu --set full`) | `rocprofv3` (counters, thread trace), rocprofiler-compute (formerly Omniperf) |
+
+For example, the extracted gfx950 code object of `axpy` (**example**):
+
+```shell
+$ llvm-readelf -h axpy_multi.o.0.hipv4-amdgcn-amd-amdhsa--gfx950 | grep -E 'Machine|Flags'
+  Machine:                           EM_AMDGPU
+  Flags:                             0x54f, gfx950, xnack, sramecc
+$ llvm-readelf --notes ... | grep -E 'name|vgpr_count|wavefront_size'
+    .name:           axpy
+    .vgpr_count:     6
+    .wavefront_size: 64
+```
+
+The ROCm tools live in `/opt/rocm/lib/llvm/bin` on a ROCm install. GPU hosts often carry only the runtime and `rocprofv3`, not the compiler; inspect binaries on a build host or inside the image.
+
+## How this shows up in operations
+
+- **Images are per GPU model.** An image without gfx950 code objects fails on MI355X with `hipErrorNoBinaryForGpu`. An image built only for gfx950 will not run on an MI300X node. Mixed fleets need either multi-target builds (bigger images) or per-model images and node selectors. → [GPUs in Kubernetes](/learn/gpus-in-kubernetes/)
+- **NVIDIA "works" on new GPUs via PTX JIT, but slowly and partially.** First-start JIT can take minutes for large libraries, and the result lacks arch-specific instructions (`wgmma`, `tcgen05`). The JIT cache must be writable.
+- **Triton and vLLM compile at start-up.** Cold-start time depends on whether the Triton cache survives restarts. A read-only root filesystem or an ephemeral home means recompiling on every Pod start.
+- **Driver and compiler versions move together.** Newer ISA features need a newer compiler and, at run time, a driver/firmware that supports them.
+
+## Further reading
+
+- [PTX ISA](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html): `mma`, `ldmatrix`, `cp.async`, `wgmma`, `tcgen05`, target ISA notes
+- [nvcc: GPU compilation and `-gencode`](https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html) · [CUDA binary utilities](https://docs.nvidia.com/cuda/cuda-binary-utilities/index.html) (`cuobjdump`, `nvdisasm`)
+- [CUDA environment variables](https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/environment-variables.html): `CUDA_CACHE_PATH`, `CUDA_FORCE_PTX_JIT`
+- [LLVM AMDGPU usage](https://llvm.org/docs/AMDGPUUsage.html): processors, target IDs, generic targets, code object metadata
+- [Clang offload bundler](https://clang.llvm.org/docs/ClangOffloadBundler.html)
+- [AMD CDNA4 ISA reference guide (PDF)](https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/instruction-set-architectures/amd-instinct-cdna4-instruction-set-architecture.pdf): MFMA, buffer, LDS instructions
+- [AMD matrix instruction calculator](https://github.com/ROCm/amd_matrix_instruction_calculator): register layout and cycle counts per MFMA
+- [rocprofv3](https://rocm.docs.amd.com/projects/rocprofiler-sdk/en/latest/how-to/using-rocprofv3.html) · [rocprofiler-compute](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/) · [Nsight Compute CLI](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html)
+- [AMD MI355X specifications](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html)

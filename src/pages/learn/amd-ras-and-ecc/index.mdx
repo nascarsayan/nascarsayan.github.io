@@ -1,0 +1,191 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "AMD RAS and ECC: how a hardware error becomes a log line"
+short: "AMD RAS and ECC"
+description: "Correctable, uncorrectable and deferred errors, each traced step by step from the HBM cell to the kernel log, counters, exporter and an optional node taint; the RAS blocks; the bad-page budget worked through with a calculator; CPER, ACA banks and AFIDs; MODE1 hive resets. AMD in depth, NVIDIA alongside."
+updated: "2026-11-10"
+track: operations
+order: 3
+requires: [amd-gpu-tools]
+eyebrow: "Learn · Operating GPU nodes"
+links:
+  - { label: "amdgpu RAS (kernel docs)", href: "https://docs.kernel.org/gpu/amdgpu/ras.html" }
+
+---
+import Callout from '@/components/content/Callout.astro';
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Badge from '@/components/content/Badge.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import Out from '../amd-gpu-tools/_Out.astro';
+import BudgetCalc from './_BudgetCalc.astro';
+import event from './_event.diagram';
+import { EVENTS } from './_events';
+import * as b from './_budget';
+
+**RAS** means Reliability, Availability, Serviceability. AMD's definition: detect hardware errors, record them, and correct them where possible. At GPU scale errors are expected, not exceptional: one MI355X has 288 GB of HBM on an 8192-bit bus and a 1400 W power limit. Without detection, the result would be silently wrong answers.
+
+This page shows what the RAS machinery reports, where you read it, and where it is blind. The tools are in [AMD tools](/learn/amd-gpu-tools/); the failure classes and incidents are in [GPU failures](/learn/gpu-failures/).
+
+## The idea
+
+Memory stores every word with a few extra check bits, the way a bank account number carries a check digit. This is **ECC** (error-correcting code). When the word is read, the hardware recomputes the check bits. If one bit flipped, it can tell which one and flip it back. If more flipped, it can tell something is wrong but not what the right value was.
+
+That gives three outcomes, each answering "what should happen now?":
+
+- **Corrected**: the reader got the right data. Just count it, like a spell checker fixing a typo.
+- **Uncorrectable**: the data is wrong. Someone must act: stop the program that read it, never use that memory again.
+- **Poisoned** (deferred): wrong, but nobody has read it yet. Mark it and act only if it is used, the way a taint keeps new Pods off a node without killing the running ones.
+
+Every error then leaves **bookkeeping**: a counter, a record for the vendor, a retired page. Monitoring reads the bookkeeping, not the error itself.
+
+Where the analogy breaks: on MI300/MI350 there is one error path, the fatal one, that skips all the bookkeeping. The chip resets itself and its seven neighbours, and the only trace is a line in the kernel log. Follow each event below to see the difference.
+
+## Follow one error through the system
+
+Pick an event. The diagram lights each step from the memory cell to an optional node taint (node-problem-detector rules, if you deploy them); the table says what each signal would show.
+
+<Explorer id="ras-event" options={[{ key: 'ev', label: 'Event', default: 'ce', values: EVENTS.map((e) => ({ value: e.id, label: e.label })) }]} variants={EVENTS.map((e) => ({ match: { ev: e.id }, id: ("ev-" + (e.id)) }))}>
+  {EVENTS.map((e) => (
+    <Variant id={("ev-" + (e.id))}>
+      <Diagram spec={event} title={e.label}>
+        {e.steps.map((s) => <Step title={s.title} path={s.path} focus={s.focus} state={s.state}>{s.text}</Step>)}
+      </Diagram>
+      <table>
+        <thead><tr><th>Signal</th><th>What it shows</th></tr></thead>
+        <tbody>{e.signals.map(([k, v, tone]) => <tr><td>{k}</td><td><Badge tone={tone}>{v}</Badge></td></tr>)}</tbody>
+      </table>
+    </Variant>
+  ))}
+</Explorer>
+
+## Three kinds of error
+
+| Class | What happened | What the hardware and driver do | Ops meaning |
+| --- | --- | --- | --- |
+| **Correctable (CE)** | ECC found a flipped bit and fixed it | count it; the data is right | a low background rate is normal; a rising rate is an early warning |
+| **Uncorrectable (UE)** | ECC found damage it cannot fix | the data is wrong; something must act (kill the process, retire the page, or reset) | the job on that GPU likely died |
+| **Deferred / poison** | uncorrectable, but nobody has read the bad data yet | mark the data **poisoned**; act only if it is consumed | containment instead of panic |
+
+`amd-smi static` on an MI355X shows `POISON_SCHEMA: ENABLED`.
+
+## The RAS blocks
+
+The chip is made of IP blocks, and each block reports its own errors. The names appear in `amd-smi static -r`, `amd-smi metric -k`, sysfs `ras/aca_*` and the exporter metrics (`gpu_ecc_uncorrect_<block>`).
+
+| Block | Full name | What it is | If it fails |
+| --- | --- | --- | --- |
+| **UMC** | Unified Memory Controller | drives the HBM stacks; owns HBM ECC | memory errors; bad pages get retired |
+| **GFX** | graphics/compute engine | the compute units that run kernels | job dies; usually a reset |
+| **SDMA** | System DMA | copy engines (host↔GPU, GPU↔GPU) | copies fail |
+| **MMHUB** | Memory hub | memory requests from engines other than compute | fatal per AMD |
+| **ATHUB** | Address Translation hub | virtual→physical translation | on MI300/MI350 the name of the **fatal signal path**, not proof that ATHUB failed |
+| **XGMI_WAFL** | XGMI / wafer-level fabric link | the GPU↔GPU links in the hive | link errors; peers affected |
+| **PCIE_BIF** | Bus interface | the PCIe-facing block | host link errors |
+| **HDP** | Host data path | host access to GPU memory | — |
+| **DF** | Data Fabric | on-chip interconnect | — |
+| **MP0 / MP1** | PSP / SMU | the GPU's boot/security processor and power manager | resets fail |
+| **VCN, JPEG** | video and JPEG decoders | media engines; unused by inference | — |
+| others | SMN, MCA, IH, MPIO, SEM, FUSE | sideband bus, machine check, interrupts, I/O | — |
+
+The exporter publishes 19 blocks × 3 classes, about 60 ECC series per GPU. **Only 7 blocks actually report on this part.** MI350X reports `gfx`, `jpeg`, `mmhub`, `sdma`, `umc`, `vcn` and `xgmi_wafl`; the other 12 always read 0. On an MI355X node, the driver typically exposes exactly these 7 as `ras/aca_gfx`, `aca_jpeg`, `aca_mmhub`, `aca_sdma`, `aca_umc`, `aca_vcn`, `aca_xgmi_wafl`. So an alert on `gpu_ecc_uncorrect_athub` can never fire.
+
+## The bookkeeping: ACA banks, CPER, AFID
+
+On the normal path, a block writes the error into an **ACA bank** (AMD's Machine Check Architecture registers: status, address, which IP raised it, syndrome). The SMU holds these banks; the driver harvests them. From the bank data the driver:
+
+1. increments the per-block counters (sysfs `ras/aca_<block>`, `amd-smi metric -k`, exporter `gpu_ecc_*`);
+2. builds a **CPER** record (Common Platform Error Record, a UEFI-standard format) that `amd-smi ras --cper` can dump;
+3. for UMC errors, retires the bad HBM page.
+
+An **AFID** (AMD Field ID) is derived from a CPER record with `amd-smi ras --afid`. AMD support uses it to match a field failure to a known root cause.
+
+On the **fatal path**, the driver source tells a different story: after any interrupt the driver polls one status bit; if set, it marks the error FATAL, sets Fatal-Error-Detected for every GPU in the hive and starts a **MODE1 reset**. No block identification and no bank harvest, so by design: no ECC counter moves (there is no ATHUB ECC counter), no CPER and no AFID (AMD also fixed a related firmware defect, "CPERs and RF events missing post mode 1 reset"), and `gpu_health` stays 1 because the exporter computes it from the counters.
+
+<Callout tone="risk" title="The kernel log is the primary detector">For fatal events, the kernel log is the only reliable signal. A kernel-log rule on `RAS Intr triggered` catches the fault within seconds of onset; no rule on ECC metrics ever fires, because no counter moves.</Callout>
+
+Another trap: the BDF in the fatal log line names the GPU whose interrupt handler won a software race. The driver uses a module-global flag, so only the first caller logs. The BDF does **not** prove which die failed.
+
+## Worked example: spending the bad-page budget
+
+When the UMC reports an uncorrectable HBM error, the driver **retires** the page: it stops handing that memory out and writes the address to an EEPROM on the board. The rules, from the driver source (mainline 6.16; check your exact build): one bad HBM row retires **{b.PAGES_PER_ROW} pages**, and the GPU is condemned past **{b.THRESHOLD} pages** (`BAD_PAGE_THRESHOLD: 128` in `amd-smi static`). Each grid below is that budget: {b.budgetRows} rows of {b.PAGES_PER_ROW} pages, plus one row past the limit.
+
+<Walkthrough title="One GPU's HBM wears out, row by row" caption="Computed from the rules above. Page size 4 KiB as in the kernel docs' example (not verified for MI355X).">
+  <WStep title="0 · New GPU: nothing retired">
+    <Matrix title="Retired pages (1 = retired)" rows={b.rowLabels} cols={b.pageLabels} data={b.grid(0)} digits={0} scale="seq" note="A healthy new fleet: every GPU looks like this." />
+    `amd-smi bad-pages` prints "No bad pages found." and `ras/gpu_vram_bad_pages` is empty. Zero means none ever happened, not "below threshold".
+  </WStep>
+  <WStep title="1 · First uncorrectable error: one row, 16 pages">
+    <Matrix title="Retired pages" rows={b.rowLabels} cols={b.pageLabels} data={b.grid(1)} digits={0} scale="seq" highlight={{ rows: [0] }} />
+    {b.state(1).text}. The program that read the bad data was killed; the GPU keeps serving. Each retired page shows up as a line `pfn : size : R` in `ras/gpu_vram_bad_pages` (R reserved, P pending, F failed to reserve).
+  </WStep>
+  <WStep title="2 · Months later: four bad rows">
+    <Matrix title="Retired pages" rows={b.rowLabels} cols={b.pageLabels} data={b.grid(4)} digits={0} scale="seq" highlight={{ rows: [3] }} />
+    {b.state(4).text}. Like a disk's reallocated-sector count, a small non-zero count on a well-used part is normal. The right response is a ticket and a trend graph, not a quarantine.
+  </WStep>
+  <WStep title="3 · Eight bad rows: the budget is full">
+    <Matrix title="Retired pages" rows={b.rowLabels} cols={b.pageLabels} data={b.grid(8)} digits={0} scale="seq" highlight={{ rows: [7] }} />
+    {b.state(8).text}. Exactly at the limit, `BAD_PAGE_THRESHOLD_EXCEEDED` is still False.
+  </WStep>
+  <WStep title="4 · The ninth row: condemned">
+    <Matrix title="Retired pages" rows={b.rowLabels} cols={b.pageLabels} data={b.grid(9)} digits={0} scale="seq" highlight={{ rows: [8] }} note="Row 9 pushes the count past 128." />
+    {b.state(9).text}. The GPU is flagged and should be held, drained and replaced. Notice the memory lost is still tiny: the budget is about wear, not capacity.
+  </WStep>
+</Walkthrough>
+
+<BudgetCalc />
+
+This is why "any uncorrectable ECC error → quarantine" is the wrong rule for HBM: an HBM error is survivable. A UE in GFX, SDMA, MMHUB or XGMI is fatal per AMD, with no published tolerance. A sensible rule set:
+
+- taint on any UE in the 6 non-HBM reporting blocks;
+- taint on the bad-page threshold (the 9th row);
+- report the HBM error count without tainting.
+
+Read the state on a node:
+
+<Out host="gpu-node-1" cmd="amd-smi bad-pages -g 4; cat /sys/class/drm/card5/device/ras/event_state" out={"GPU: 4\n    RETIRED: No bad pages found.\n    PENDING: No bad pages found.\n    UN_RES: No bad pages found.\ncurrent seqno: 0\nFatal Error: count:0, last_seqno:0\nPoison Creation: count:0, last_seqno:0\nPoison Consumption: count:0, last_seqno:0"} marks={[{ at: 'RETIRED', note: 'Retired pages: the budget used so far.', tone: 'good' }, { at: 'Fatal Error', note: 'Fatal events since boot, from the driver\'s RAS event log.', tone: 'good' }, { at: 'Poison Consumption', note: 'Times poisoned data was read: the moment an uncorrectable error actually hurt a program.' }]} />
+
+## Resets: what each one does
+
+| Reset | Scope | What it does | Clears ECC counters? |
+| --- | --- | --- | --- |
+| Queue / engine reset | one engine | restarts a hung queue; MI355X sysfs shows `compute_reset_mask` and `sdma_reset_mask`, so the driver supports it (when it is chosen is not verified here) | not verified |
+| **MODE1** | **the whole hive (8 GPUs)** | heaviest in-band reset: all IP blocks reset, VRAM lost, PSP must reload all firmware; power stays on; PCIe link not retrained | no (per the driver source) |
+| Host reboot (warm) | node | OS restarts; GPU rails stay powered | yes |
+| Cold power cycle (power off, wait, power on) | node | removes power from the GPU baseboard; PSP and SMU start fresh | yes |
+
+Why the whole hive: the driver comment says the reset "has to be done on all XGMI hive nodes ASAP to allow proper links negotiation in FW (within 1 sec)". The eight GPUs share one coherent memory fabric, so resetting one and leaving seven running would split their view of shared state. `amd-smi reset -G` follows the same rule; AMD's docs warn that resetting one GPU resets all GPUs in the hive.
+
+What clears the counters is easy to get wrong, and written sources disagree. Reading the driver source, a reboot clears the uncorrectable ECC counters and a GPU reset does not. Confirm on a node before building a rule on it. Either way, the bad-page list in EEPROM survives both.
+
+**MODE1 needs the PSP.** After the reset, the driver waits for the PSP bootloader. If the PSP does not answer, you see `PSP resume failed` and error `-62` (timer expired). Then only removing power recovers the GPUs. A BMC `cycle` (Redfish `ForceRestart`) does **not** remove power, and can leave the GPUs in a worse state. Use `off`, confirm the state is Off, then `on`.
+
+## NVIDIA alongside
+
+| Concept | AMD MI35x | NVIDIA (Hopper, Blackwell) |
+| --- | --- | --- |
+| Correctable memory error | CE count per block | single-bit (SBE) count; Xid 92 "High single-bit ECC error rate" |
+| Uncorrectable memory error | UE count, CPER, bad page | double-bit (DBE) Xid 48; Xid 94 "Contained memory error" (restart the app), Xid 95 "Uncontained memory error" (reset the GPU) |
+| Graceful HBM wear | page retirement, 128-page budget | **row remapping**: Xid 63 "GPU memory remapping event" (ignore), Xid 64 "remapping failure" (reset GPU, contact support); read with `nvidia-smi -q -d ROW_REMAPPER` |
+| Fatal error record | CPER / AFID (missing on the ATHUB path) | Xid code in the kernel log, with a resolution bucket in NVIDIA's Xid catalog |
+| Reset scope | MODE1: whole hive | `nvidia-smi -r` per GPU on HGX; on NVL72 a reset re-registers the GPU with the fabric (see [NVIDIA tools](/learn/nvidia-gpu-tools/)) |
+
+The Xid descriptions and immediate actions are quoted from NVIDIA's Xid catalog.
+
+## How this shows up for a Kubernetes operator
+
+- A job dies with exit 139 or a "GPU hang" message. Check `journalctl -k` on the node before trusting any metric.
+- The node stays `Ready`. The kubelet does not watch GPU health, and the DRA ResourceSlice has no health field.
+- `gpu_health=1` and all-zero ECC counters do **not** rule out a fatal event. They rule out HBM damage only: poison is on and no pages were retired.
+- Evidence disappears on recovery. Capture `journalctl -k`, `amd-smi ras --cper` (with sudo, into a case folder), `amd-smi metric -k`, `amd-smi bad-pages` and the BMC log **before** any power cycle..
+
+## Further reading
+
+- [AMDGPU RAS support](https://docs.kernel.org/gpu/amdgpu/ras.html) (sysfs `ras/` files, bad-page flags, `ras_ctrl` injection)
+- [AMD SMI CLI](https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html) (`ras --cper`, `--afid`, reset scope) · [AFID event list](https://docs.amd.com/r/en-US/AMD_Field_ID_70122_v1.0/AFID-Event-List)
+- [AMD GPU Operator auto-remediation](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/autoremediation/auto-remediation.html) (AMD's drain → reboot → test flow)
+- [NVIDIA Xid catalog](https://docs.nvidia.com/deploy/xid-errors/analyzing-xid-catalog.html) · [nvidia-smi](https://docs.nvidia.com/deploy/nvidia-smi/index.html) (`-d ROW_REMAPPER`, `PAGE_RETIREMENT`)

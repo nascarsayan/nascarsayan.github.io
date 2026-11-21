@@ -1,0 +1,107 @@
+---
+/**
+ * Partition-mode explorer: pick a compute mode and a memory mode; see the card
+ * (8 XCDs on 2 IODs, coloured by logical GPU), the memory pools, and the counts
+ * for one card and one 8-GPU MI355X node. Rules and counts from _modes.ts.
+ */
+import { compute, memory, mode, type CMode, type MMode } from './_modes';
+const all: Record<string, ReturnType<typeof mode>> = {};
+for (const c of Object.keys(compute) as CMode[]) for (const m of Object.keys(memory) as MMode[]) all[`${c}-${m}`] = mode(c, m);
+---
+
+<figure class="px" data-px={JSON.stringify(all)}>
+  <figcaption class="px-title">Partition mode explorer (MI355X)</figcaption>
+  <div class="px-ctl">
+    <div role="group" aria-label="Compute partition"><span>Compute</span>{Object.keys(compute).map((c) => <button type="button" data-c={c} aria-pressed={c === 'SPX' ? 'true' : 'false'}>{c}</button>)}</div>
+    <div role="group" aria-label="Memory partition"><span>Memory</span>{Object.keys(memory).map((m) => <button type="button" data-m={m} aria-pressed={m === 'NPS1' ? 'true' : 'false'}>{m}</button>)}</div>
+  </div>
+  <div class="px-card" aria-hidden="true">
+    {[0, 1].map((iod) => (
+      <div class="px-iod">
+        <span class="px-lab">IOD {iod}</span>
+        <div class="px-xcds">{[0, 1, 2, 3].map((k) => <span class="px-xcd" data-x={iod * 4 + k}><b>XCD {iod * 4 + k}</b><i></i></span>)}</div>
+        <div class="px-hbm">{[0, 1, 2, 3].map(() => <span>HBM</span>)}</div>
+      </div>
+    ))}
+    <div class="px-pools" data-o="pools"></div>
+  </div>
+  <p class="px-msg" data-o="msg"></p>
+  <div class="px-out">
+    <div><span class="k">Logical GPUs per card</span><span class="v" data-o="parts"></span></div>
+    <div><span class="k">Per node (8 cards)</span><span class="v" data-o="node"></span></div>
+    <div><span class="k">Each: XCDs / CUs</span><span class="v" data-o="cus"></span></div>
+    <div><span class="k">Each: DMA engines</span><span class="v" data-o="dma"></span></div>
+    <div><span class="k">Each: HBM</span><span class="v" data-o="hbm"></span></div>
+    <div><span class="k">Render nodes backed</span><span class="v" data-o="render"></span></div>
+  </div>
+  <p class="px-note" data-o="note"></p>
+</figure>
+
+<style>
+  .px { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .px-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .px-ctl { display: flex; flex-wrap: wrap; gap: 10px 28px; font-size: 0.875rem; }
+  .px-ctl div { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .px-ctl span { min-width: 64px; color: var(--color-muted); }
+  .px-ctl button { padding: 4px 12px; border-radius: 999px; background: var(--color-cloud-100); color: var(--color-gray-800); font-weight: 600; }
+  .px-ctl button[aria-pressed='true'] { background: var(--color-primary); color: #fff; }
+  .px-card { position: relative; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; padding: 10px; border-radius: 12px; background: var(--color-gray-100); }
+  .px-iod { padding: 8px; border-radius: 10px; border: 1px dashed var(--color-gray-500); }
+  .px-lab { font-size: 0.75rem; color: var(--color-muted); }
+  .px-xcds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 4px; }
+  .px-xcd { display: flex; flex-direction: column; align-items: center; padding: 8px 2px; border-radius: 8px; color: #0f172a; font-size: 0.75rem; background: var(--pc, #cbd5e1); }
+  .px-xcd i { font-style: normal; font-size: 0.6875rem; }
+  .px-hbm { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 6px; }
+  .px-hbm span { padding: 2px 0; border-radius: 4px; text-align: center; font-size: 0.625rem; color: var(--color-muted); background: var(--color-background); }
+  .px-pools { grid-column: 1 / -1; display: grid; gap: 10px; }
+  .px-pools :global(span) { padding: 4px 8px; border-radius: 6px; text-align: center; font-size: 0.75rem; font-weight: 600; color: #0f172a; background: #fde68a; }
+  .px-msg { margin-top: 8px; font-size: 0.875rem; font-weight: 600; }
+  .px-msg.bad { color: var(--color-risk, #dc2626); }
+  .px-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 10px; }
+  .px-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .px-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .px-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .px-out.off { opacity: 0.35; }
+  .px-note { margin-top: 8px; font-size: 0.8125rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const COLORS = ['#93c5fd', '#86efac', '#fca5a5', '#fcd34d', '#c4b5fd', '#67e8f9', '#f9a8d4', '#fdba74'];
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-px]')) {
+    const all = JSON.parse(fig.dataset.px!);
+    const qs = new URLSearchParams(location.search);
+    let c = all[`${qs.get('pc')}-NPS1`] ? qs.get('pc')! : 'SPX', m = all[`SPX-${qs.get('pm')}`] ? qs.get('pm')! : 'NPS1';
+    const o = (k: string) => fig.querySelector<HTMLElement>(`[data-o=${k}]`)!;
+    const update = () => {
+      fig.querySelectorAll<HTMLButtonElement>('[data-c]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.c === c)));
+      fig.querySelectorAll<HTMLButtonElement>('[data-m]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.m === m)));
+      const r = all[`${c}-${m}`];
+      fig.querySelectorAll<HTMLElement>('[data-x]').forEach((el) => {
+        const p = r.owner[Number(el.dataset.x)];
+        el.style.setProperty('--pc', COLORS[p]);
+        el.querySelector('i')!.textContent = `GPU ${p}`;
+      });
+      const pools = o('pools');
+      pools.style.gridTemplateColumns = `repeat(${r.pools}, 1fr)`;
+      pools.innerHTML = Array.from({ length: r.pools }, (_, i) => `<span>${r.pools === 1 ? 'One pool: 288 GB, interleaved over all 8 stacks' : `Pool ${i}: ${r.poolGB} GB, the 4 stacks of IOD ${i}`}</span>`).join('');
+      const out = fig.querySelector<HTMLElement>('.px-out')!;
+      out.classList.toggle('off', !r.ok);
+      o('msg').classList.toggle('bad', !r.ok);
+      o('msg').textContent = r.ok
+        ? `${c} + ${m}: ${r.parts} logical GPU${r.parts > 1 ? 's' : ''} per card${r.pools > 1 ? `, ${r.perPool} per memory pool` : ''}.${c === 'SPX' ? ' This is the usual setting for large models.' : ''}`
+        : `${c} + ${m} is not offered: a card cannot have more memory pools (${r.pools}) than logical GPUs (${r.parts}).`;
+      o('parts').textContent = String(r.parts);
+      o('node').textContent = String(r.node);
+      o('cus').textContent = `${r.xcds} / ${r.cus}`;
+      o('dma').textContent = String(r.dma);
+      o('hbm').textContent = `${r.hbmGB} GB`;
+      o('render').textContent = `${r.render} of 64`;
+      o('note').textContent = r.ok
+        ? `Each logical GPU: ${r.vramMiB.toLocaleString('en-US')} MiB. Fits a 70B model in FP8 (~70 GB of weights)? ${r.hbmGB < 70 ? 'no' : r.hbmGB - 70 < 20 ? `barely: ${r.hbmGB - 70} GB left for KV cache` : `yes, ${r.hbmGB - 70} GB left for KV cache`}. An 8B model in BF16 (~16 GB)? yes, with ${r.hbmGB - 16} GB left for KV cache. ${m === 'NPS2' ? 'NPS2 changes where memory comes from (the local IOD), not how much each logical GPU gets.' : ''}`
+        : '';
+    };
+    fig.querySelectorAll<HTMLButtonElement>('[data-c]').forEach((b) => b.addEventListener('click', () => { c = b.dataset.c!; update(); }));
+    fig.querySelectorAll<HTMLButtonElement>('[data-m]').forEach((b) => b.addEventListener('click', () => { m = b.dataset.m!; update(); }));
+    update();
+  }
+</script>

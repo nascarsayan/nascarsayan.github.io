@@ -1,0 +1,40 @@
+---
+/**
+ * Page-local token strip: one chip per token, coloured by its state in the
+ * round (context, drafted, accepted, rejected, dropped, emitted by the target).
+ * `kv` adds a second strip showing which tokens have KV entries in the cache.
+ */
+type State = 'ctx' | 'draft' | 'ok' | 'bad' | 'drop' | 'fix' | 'bonus';
+interface Props { tokens: { t: string; s: State }[]; label?: string; kv?: boolean }
+const { tokens, label, kv } = Astro.props;
+const title: Record<State, string> = { ctx: 'context: KV already cached', draft: 'drafted, not yet checked', ok: 'accepted', bad: 'rejected', drop: 'discarded: after a rejection', fix: 'emitted by the target', bonus: 'bonus token from the target' };
+---
+
+<div class="ch">
+  {label && <span class="ch-label">{label}</span>}
+  <div class="ch-row">
+    {tokens.map((x) => <span class:list={['chip', `s-${x.s}`]} title={title[x.s]}>{x.t}</span>)}
+  </div>
+  {kv && (
+    <div class="ch-row ch-kv" aria-label="KV cache entries">
+      {tokens.map((x) => <span class:list={['kvc', `s-${x.s}`]} title={x.s === 'drop' || x.s === 'bad' ? 'KV entry freed' : x.s === 'fix' || x.s === 'bonus' ? 'KV written in the next step' : 'KV entry kept'}>{x.s === 'drop' || x.s === 'bad' ? '✕' : x.s === 'fix' || x.s === 'bonus' ? '…' : 'KV'}</span>)}
+    </div>
+  )}
+</div>
+
+<style>
+  .ch { margin: 6px 0 10px; }
+  .ch-label { display: block; margin-bottom: 4px; font-size: 0.8125rem; font-weight: var(--font-weight-bold); }
+  .ch-row { display: flex; flex-wrap: wrap; gap: 4px; }
+  .chip, .kvc { min-width: 52px; padding: 3px 8px; border-radius: 6px; text-align: center; font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.8125rem; border: 1px solid transparent; }
+  .kvc { font-size: 0.6875rem; padding: 1px 8px; color: var(--color-muted); background: var(--color-cloud-100); }
+  .ch-kv { margin-top: 3px; }
+  .chip.s-ctx { background: var(--color-gray-100); }
+  .chip.s-draft { border: 1px dashed #f97316; background: color-mix(in srgb, #f97316 12%, transparent); }
+  .chip.s-ok { background: color-mix(in srgb, #10b981 28%, transparent); }
+  .chip.s-bad { background: color-mix(in srgb, #e5484d 25%, transparent); text-decoration: line-through; }
+  .chip.s-drop { color: var(--color-gray-500); border: 1px dashed var(--color-gray-300); text-decoration: line-through; }
+  .chip.s-fix, .chip.s-bonus { background: color-mix(in srgb, #8b5cf6 30%, transparent); font-weight: 700; }
+  .kvc.s-bad, .kvc.s-drop { color: #e5484d; background: transparent; border: 1px dashed color-mix(in srgb, #e5484d 50%, transparent); }
+  .kvc.s-ok { color: #047857; }
+</style>

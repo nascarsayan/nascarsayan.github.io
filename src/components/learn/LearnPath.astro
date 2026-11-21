@@ -1,0 +1,69 @@
+---
+/**
+ * Top of every Learn page, as a small org chart: the pages this one is part of
+ * (parents, above), this page, and the building blocks it is made from
+ * (children, below). Read from src/config/learn.ts.
+ */
+import { learnPage, parents, children, learnHref, TRACKS } from '@/config/learn';
+
+interface Props { slug: string }
+const page = learnPage(Astro.props.slug);
+const track = page && TRACKS.find((t) => t.id === page.track);
+const up = page ? parents(page.slug) : [];
+const down = page ? children(page.slug) : [];
+const tone = (t: string) => TRACKS.find((x) => x.id === t)?.tone ?? 'neutral';
+---
+
+{page && (
+  <nav class="org" aria-label="Where this topic sits">
+    <p class="home"><a href="/learn/">Learn home</a> · <a href="/learn/#map">Full topic map</a> · <a href="/learn/#topics">All topics</a></p>
+    <div class="tier">
+      <span class="k">Part of</span>
+      <div class="chips">
+        {up.length ? up.map((p) => <a class={`chip t-${tone(p.track)}${p.hub ? ' hub' : ''}`} href={learnHref(p.slug)} title={p.description}>{p.short}</a>) : <a class="chip muted" href="/learn/#map">Topic map (top)</a>}
+      </div>
+    </div>
+    <div class="line" aria-hidden="true"></div>
+    <div class="tier self">
+      <span class="k">This page</span>
+      <div class="chips"><span class={`chip t-${tone(page.track)} me${page.hub ? ' hub' : ''}`}>{page.short}</span><a class="trk" href={`/learn/#${page.track}`}>{track?.label}{page.hub ? ' · overview' : ''}</a></div>
+    </div>
+    {down.length > 0 && (
+      <>
+        <div class="line" aria-hidden="true"></div>
+        <div class="tier">
+          <span class="k">{page.hub ? 'Combines' : 'Built from'}</span>
+          <div class="chips">{down.map((p) => <a class={`chip t-${tone(p.track)}${p.hub ? ' hub' : ''}`} href={learnHref(p.slug)} title={p.description}>{p.short}</a>)}</div>
+        </div>
+      </>
+    )}
+    {down.length === 0 && <p class="leaf">A basic building block: nothing below it.</p>}
+  </nav>
+)}
+
+<style>
+  .home { margin: 0 0 8px; font-size: 0.8125rem; }
+  .home a { color: var(--color-link); }
+  .org { max-width: 860px; margin: -12px 0 28px; padding: 12px 16px; border-radius: var(--radius); background: var(--color-cloud-100); font-size: 0.875rem; }
+  .tier { display: flex; align-items: center; gap: 10px; }
+  .k { flex: 0 0 82px; font-size: 0.72rem; letter-spacing: 1px; text-transform: uppercase; color: var(--color-muted); }
+  .chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .line { width: 2px; height: 10px; margin: 2px 0 2px 130px; background: var(--color-gray-300); border-radius: 2px; }
+  .chip { display: inline-block; padding: 1px 10px; border-radius: 999px; text-decoration: none; color: var(--color-text); background: var(--color-info-100); border: 1px solid transparent; }
+  a.chip:hover { text-decoration: underline; }
+  .chip.hub { border-color: var(--color-success); }
+  .chip.me { font-weight: var(--font-weight-bold); border-color: var(--color-primary); }
+  .chip.muted { color: var(--color-gray-700); background: transparent; border-color: var(--color-gray-300); }
+  .trk { font-size: 0.8125rem; color: var(--color-gray-700); }
+  .leaf { margin: 6px 0 0 92px; font-size: 0.8125rem; color: var(--color-muted); }
+  .t-lime { background: color-mix(in srgb, #a6d189 28%, var(--color-background)); }
+  .t-sky { background: color-mix(in srgb, #99d1db 28%, var(--color-background)); }
+  .t-pink { background: color-mix(in srgb, #f4b8e4 28%, var(--color-background)); }
+  .t-primary { background: var(--color-info-100); }
+  .t-teal { background: color-mix(in srgb, #81c8be 28%, var(--color-background)); }
+  .t-violet { background: color-mix(in srgb, #ca9ee6 28%, var(--color-background)); }
+  .t-peach { background: color-mix(in srgb, #ef9f76 26%, var(--color-background)); }
+  .t-warn { background: color-mix(in srgb, #e5c890 30%, var(--color-background)); }
+  .t-neutral { background: var(--color-gray-100); }
+  @media (max-width: 640px) { .tier { flex-direction: column; align-items: flex-start; gap: 4px; } .line { margin-left: 12px; } .leaf { margin-left: 0; } }
+</style>

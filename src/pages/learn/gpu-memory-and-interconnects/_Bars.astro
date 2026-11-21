@@ -1,0 +1,36 @@
+---
+/**
+ * Static horizontal time bars on a log scale (4 decades, anchored at `top`
+ * seconds), for the walkthrough steps. rows: [{ label, s, hi? }].
+ */
+import { fmtTime } from './_moves';
+interface Row { label: string; s: number; hi?: boolean }
+interface Props { rows: Row[]; top: number; title?: string }
+const { rows, top, title } = Astro.props;
+const w = (s: number) => Math.max(2, 100 + 25 * Math.log10(s / top));
+---
+
+<figure class="tb">
+  {title && <figcaption>{title}</figcaption>}
+  <ul>
+    {rows.map((r) => (
+      <li class:list={[{ hi: r.hi }]}>
+        <span class="l">{r.label}</span>
+        <span class="bar"><span style={`width:${w(r.s)}%`}></span></span>
+        <span class="t">{fmtTime(r.s)}</span>
+      </li>
+    ))}
+  </ul>
+</figure>
+
+<style>
+  .tb { margin: 4px 0 10px; max-width: 760px; }
+  figcaption { margin-bottom: 4px; font-size: 0.8125rem; font-weight: var(--font-weight-bold); }
+  ul { margin: 0; padding: 0; list-style: none; font-size: 0.8125rem; }
+  li { display: grid; grid-template-columns: minmax(140px, 230px) 1fr 70px; align-items: center; gap: 8px; margin: 3px 0; opacity: 0.55; }
+  li.hi { opacity: 1; font-weight: 700; }
+  .bar { height: 14px; border-radius: 999px; overflow: hidden; background: repeating-linear-gradient(90deg, var(--color-gray-100) 0 calc(25% - 1px), var(--color-gray-300) calc(25% - 1px) 25%); }
+  .bar span { display: block; height: 100%; border-radius: 999px; background: #3b82f6; }
+  li.hi .bar span { background: var(--color-primary); }
+  .t { text-align: right; font-variant-numeric: tabular-nums; }
+</style>

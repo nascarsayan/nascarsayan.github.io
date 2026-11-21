@@ -1,0 +1,124 @@
+---
+/**
+ * Theme toggle: auto (follows the OS) → the opposite of what the OS shows →
+ * the other explicit theme → auto. Auto is the default; an explicit choice is
+ * kept in localStorage ('theme') and used on every visit (see the inline
+ * script in BaseLayout). html[data-theme] is the choice, html[data-color-mode]
+ * what is shown.
+ *
+ * Icon: light and dark are a sun <-> moon morph (the core path becomes a
+ * crescent, the rays shrink away, the icon twists). Auto is Lucide's
+ * "sun-moon"; the morph fades out as it fades in.
+ */
+import IconButton from './IconButton.astro';
+const rays = Array.from({ length: 8 }, (_, i) => {
+  const angle = (i * Math.PI) / 4;
+  return { cx: 12 + Math.cos(angle) * 9, cy: 12 + Math.sin(angle) * 9, delay: i * 30 };
+});
+---
+
+<IconButton label="Theme: auto" id="theme-toggle" class="theme-toggle">
+  <svg width="1.25rem" height="1.25rem" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" overflow="visible">
+    <g class="orb">
+      <path class="core" d="M12 7a5 5 0 0 0 0 10a5 5 0 0 0 0-10Z" />
+      <g class="rays" fill="currentColor" stroke="none">
+        {rays.map((r) => <circle cx={r.cx} cy={r.cy} r="1.5" style={`transition-delay:${r.delay}ms`} />)}
+      </g>
+    </g>
+    <!-- Auto: "sun-moon" from Lucide (lucide-static v1.70.0), https://lucide.dev/icons/sun-moon
+         ISC License, Copyright (c) Lucide Contributors. -->
+    <g class="auto">
+      <path d="M12 2v2" />
+      <path d="M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715" />
+      <path d="M16 12a4 4 0 0 0-4-4" />
+      <path d="m19 5-1.256 1.256" />
+      <path d="M20 12h2" />
+    </g>
+  </svg>
+</IconButton>
+
+<style>
+  svg { transition: transform 700ms var(--spring-easing); }
+  .core { transition: d 500ms var(--spring-easing); }
+  .rays circle {
+    transform-box: fill-box;
+    transform-origin: center;
+    transition: transform 500ms var(--spring-easing), opacity 300ms;
+  }
+  :global(html[data-color-mode='dark']) .theme-toggle svg { transform: rotate(-20deg); }
+  :global(html[data-color-mode='dark']) .core { d: path('M12 3a6 6 0 0 0 9 9a9 9 0 1 1-9-9Z'); }
+  :global(html[data-color-mode='dark']) .rays circle { transform: scale(0); opacity: 0; }
+
+  /* Auto swaps the morph for sun-moon: one fades and shrinks, the other turns in. */
+  .orb, .auto { transform-box: view-box; transform-origin: 12px 12px; transition: transform 500ms var(--spring-easing), opacity 250ms; }
+  .auto { opacity: 0; transform: rotate(-60deg) scale(0.6); }
+  :global(html[data-theme='auto']) .orb { opacity: 0; transform: rotate(60deg) scale(0.6); }
+  :global(html[data-theme='auto']) .auto { opacity: 1; transform: none; }
+  /* No twist in auto: sun-moon sits upright whatever the OS shows. */
+  :global(html[data-theme='auto']) .theme-toggle svg { transform: none; }
+</style>
+
+<script>
+  import { playSound } from '@/scripts/sound';
+  type Pref = 'auto' | 'light' | 'dark';
+  const btn = document.getElementById('theme-toggle')!;
+  const root = document.documentElement;
+  const mq = matchMedia('(prefers-color-scheme: dark)');
+  const system = (): 'light' | 'dark' => (mq.matches ? 'dark' : 'light');
+  const pref = (): Pref => (root.dataset.theme === 'light' || root.dataset.theme === 'dark' ? root.dataset.theme : 'auto');
+
+  /** auto -> opposite of the OS (a visible change) -> the other one -> auto. */
+  const nextPref = (p: Pref): Pref => {
+    const sys = system(), opp = sys === 'dark' ? 'light' : 'dark';
+    return p === 'auto' ? opp : p === opp ? sys : 'auto';
+  };
+  const NAMES: Record<Pref, string> = { auto: 'auto (follows your system)', light: 'light', dark: 'dark' };
+  function label() {
+    const p = pref();
+    btn.setAttribute('aria-label', `Theme: ${NAMES[p]}. Switch to ${NAMES[nextPref(p)]}`);
+    btn.title = `Theme: ${NAMES[p]}`;
+  }
+  label();
+  mq.addEventListener('change', label);
+
+  btn.addEventListener('click', (e: MouseEvent) => {
+    const p = nextPref(pref());
+    const mode = p === 'auto' ? system() : p;
+    const apply = () => {
+      root.dataset.theme = p;
+      root.dataset.colorMode = mode;
+      try { p === 'auto' ? localStorage.removeItem('theme') : localStorage.setItem('theme', p); } catch { /* private mode */ }
+      label();
+    };
+    // Back to auto with the same theme on screen: only the icon changes.
+    if (mode === root.dataset.colorMode) { playSound('popDown'); return apply(); }
+    playSound(mode === 'dark' ? 'switchOff' : 'switchOn');
+    type VT = { ready: Promise<void>; finished: Promise<void> };
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => VT };
+    if (!doc.startViewTransition || matchMedia('(prefers-reduced-motion: reduce)').matches) return apply();
+    // Radial reveal at the click point (the button's centre for a keyboard press):
+    // in both directions the old view shrinks into the point, revealing the new
+    // theme underneath (old on top, see global.css). Only the old view animates,
+    // and it is a static snapshot, so nothing is repainted per frame.
+    const r = btn.getBoundingClientRect();
+    const keyboard = e.detail === 0;
+    const x = keyboard ? r.left + r.width / 2 : e.clientX;
+    const y = keyboard ? r.top + r.height / 2 : e.clientY;
+    const end = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
+    // One snapshot for the whole page, header included, and no colour transitions
+    // running underneath (they would show half-faded colours inside the circle).
+    root.classList.add('theme-vt');
+    const vt = doc.startViewTransition(apply);
+    let reveal: Animation | undefined;
+    vt.ready.then(() => {
+      reveal = root.animate(
+        { clipPath: [`circle(${end}px at ${x}px ${y}px)`, `circle(0px at ${x}px ${y}px)`] },
+        // ease-out: fast while the edge is far out (mostly off-screen), slow as it
+        // closes in on the point, where it is visible.
+        { duration: 400, easing: 'ease-out', fill: 'forwards', pseudoElement: '::view-transition-old(root)' },
+      );
+    });
+    vt.finished.finally(() => { root.classList.remove('theme-vt'); reveal?.cancel(); });
+  });
+</script>

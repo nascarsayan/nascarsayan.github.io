@@ -1,0 +1,40 @@
+---
+/**
+ * Circular icon button with a soft hover "blob" behind it.
+ * Renders <a> when href is supplied, otherwise <button>.
+ */
+interface Props { label: string; href?: string; id?: string; class?: string; [key: string]: any }
+const { label, href, id, class: className, ...rest } = Astro.props;
+const Tag = href ? 'a' : 'button';
+---
+
+<Tag href={href} id={id} class:list={['icon-button', className]} aria-label={label} title={label} {...rest}>
+  <slot />
+</Tag>
+
+<style>
+  .icon-button {
+    position: relative;
+    display: grid;
+    place-content: center;
+    width: 2rem;
+    height: 2rem;
+    color: var(--color-text);
+    border-radius: 50%;
+    isolation: isolate;
+  }
+  .icon-button::before {
+    content: '';
+    position: absolute;
+    inset: -6px;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--color-cloud-400);
+    opacity: 0;
+    transform: scale(0.5);
+    transition: opacity 250ms, transform 400ms var(--spring-easing);
+  }
+  @media (hover: hover) {
+    .icon-button:hover::before { opacity: 0.6; transform: scale(1); }
+  }
+</style>

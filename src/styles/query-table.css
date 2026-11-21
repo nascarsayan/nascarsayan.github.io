@@ -1,0 +1,168 @@
+/* <QueryTable>: a control bar, the view's question and SQL, then the table filling the window. */
+.qt {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 10px;
+  height: calc(100vh - var(--header-height) - 32px);
+  min-height: 520px;
+  margin-block: 12px 24px;
+  scroll-margin-top: calc(var(--header-height) + 12px);
+  font-family: var(--font-family);
+  font-size: 0.875rem;
+}
+
+/* Control bar: same soft panel and pill buttons as the site's <Explorer>. */
+.qt-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: var(--radius);
+  background: var(--color-cloud-100);
+}
+html[data-color-mode='dark'] .qt-bar { background: var(--color-card-bg); }
+.qt-picker, .qt-btn, .qt-fsel {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-gray-300);
+  border-radius: 999px;
+  background: var(--color-background);
+  color: var(--color-text);
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 150ms, color 150ms, background 150ms;
+}
+.qt-picker:hover, .qt-btn:hover, .qt-fsel:hover,
+.qt-picker[aria-expanded='true'], .qt-btn[aria-expanded='true'], .qt-fsel[aria-expanded='true'] {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+.qt-btn { padding: 5px 12px; }
+.qt-picker { min-width: min(100%, 340px); padding: 6px 12px 6px 14px; font-weight: var(--font-weight-medium); }
+.qt-picker-k { color: var(--color-muted); font-weight: var(--font-weight-light); }
+.qt-picker-v { flex: 1; text-align: left; }
+.qt-chev {
+  width: 7px;
+  height: 7px;
+  margin-left: 2px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: translateY(-2px) rotate(45deg);
+  opacity: 0.7;
+  flex: none;
+}
+[aria-expanded='true'] > .qt-chev { transform: translateY(1px) rotate(-135deg); }
+.qt-search, .qt-ftext {
+  padding: 5px 12px;
+  border: 1px solid var(--color-gray-300);
+  border-radius: 999px;
+  background: var(--color-background);
+  color: var(--color-text);
+  font: inherit;
+  outline: none;
+}
+.qt-search { flex: 0 1 240px; }
+.qt-search:focus, .qt-ftext:focus { border-color: var(--color-primary); }
+.qt-count { color: var(--color-muted); }
+.qt-spacer { flex: 1; }
+
+/* Question, the SQL that answers it, and value counts. */
+.qt-head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 4px 16px; align-items: start; }
+.qt-question { margin: 0; color: var(--color-muted); line-height: 1.45; }
+.qt-sql {
+  margin: 0;
+  padding: 8px 12px;
+  max-height: 8.6em;
+  overflow: auto;
+  border-radius: var(--radius);
+  background: var(--code-bg);
+  color: var(--code-fg);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  font-variant-ligatures: none; /* show <> as typed */
+}
+
+/* Popover menus: fixed on <body>, so the table's scroll box cannot clip them. */
+.qt-pop {
+  position: fixed;
+  z-index: var(--z-toc);
+  display: grid;
+  max-width: min(560px, calc(100vw - 16px));
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--color-gray-300);
+  border-radius: calc(var(--radius) + 2px);
+  background: var(--color-background);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.18);
+  font-family: var(--font-family);
+  font-size: 0.85rem;
+}
+.qt-opt {
+  display: grid;
+  grid-template-columns: 1.2em minmax(0, 1fr);
+  column-gap: 6px;
+  padding: 6px 10px 6px 6px;
+  border: 0;
+  border-radius: var(--radius);
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.qt-opt:hover, .qt-opt:focus-visible { background: var(--color-cloud-100); outline: none; }
+html[data-color-mode='dark'] :is(.qt-opt:hover, .qt-opt:focus-visible) { background: var(--color-card-bg); }
+.qt-opt-mark { visibility: hidden; color: var(--color-primary); }
+.qt-opt[aria-selected='true'] .qt-opt-mark, .qt-opt[aria-checked='true'] .qt-opt-mark { visibility: visible; }
+.qt-opt[aria-selected='true'] .qt-opt-label { color: var(--color-primary); font-weight: var(--font-weight-medium); }
+.qt-opt-main { display: flex; gap: 10px; justify-content: space-between; }
+.qt-opt-count { color: var(--color-muted); font-variant-numeric: tabular-nums; }
+.qt-opt-hint { grid-column: 2; color: var(--color-muted); font-size: 0.78rem; line-height: 1.35; }
+.qt-pop-wide .qt-opt { padding-block: 8px; }
+.qt-pop-wide .qt-opt-label { font-weight: var(--font-weight-medium); }
+
+
+/* Table: scrolls inside its box; header and filter row stay put. */
+.qt-tablewrap {
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--color-gray-100);
+  border-radius: var(--radius);
+}
+.qt-table { min-width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.8rem; }
+.qt-table th, .qt-table td { padding: 5px 10px; border-bottom: 1px solid var(--color-gray-100); text-align: left; vertical-align: top; }
+/* One line per row; long values are cut, the full text is in the tooltip. */
+.qt-table td { white-space: nowrap; max-width: 44ch; overflow: hidden; text-overflow: ellipsis; }
+.qt-table thead th { position: sticky; z-index: 1; background: var(--color-background); }
+.qt-table thead tr:first-child th { top: 0; padding-top: 8px; }
+.qt-table thead tr.qt-filters th { top: 31px; padding-bottom: 8px; }
+.qt-sort {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text);
+  font: inherit;
+  font-weight: var(--font-weight-bold);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.qt-sort:hover { color: var(--color-primary); }
+.qt-sort[data-dir='asc']::after { content: ' ↑'; color: var(--color-primary); }
+.qt-sort[data-dir='desc']::after { content: ' ↓'; color: var(--color-primary); }
+.qt-ftext { width: 100%; min-width: 8ch; padding: 3px 10px; font-size: 0.78rem; }
+.qt-fsel { width: 100%; justify-content: space-between; padding: 3px 10px; font-size: 0.78rem; white-space: nowrap; }
+.qt-fsel-v { overflow: hidden; text-overflow: ellipsis; max-width: 22ch; }
+.qt-fsel.is-set { border-color: var(--color-primary); color: var(--color-primary); }
+.qt-table tbody tr:hover td { background: var(--color-cloud-100); }
+html[data-color-mode='dark'] .qt-table tbody tr:hover td { background: var(--color-card-bg); }
+.qt-empty { color: var(--color-muted); text-align: center; padding: 24px; }
+
+@media (max-width: 760px) {
+  .qt { height: auto; }
+  .qt-head { grid-template-columns: 1fr; }
+  .qt-tablewrap { max-height: 70vh; }
+}

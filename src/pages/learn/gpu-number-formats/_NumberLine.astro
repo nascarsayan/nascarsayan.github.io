@@ -1,0 +1,53 @@
+---
+/**
+ * A number line with the values a format can hold as ticks, and optionally
+ * points (values to store) with an arrow to the tick each one rounds to.
+ *   <NumberLine ticks={[...]} points={[...]} snapped={[...]} min={-6} max={6} />
+ */
+interface Props { ticks: number[]; points?: number[]; snapped?: number[]; min: number; max: number; title?: string; note?: string; labelAll?: boolean; labels?: number[] }
+const { ticks, points = [], snapped = [], min, max, title, note, labelAll = true, labels } = Astro.props;
+const W = 760, H = points.length ? 96 : 54, pad = 24, axisY = points.length ? 66 : 24;
+const x = (v: number) => pad + ((v - min) / (max - min)) * (W - 2 * pad);
+const fmt = (v: number) => String(v).replace('-', '−');
+// Stack points that land close together so they stay visible.
+const placed: { px: number; row: number }[] = [];
+const rowOf = (px: number) => { let r = 0; while (placed.some((p) => p.row === r && Math.abs(p.px - px) < 7)) r++; placed.push({ px, row: r }); return r; };
+---
+
+<figure class="nl">
+  {title && <figcaption class="nl-title" set:html={title} />}
+  <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label={title ?? 'number line'}>
+    <line x1={pad} x2={W - pad} y1={axisY} y2={axisY} class="nl-axis" />
+    {ticks.map((t) => (
+      <g>
+        <line x1={x(t)} x2={x(t)} y1={axisY - 7} y2={axisY + 7} class="nl-tick" />
+        {(labels ? labels.includes(t) : labelAll) && <text x={x(t)} y={axisY + 21} text-anchor="middle" class="nl-lab">{fmt(t)}</text>}
+      </g>
+    ))}
+    {points.map((p, i) => {
+      const px = x(Math.max(min, Math.min(max, p)));
+      const row = rowOf(px);
+      const py = axisY - 22 - row * 7;
+      const s = snapped[i];
+      return (
+        <g>
+          {s !== undefined && <line x1={px} y1={py} x2={x(s)} y2={axisY - 3} class="nl-snap" />}
+          <circle cx={px} cy={py} r="3" class="nl-pt" />
+        </g>
+      );
+    })}
+  </svg>
+  {note && <p class="nl-note" set:html={note} />}
+</figure>
+
+<style>
+  .nl { margin: 4px 0 12px; max-width: 780px; }
+  .nl-title { margin-bottom: 2px; font-size: 0.8125rem; font-weight: var(--font-weight-bold); color: var(--color-gray-800); }
+  .nl svg { display: block; width: 100%; height: auto; overflow: visible; }
+  .nl-axis { stroke: var(--color-gray-300); stroke-width: 2; }
+  .nl-tick { stroke: var(--color-primary); stroke-width: 2; }
+  .nl-lab { font-size: 11px; fill: var(--color-gray-700); font-family: var(--font-family-mono); }
+  .nl-pt { fill: #e5484d; opacity: 0.85; }
+  .nl-snap { stroke: #e5484d; stroke-width: 1; opacity: 0.45; }
+  .nl-note { margin-top: 2px; font-size: 0.75rem; color: var(--color-muted); }
+</style>

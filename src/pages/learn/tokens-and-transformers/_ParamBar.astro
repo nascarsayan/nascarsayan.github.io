@@ -1,0 +1,39 @@
+---
+/**
+ * Stored versus used-per-token parameters of gpt-oss-120b, computed from the
+ * config shapes (biases and norms left out). Bar widths are to scale.
+ */
+const L = 36, H = 2880, V = 201088, E = 128, k = 4;
+const parts = [
+  { name: 'Experts', tone: '#f59e0b', stored: L * E * 3 * H * H, used: L * k * 3 * H * H },
+  { name: 'Attention', tone: '#8b5cf6', stored: L * (2 * H * 4096 + 2 * H * 512), used: L * (2 * H * 4096 + 2 * H * 512) },
+  { name: 'Router', tone: '#10b981', stored: L * H * E, used: L * H * E },
+  { name: 'Embedding', tone: '#0ea5e9', stored: V * H, used: H },
+  { name: 'Unembedding', tone: '#64748b', stored: V * H, used: V * H },
+];
+const total = parts.reduce((s, p) => s + p.stored, 0);
+const used = parts.reduce((s, p) => s + p.used, 0);
+const b = (n: number) => (n >= 1e9 ? `${(n / 1e9).toFixed(2)} B` : n >= 1e6 ? `${(n / 1e6).toFixed(1)} M` : `${(n / 1e3).toFixed(1)} k`);
+const pct = (n: number) => `${((n / total) * 100).toFixed(3)}%`;
+---
+
+<figure class="pb">
+  <figcaption class="pb-title">Stored versus used per token (to scale)</figcaption>
+  <div class="pb-row"><span class="pb-k">Stored: {b(total)}</span><div class="pb-bar">{parts.map((p) => <span style={`width:${pct(p.stored)};background:${p.tone}`} title={`${p.name}: ${b(p.stored)}`}></span>)}</div></div>
+  <div class="pb-row"><span class="pb-k">Used per token: {b(used)}</span><div class="pb-bar">{parts.map((p) => <span style={`width:${pct(p.used)};background:${p.tone}`} title={`${p.name}: ${b(p.used)}`}></span>)}</div></div>
+  <ul class="pb-leg">{parts.map((p) => <li><i style={`background:${p.tone}`}></i>{p.name}: {b(p.stored)} stored, {b(p.used)} used</li>)}</ul>
+  <p class="pb-note">Computed from the config shapes, without biases and norms. "Used" counts one embedding row and the full unembedding (needed wherever a token is predicted).</p>
+</figure>
+
+<style>
+  .pb { margin: 20px 0; padding: 14px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .pb-title { margin-bottom: 8px; font-weight: var(--font-weight-bold); }
+  .pb-row { display: grid; grid-template-columns: 190px 1fr; align-items: center; gap: 10px; margin: 6px 0; font-size: 0.875rem; font-variant-numeric: tabular-nums; }
+  .pb-bar { display: flex; height: 18px; border-radius: 4px; background: var(--color-gray-100); overflow: hidden; }
+  .pb-bar span { display: block; height: 100%; }
+  .pb-leg { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; padding: 0; list-style: none; font-size: 0.8125rem; }
+  .pb-leg li { margin: 0; }
+  .pb-leg li::before { content: none; }
+  .pb-leg i { display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 2px; }
+  .pb-note { margin-top: 6px; font-size: 0.75rem; color: var(--color-muted); }
+</style>

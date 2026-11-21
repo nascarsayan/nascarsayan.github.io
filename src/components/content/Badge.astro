@@ -1,0 +1,12 @@
+---
+/** Inline status pill: <Badge tone="good">pass</Badge> */
+import './tones.css';
+interface Props { tone?: 'note' | 'good' | 'warn' | 'risk' | 'neutral' | 'primary' }
+const { tone = 'neutral' } = Astro.props;
+---
+
+<span class:list={['badge', `tone-${tone}`]}><slot /></span>
+
+<style>
+  .badge { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 0.8125em; font-weight: var(--font-weight-medium); line-height: 1.6; white-space: nowrap; color: var(--t-fg); background: var(--t-bg); }
+</style>

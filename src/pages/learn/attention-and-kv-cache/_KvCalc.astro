@@ -1,0 +1,86 @@
+---
+/**
+ * KV cache size calculator for this page. Model numbers are from the published
+ * configs (see the sections below); HBM and NIC figures are approximate.
+ */
+const models = {
+  'gpt-oss-120b': { layers: 36, window: { layers: 18, tokens: 128 }, kvHeads: 8, headDim: 64, weightsGB: 65, note: '18 full + 18 sliding-window (128) layers; 8 KV heads × 64' },
+  'llama-3.3-70b': { layers: 80, window: null, kvHeads: 8, headDim: 128, weightsGB: 70, note: '80 layers, 8 KV heads × 128; weights at 8-bit' },
+};
+---
+
+<figure class="kvc" data-kvc={JSON.stringify(models)}>
+  <figcaption class="kvc-title">KV cache calculator</figcaption>
+  <div class="kvc-in">
+    <label>Model <select data-k="model">{Object.keys(models).map((m) => <option value={m}>{m}</option>)}</select></label>
+    <label>KV number format <select data-k="bytes"><option value="2">16-bit (BF16)</option><option value="1">8-bit (FP8)</option></select></label>
+    <label>Context per user <input data-k="ctx" type="range" min="0" max="7" step="1" value="2" /> <output data-o="ctx"></output></label>
+    <label>Users at once <input data-k="users" type="range" min="0" max="8" step="1" value="4" /> <output data-o="users"></output></label>
+  </div>
+  <div class="kvc-out">
+    <div><span class="k">Per token</span><span class="v" data-o="tok"></span></div>
+    <div><span class="k">Per user</span><span class="v" data-o="seq"></span></div>
+    <div><span class="k">All users</span><span class="v" data-o="all"></span></div>
+    <div><span class="k">Ship one user's KV at 50 GB/s (one 400 Gb/s NIC)</span><span class="v" data-o="ship"></span></div>
+  </div>
+  <div class="kvc-bar" aria-hidden="true"><span class="w" data-o="barw"></span><span class="kv" data-o="barkv"></span></div>
+  <p class="kvc-note" data-o="fit"></p>
+  <p class="kvc-src" data-o="model"></p>
+</figure>
+
+<style>
+  .kvc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .kvc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .kvc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .kvc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .kvc-in select, .kvc-in input { accent-color: var(--color-primary); }
+  .kvc-in output { min-width: 60px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .kvc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 8px 16px; margin-top: 14px; }
+  .kvc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .kvc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .kvc-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .kvc-bar { position: relative; display: flex; height: 18px; margin-top: 14px; border-radius: 999px; overflow: hidden; background: var(--color-gray-100); }
+  .kvc-bar .w { background: #94a3b8; }
+  .kvc-bar .kv { background: var(--color-primary); }
+  .kvc-note { margin-top: 6px; font-size: 0.875rem; }
+  .kvc-src { margin-top: 2px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const CTX = [1024, 2048, 4096, 8192, 16384, 32768, 65536, 131072];
+  const USERS = [1, 2, 4, 8, 16, 32, 64, 128, 256];
+  const HBM = 288e9;
+  const size = (b: number) => (b >= 1e9 ? `${(b / 1e9).toFixed(1)} GB` : b >= 1e6 ? `${(b / 1e6).toFixed(1)} MB` : `${(b / 1024).toFixed(1)} KiB`);
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-kvc]')) {
+    const models = JSON.parse(fig.dataset.kvc!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const out = (k: string) => $<HTMLElement>(`[data-o=${k}]`);
+    const update = () => {
+      const m = models[$<HTMLSelectElement>('[data-k=model]').value];
+      const bytes = Number($<HTMLSelectElement>('[data-k=bytes]').value);
+      const ctx = CTX[Number($<HTMLInputElement>('[data-k=ctx]').value)];
+      const users = USERS[Number($<HTMLInputElement>('[data-k=users]').value)];
+      const perLayerTok = 2 * m.kvHeads * m.headDim * bytes;
+      const fullLayers = m.layers - (m.window?.layers ?? 0);
+      const seq = perLayerTok * (fullLayers * ctx + (m.window ? m.window.layers * Math.min(ctx, m.window.tokens) : 0));
+      const tok = seq / ctx;
+      const all = seq * users;
+      out('ctx').textContent = `${ctx / 1024}k tokens`;
+      out('users').textContent = String(users);
+      out('tok').textContent = `${size(tok)} (avg)`;
+      out('seq').textContent = size(seq);
+      out('all').textContent = size(all);
+      out('ship').textContent = `${((seq / 50e9) * 1000).toFixed(1)} ms`;
+      const w = (m.weightsGB * 1e9) / HBM, kv = Math.min(1 - w, all / HBM);
+      out('barw').style.width = `${w * 100}%`;
+      out('barkv').style.width = `${kv * 100}%`;
+      const free = HBM - m.weightsGB * 1e9;
+      out('fit').textContent = all <= free
+        ? `Fits on one MI355X (288 GB): weights ~${m.weightsGB} GB (grey) + KV ${size(all)} (blue). Room for about ${Math.floor(free / seq)} such users.`
+        : `Does not fit on one MI355X: KV needs ${size(all)} but only ~${size(free)} is left after ~${m.weightsGB} GB of weights. Serve fewer users, shorter contexts, 8-bit KV, or more GPUs.`;
+      out('model').textContent = `${$<HTMLSelectElement>('[data-k=model]').value}: ${m.note}. Per token = 2 × KV heads × head size × bytes, summed over layers. Weights and HBM are approximate; vLLM also reserves memory for activations.`;
+    };
+    fig.querySelectorAll('select, input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

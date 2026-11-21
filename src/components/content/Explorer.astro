@@ -1,0 +1,41 @@
+---
+/**
+ * Option buttons that pick which <Variant> is shown, synced with the URL query.
+ *
+ *   <Explorer id="explore"
+ *     options={[{ key: 'path', label: 'Image path', default: 'registry', values: [{ value: 'registry', label: '…' }, …] }, …]}
+ *     variants={[{ match: { path: 'proxy', version: 'fix' }, id: 'proxy-fix' }, …]}>
+ *     <Variant id="proxy-fix"> …a <Diagram> and text… </Variant>
+ *   </Explorer>
+ *
+ * `when: { storage: ['stalled'] }` on an option uses it only for those values.
+ * The first variant whose `match` keys all equal the selection is shown.
+ */
+import '@/styles/explorer.css';
+import { validateExplorer, controlsHtml } from '@/lib/explorer';
+import { effective, matchVariant } from '@/lib/explorer-core';
+
+interface Option { key: string; label: string; default: string; values: { value: string; label: string }[]; when?: Record<string, string[]> }
+interface Props { id: string; options: Option[]; variants: { match: Record<string, string>; id: string }[] }
+const { id, options, variants } = Astro.props;
+const body = await Astro.slots.render('default');
+const variantIds = new Set([...body.matchAll(/data-variant="([^"]+)"/g)].map((m) => m[1]));
+const ex = validateExplorer({ section: id, options, variants: variants.map((v) => ({ match: v.match, figure: v.id })) }, `#${id}`, variantIds);
+const config = JSON.stringify(ex).replace(/</g, '\\u003c');
+// Only the default variant is live HTML; the rest stay in <template>s (not parsed
+// into the page or laid out) until the reader picks one (scripts/explorer.ts).
+const shownByDefault = matchVariant(ex, effective(ex, {}))?.figure;
+// Attributes other than data-sx-tpl may appear on the tag (the dev server adds source annotations).
+const html = body.replace(/<template\b[^>]*?\bdata-sx-tpl="([^"]+)"[^>]*>([\s\S]*?)<\/template>/g, (all: string, vid: string, inner: string) => (vid === shownByDefault ? inner : all));
+---
+
+<div class="sx" data-sx-root={id}>
+  <Fragment set:html={controlsHtml(ex)} />
+  <script type="application/json" data-sx-config set:html={config} />
+  <div class="sx-variants"><Fragment set:html={html} /></div>
+</div>
+
+<script>
+  import { initExplorers } from '@/scripts/explorer';
+  initExplorers();
+</script>

@@ -1,0 +1,37 @@
+---
+/**
+ * A system as nested windows, explored like <Chronicle> but with no playback: the viewer opens on the whole
+ * system; maximize (one square) shows a box's inside, minimize (a bar) puts it in the tray, restore (two squares) goes back, the taskbar returns to
+ * the parent or a sibling, and a click on a name or a chip opens its details. Format: src/diagrams/nest.ts.
+ *
+ *   import cluster from './_cluster.nest';
+ *   <Nest spec={cluster} caption="..." />
+ *
+ * Checks: ids (checkNest, fatal); every window view (lintChronicleWindows, in <Chronicle static>, fatal); the
+ * fallback grid shown without JavaScript (lintNest; DIAGRAM_LINT=warn lists instead of failing, as for <Diagram>).
+ */
+import '@/styles/nest.css';
+import { checkNest, lintNest, toChronicle, type Nest } from '@/diagrams/nest';
+import { KIND_TAG } from '@/diagrams/chronicle-model';
+import { inlineMd } from '@/diagrams/md';
+import Chronicle from './Chronicle.astro';
+import NestGrid from './NestGrid.astro';
+import MdInline from './MdInline.astro';
+
+interface Props { spec: Nest; id?: string; caption?: string }
+const { spec, id, caption } = Astro.props;
+const errors = checkNest(spec);
+if (errors.length) throw new Error(`Nest "${spec.title}":\n  ${errors.join('\n  ')}`);
+const grid = lintNest(spec, undefined, KIND_TAG);
+if (grid.length) {
+  const msg = `Nest lint (fallback grid) "${spec.title}":\n  ${grid.join('\n  ')}`;
+  if (process.env.DIAGRAM_LINT === 'warn') console.warn(msg); else throw new Error(msg);
+}
+---
+
+<div class="nest-wrap">
+  <Chronicle spec={toChronicle(spec)} id={id} static>
+    <div class="nest"><NestGrid spec={spec} at={spec.root} /></div>
+  </Chronicle>
+  {caption && <p class="nest-cap"><MdInline items={inlineMd(caption)} /></p>}
+</div>

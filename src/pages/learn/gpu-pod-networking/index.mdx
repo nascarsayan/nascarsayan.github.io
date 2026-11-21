@@ -1,0 +1,233 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPU Pod networking: Multus, macvlan, whereabouts and RDMA devices"
+short: "GPU Pod networking"
+description: "How a GPU Pod gets a second interface on the data network and access to the RDMA NICs that carry bulk data such as a KV cache: Multus (thin mode), file-backed NetworkAttachmentDefinitions, macvlan, whereabouts IPAM and the RDMA shared device plugin, with illustrative annotations and config from an example cluster. NVIDIA Network Operator for comparison."
+updated: "2026-11-10"
+track: kubernetes
+order: 6
+requires: [gpu-memory-and-interconnects]
+eyebrow: "Learn · GPUs in Kubernetes"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import net from './_net.diagram';
+import path from './_path.diagram';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import NicPicker from './_NicPicker.astro';
+import * as c from '../k8s-gpu-allocation/_sample';
+import { pairs, podPair, otherPair, otherNad } from './_topo';
+
+A normal Pod has one interface, `eth0`, from the cluster CNI (Cilium in the sample cluster on this page). That network is built for services and ordinary Pod traffic, not for moving gigabytes per second between GPUs on different servers. An LLM prefill Pod that hands its KV cache to a remote decode server (or any Pod doing multi-node collectives) needs two more things: an IP interface on the **data network** (the 400G Ethernet fabric), and the **RDMA** device files of the node's ConnectX-7 NICs, so a transfer library can write data over RoCE straight to the far side.
+
+## The idea
+
+A prefill Pod has two very different jobs for the network. It must talk to the rest of the cluster (API calls, metrics, health checks), and it must ship its KV cache, gigabytes per request burst, to a remote peer as fast as the hardware allows. One road cannot do both well, so it gets two, plus a key to the fast vehicles:
+
+| Piece | Everyday picture | The question it answers |
+| --- | --- | --- |
+| `eth0` (Cilium) | the city streets: go anywhere, traffic lights and police (policy) | "How does this Pod reach Services and other Pods?" |
+| `net1` (Multus + macvlan) | a private on-ramp to the freight highway (the 400G data fabric) | "Which data NIC, and which IP on the data network?" |
+| `rdma/hca_devices` (device plugin) | the keys to the highway's trucks: device files that let the process drive the NIC directly | "May this container use RDMA at all?" |
+| GPU and its NIC under one PCIe switch | the loading dock next to the warehouse | "How far do the bytes travel inside the server?" |
+
+Where the picture breaks: RDMA traffic does not use `net1`'s IP at all (the NIC uses its own addresses, see below), and the keys open **every** truck on the node, not one.
+
+<Diagram spec={net} title="What a prefill Pod gets" caption="Sample cluster. IP addresses omitted.">
+  <Step title="eth0" focus="cil, eth0, cil -> eth0">Cilium, through Multus, gives the Pod its ordinary interface.</Step>
+  <Step title="net1" focus="nic, net1, wh, nic -> net1, wh -> net1">macvlan makes a child of one 400G NIC inside the Pod; whereabouts gives it a data-network address.</Step>
+  <Step title="RDMA keys" focus="rdp, verbs, rdp -> verbs">The RDMA shared device plugin puts `/dev/infiniband/*` into the container.</Step>
+</Diagram>
+
+## The parts
+
+| Part | What it does | In the sample cluster |
+| --- | --- | --- |
+| Cilium | primary Pod network (`eth0`), NetworkPolicy, services | DaemonSet `kube-system/cilium` |
+| Multus | meta-CNI: calls Cilium for `eth0`, then adds extra interfaces listed in a Pod annotation | DaemonSet `kube-system/multus` (Multus v4) |
+| NetworkAttachmentDefinition (NAD) | names one extra network | `gpu-demo/data-net-1` … `data-net-8` |
+| macvlan | CNI plugin that creates a child interface with its own MAC on a host NIC | from `/opt/cni/bin/macvlan` |
+| whereabouts | cluster-wide IPAM for the extra networks, state in CRDs | DaemonSet `kube-system/whereabouts` |
+| RDMA shared device plugin | device plugin that hands RDMA device files to containers | DaemonSet `kube-system/rdma-device-plugin`, image `k8s-rdma-shared-dev-plugin`, resource `rdma/hca_devices` |
+
+All of these typically run on every node in the cluster, not only on GPU nodes.
+
+## The NICs on a GPU node
+
+The example 8-GPU OAM server has eight ConnectX-7 400 GbE NICs, one per GPU. Illustrative output on `gpu-node-1`:
+
+```shell
+$ rdma link
+link rdma0/1 state ACTIVE physical_state LINK_UP netdev ens1np0
+link rdma1/1 state ACTIVE physical_state LINK_UP netdev ens2np0
+…                                                      # 8 links, all ACTIVE
+```
+
+<table>
+  <thead><tr><th>NUMA</th><th>NIC (RDMA)</th><th>NIC PCI</th><th>GPU</th><th>GPU PCI</th><th>Shared PCIe switch</th></tr></thead>
+  <tbody>{pairs.map((p) => <tr><td>{p.numa}</td><td><code>{p.nic}</code> ({p.rdma})</td><td><code>{p.nicPci}</code></td><td><code>{p.gpu}</code></td><td><code>{p.gpuPci}</code></td><td>{p.sameSwitch ? <code>{p.switch}</code> : 'no'}</td></tr>)}</tbody>
+</table>
+
+All 8 NICs pair with one GPU each under one PCIe Gen 5 switch, both on x16 links at 32 GT/s (from the sysfs device paths; see [node topology](/learn/gpu-node-topology/)). Traffic between a GPU and "its" NIC stays under that switch; traffic to any other NIC climbs to the CPU, and for the four on the other socket crosses the socket-to-socket link too.
+
+## Worked example: one prefill Pod gets its networks
+
+Pod <code>{c.pod}</code> on <code>{c.node}</code>. Illustrative example: names, times and config are made up but realistic; IP addresses are placeholders.
+
+<Walkthrough title="From sandbox to eth0, net1 and RDMA in one to two seconds" caption="Illustrative config and annotations; whereabouts and macvlan internals per their docs.">
+  <WStep title="1 · The Pod asks for three different things">
+    Three mechanisms, none of which knows about the others. The scheduler has already placed the Pod and DRA has picked {c.device}, which sits on NUMA node {podPair.numa}. Networking happens next, on the node.
+```yaml
+metadata:
+  annotations:
+    k8s.v1.cni.cncf.io/networks: gpu-demo/data-net-5   # → Multus: a second interface
+spec:
+  containers:
+  - name: prefill
+    resources:
+      claims: [{name: gpu}]                                       # → DRA: one GPU
+      limits:   {cpu: "8", memory: 257Gi, rdma/hca_devices: "1"}  # → device plugin: RDMA files
+```
+  </WStep>
+  <WStep title="2 · t = 0 s: containerd creates the sandbox and calls Multus">
+```json
+// /etc/cni/net.d/00-multus.conf (sorts first, so containerd runs it)
+{ "type": "multus", "cniConf": "/host/etc/cni/multus/net.d",
+  "readinessindicatorfile": "/etc/cni/net.d/05-cilium.conflist",
+  "kubeconfig": "/etc/cni/net.d/multus.d/multus.kubeconfig",
+  "delegates": [{"name": "cilium", "plugins": [{"type": "cilium-cni"}]}] }
+```
+    `"type": "multus"` is **thin mode**: the `multus` binary runs once per Pod as a CNI plugin and reads the API with the host's kubeconfig (thick mode uses `multus-shim` plus a daemon). `readinessindicatorfile` makes it refuse to run until Cilium's config exists, so no Pod starts without a primary network. The journal shows `CmdAdd … eth0` for this Pod in the same second.
+  </WStep>
+  <WStep title="3 · Cilium builds eth0">
+    Multus calls its delegate, Cilium: a veth pair, a Pod IP from Cilium's cluster pool, eBPF policy. Traffic to other nodes leaves through a VXLAN tunnel (`routing-mode: tunnel`, `tunnel-protocol: vxlan` in `cilium-config`) over the host's default route, `eno1` (25 GbE). This is the road for API calls, metrics and service traffic.
+  </WStep>
+  <WStep title="4 · The NAD is only a name; a node file says which NIC">
+```yaml
+# kubectl -n gpu-demo get net-attach-def data-net-5 -o yaml
+spec:
+  config: ""          # empty: look for a file of the same name on the node
+```
+```json
+// /etc/cni/multus/net.d/data-net-5.conf on gpu-node-1 (addresses are placeholders)
+{ "name": "data-net-5", "type": "macvlan", "master": "ens5np0", "mode": "bridge",
+  "ipam": { "type": "whereabouts", "range": "<data-subnet>/22", "range_start": "<first>", "range_end": "<last>",
+            "routes": [{"dst": "<data-subnet>/22", "gw": "0.0.0.0"}, {"dst": "<data-supernet>/16", "gw": "<leaf-gateway>"}] } }
+```
+    With an empty `config`, Multus reads the file whose `name` matches. The node provisioning writes one per NIC on every node: `data-net-N` → `ensNnp0`. One cluster-wide NAD therefore works on nodes with different subnets.
+  </WStep>
+  <WStep title="5 · macvlan makes net1, whereabouts gives it an address">
+    The macvlan plugin creates a child of `ens5np0` with its own MAC (`02:00:…`), moves it into the Pod as `net1`, mode `bridge` (children of one parent talk directly). whereabouts picks a free address from the `/22` and records it in an `IPPool` CR in `kube-system`, so two nodes never hand out the same one. Its reconciler (`"reconciler_cron_expression": "30 4 * * *"`, daily 04:30) frees addresses of Pods that vanished without a CNI `DEL`.
+    Properties to remember: the host cannot reach its own macvlan children through the parent; the switch port sees one MAC per Pod; Cilium does not see `net1`, so NetworkPolicy does not apply to it.
+  </WStep>
+  <WStep title="6 · Multus writes the result on the Pod">
+```json
+// k8s.v1.cni.cncf.io/network-status (addresses are placeholders)
+[{"name": "cilium", "interface": "eth0", "ips": ["<pod-ip>"], "mac": "<pod-mac>", "default": true, "gateway": ["<gw>"]},
+ {"name": "gpu-demo/data-net-5", "interface": "net1", "ips": ["<data-net-ip>"], "mac": "<net1-mac>"}]
+```
+    If any plugin fails, sandbox creation fails: the Pod stays `ContainerCreating` with a `FailedCreatePodSandBox` event naming the plugin.
+  </WStep>
+  <WStep title="7 · The RDMA device files go in, the container starts (t ≈ 2 s)">
+```text
+rdma/hca_devices: 1 → Allocate response (kubelet device-plugin checkpoint):
+  /dev/infiniband/uverbs0 … uverbs7   umad0 … umad7   rdma_cm
+```
+    The kubelet gives the container the device files the RDMA shared device plugin returned: all 8 NICs, not one. The init container ran at about t = 1 s, `prefill` started at about t = 2 s. From sandbox to running took one to two seconds; loading the model then took {c.loadText}.
+  </WStep>
+</Walkthrough>
+
+## Two roads out of the Pod
+
+The same Pod, with the bytes moving. Step through: the first road is ordinary IP traffic; the last two are how a block of GPU memory (for example KV cache) leaves the GPU.
+
+<Diagram spec={path} title="eth0 versus the data NIC, on gpu-node-1" caption="Hardware path from the (illustrative) sysfs device paths. Which RDMA device the transfer library opens, and whether it uses GPU-direct reads on AMD, was not verified.">
+  <Step title="eth0: ordinary traffic" path="proc -> eth0 -> cil -> e25 -> cn">An HTTP call or a metrics scrape: through the veth, Cilium's eBPF programs, a VXLAN tunnel and the 25 GbE port. Policy applies.</Step>
+  <Step title="net1: an IP on the data network" path="proc -> net1 -> nic -> fab">IP traffic on the 400G data network, through the macvlan child of <code>{podPair.nic}</code>. Cilium is not in the path.</Step>
+  <Step title="RDMA: the CPU only posts work" path="proc => verbs => nic">To send a KV block, the library posts a work request to a queue the NIC reads (through `/dev/infiniband/uverbs*`) and rings the NIC's doorbell. No socket, no kernel copy.</Step>
+  <Step title="RDMA: the NIC moves the bytes" path="gpu => sw => nic => fab => kvs">With GPU-direct RDMA the NIC reads the KV block straight from HBM, through the shared PCIe switch, and writes it to the far side over RoCE v2. Host RAM and the CPU are not on the data path. Without it, the block is first copied to host RAM. See [GPU memory and interconnects](/learn/gpu-memory-and-interconnects/).</Step>
+</Diagram>
+
+On this Pod, `net1` sits on <code>{podPair.nic}</code>, the NIC under the same switch as its GPU. That is luck of the draw: the NAD is fixed in the Deployment template (every Pod of this Deployment uses <code>{podPair.nad}</code>, a second Deployment uses <code>{otherNad.nad}</code>), while DRA picks the GPU. A Pod of the second Deployment on the same node holds <code>{otherPair.gpu}</code> (NUMA {otherPair.numa}) and its `net1` is on <code>{otherNad.nic}</code> (NUMA {otherNad.numa}, the other socket). Try other pairs:
+
+<NicPicker />
+
+## How the RDMA devices get in
+
+`rdma/hca_devices` is the **device plugin** model from [GPU allocation in k8s](/learn/k8s-gpu-allocation/#model-1-device-plugins). The plugin's config, from ConfigMap `kube-system/rdma-devices`:
+
+```json
+{
+  "periodicUpdateInterval": 300,
+  "configList": [{
+    "resourceName": "hca_devices",
+    "rdmaHcaMax": 1000,
+    "selectors": {"vendors": ["15b3", "14e4"], "drivers": ["mlx5_core", "bnxt_en"]}
+  }]
+}
+```
+
+- **Selectors**: PCI vendor `15b3` (NVIDIA/Mellanox) or `14e4` (Broadcom), with driver `mlx5_core` or `bnxt_en`. On a GPU node that matches all 8 ConnectX-7 NICs.
+- **`rdmaHcaMax: 1000`**: the node advertises 1000 units (`rdma/hca_devices: 1k` in `kubectl describe node`). These are **shares**, not NICs. Up to 1000 containers can hold one each.
+- **What one unit gives.** The kubelet's device-plugin checkpoint on a node shows the Allocate response for the prefill container: `/dev/infiniband/uverbs0` … `uverbs7`, `umad0` … `umad7` and `/dev/infiniband/rdma_cm`. One unit means access to **all 8 NICs**, shared with every other Pod on the node.
+
+So the RDMA side is not isolated per Pod or per GPU. Which NIC a process actually uses is chosen by the application (the transfer library's device configuration), not by Kubernetes.
+
+The RDMA plugin DaemonSet also mounts a containerd drop-in, `/etc/systemd/system/containerd.service.d/rdma-memlock.conf` with `LimitMEMLOCK=infinity`. RDMA registers (pins) memory with the NIC, and a low default locked-memory limit makes large registrations fail. Containers inherit the limit from containerd.
+
+### Which address RDMA uses
+
+RoCE v2 addresses peers by **GID** (a 128-bit identifier that carries an IP address). The GID table of <code>{podPair.rdma}</code> lists only entries for <code>{podPair.nic}</code> itself: RoCE v1 and v2 entries for its link-local address and for its host IP. The Pod's `net1` address is not in it. So `net1` gives the Pod an IP on the data network; RDMA connections are made with the NIC's own GIDs. Which GID index the application picks is its own configuration (not verified here).
+
+<Callout tone="note" title="Security">
+Ordinary TLS and NetworkPolicy do not cover RDMA. Any Pod holding `rdma/hca_devices` can open every NIC on its node. Protecting an RDMA data path needs isolation outside Kubernetes NetworkPolicy (dedicated nodes, per-Pod VFs with SR-IOV, or fabric-level partitioning).
+</Callout>
+
+## Failure modes
+
+| Symptom | Likely cause | Check |
+| --- | --- | --- |
+| `FailedCreatePodSandBox`, "cannot find a network-attachment-definition" | NAD missing in this cluster (a Deployment names a NAD that only exists in another cluster) | `kubectl get net-attach-def -A` |
+| Sandbox fails, macvlan error on master | per-node file names a NIC that is down or absent | `cat /etc/cni/multus/net.d/<nad>.conf`; `ip link show ensNnp0` |
+| Sandbox fails in IPAM | whereabouts range full or its API calls fail | `kubectl -n kube-system get ippools.whereabouts.cni.cncf.io` |
+| Pod Pending, `Insufficient rdma/hca_devices` | RDMA plugin not registered on the node (allocatable 0) | `kubectl get node <n> -o jsonpath='{.status.allocatable}'` |
+| RDMA calls fail with memory registration errors | memlock limit not applied (containerd not restarted after the drop-in) | `systemctl show containerd -p LimitMEMLOCK` |
+| Node tainted not-ready by a readiness controller | a node health check found Multus or RDMA unhealthy | `kubectl describe node <n>` conditions and taints |
+
+## NVIDIA Network Operator for comparison
+
+NVIDIA packages the same parts for ConnectX and BlueField NICs as the **Network Operator**. One cluster-scoped `NicClusterPolicy` (it must be named `nic-cluster-policy`) with optional sub-states:
+
+| Sub-state | Sample-cluster equivalent |
+| --- | --- |
+| `ofedDriver`: DOCA/MLNX-OFED driver container | in-box distribution `mlx5` driver and `rdma-core` host packages |
+| `rdmaSharedDevicePlugin` | the same plugin, deployed as a plain DaemonSet |
+| `sriovDevicePlugin`: one VF per Pod | not used |
+| `ibKubernetes`: InfiniBand partition keys | not used (Ethernet) |
+| `secondaryNetwork`: Multus, CNI plugins, IPoIB CNI | Multus + standard CNI plugins |
+| `nvIpam`: NVIDIA IPAM | whereabouts |
+| `nicConfigurationOperator`: NIC firmware settings | not managed from Kubernetes |
+
+Extra CRDs (`MacvlanNetwork`, `HostDeviceNetwork`, `IPoIBNetwork`) generate NADs for you. For GPU memory over RDMA (GPUDirect RDMA), the NVIDIA GPU Operator can build the `nvidia-peermem` module (`driver.rdma.enabled`) or rely on DMA-BUF. Inside an NVL72 rack, GPUs talk over NVLink, so the NIC path is only for traffic leaving the rack. See [rack-scale GPUs](/learn/rack-scale-gpus/).
+
+## Look for yourself
+
+```shell
+kubectl get network-attachment-definitions -A
+kubectl -n gpu-demo get pod <prefill> -o jsonpath='{.metadata.annotations.k8s\.v1\.cni\.cncf\.io/network-status}'
+kubectl -n kube-system get cm rdma-devices -o jsonpath='{.data.config\.json}'
+kubectl -n kube-system get ippools.whereabouts.cni.cncf.io
+# on a GPU node (read-only)
+cat /etc/cni/net.d/00-multus.conf; ls /etc/cni/multus/net.d
+rdma link; ibv_devices
+cat /sys/class/net/ens5np0/device/numa_node
+```
+
+## Further reading
+
+- [Multus CNI](https://github.com/k8snetworkplumbingwg/multus-cni) · [Multus: NAD with a CNI config file](https://github.com/k8snetworkplumbingwg/multus-cni/blob/master/docs/how-to-use.md#networkattachmentdefinition-with-cni-config-file) · [Multus configuration reference](https://github.com/k8snetworkplumbingwg/multus-cni/blob/master/docs/configuration.md)
+- [whereabouts](https://github.com/k8snetworkplumbingwg/whereabouts) · [macvlan CNI plugin](https://www.cni.dev/plugins/current/main/macvlan/)
+- [RDMA shared device plugin](https://github.com/Mellanox/k8s-rdma-shared-dev-plugin) · [NVIDIA Network Operator](https://github.com/Mellanox/network-operator)

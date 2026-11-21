@@ -1,0 +1,100 @@
+---
+/**
+ * Tile budget calculator: pick a GPU, a workgroup tile and a GEMM shape; see
+ * intensity per tile, LDS use, accumulator registers per lane and how many
+ * CUs / SMs get a tile. Hardware numbers: public specs (MI355X), ROCm hardware
+ * spec table (MI300X), CUDA compute-capability tables (H100). Simplified: it
+ * ignores allocation granularity, epilogue buffers and register use for A/B.
+ */
+const gpus = {
+  'MI355X': { lds: 160 * 1024, units: 256, lanes: 64, accMax: 256, note: '160 KB LDS per CU, 256 CUs, wave64; accumulators in AGPRs (256 per lane)' },
+  'MI300X': { lds: 64 * 1024, units: 304, lanes: 64, accMax: 256, note: '64 KB LDS per CU, 304 CUs, wave64; 256 AGPRs per lane' },
+  'H100 SXM': { lds: 227 * 1024, units: 132, lanes: 32, accMax: 255, note: '227 KB shared memory per block, 132 SMs, warp 32; at most 255 registers per thread (all uses)' },
+};
+const shapes = [
+  { label: 'Prefill 4,000 tokens, Q/K/V proj.', M: 4000, N: 5120 },
+  { label: 'Decode batch 64, Q/K/V proj.', M: 64, N: 5120 },
+  { label: 'Decode batch 8, Q/K/V proj.', M: 8, N: 5120 },
+  { label: 'Square 8,192 × 8,192', M: 8192, N: 8192 },
+];
+const TILE = [16, 32, 64, 128, 256];
+---
+
+<figure class="tc" data-tc={JSON.stringify({ gpus, shapes })}>
+  <figcaption class="tc-title">Tile budget calculator</figcaption>
+  <div class="tc-in">
+    <label>GPU <select data-k="gpu">{Object.keys(gpus).map((g) => <option value={g}>{g}</option>)}</select></label>
+    <label>Shape (M × N) <select data-k="shape">{shapes.map((s, i) => <option value={i}>{s.label}</option>)}</select></label>
+    <label>Tile M<sub>t</sub> <select data-k="mt">{TILE.map((t) => <option value={t} selected={t === 256}>{t}</option>)}</select></label>
+    <label>Tile N<sub>t</sub> <select data-k="nt">{TILE.map((t) => <option value={t} selected={t === 256}>{t}</option>)}</select></label>
+    <label>K-step k<sub>t</sub> <select data-k="kt">{[16, 32, 64, 128].map((t) => <option value={t} selected={t === 64}>{t}</option>)}</select></label>
+    <label>Format <select data-k="b"><option value="2">BF16 (2 B)</option><option value="1">FP8 (1 B)</option></select></label>
+    <label>LDS stages <select data-k="st">{[1, 2, 3, 4].map((t) => <option value={t} selected={t === 2}>{t}</option>)}</select></label>
+    <label>Waves / warps per tile <select data-k="w">{[4, 8].map((t) => <option value={t}>{t}</option>)}</select></label>
+  </div>
+  <div class="tc-out">
+    <div><span class="k">FLOP per byte loaded</span><span class="v" data-o="I"></span></div>
+    <div><span class="k">LDS per workgroup</span><span class="v" data-o="lds"></span></div>
+    <div><span class="k">FP32 accumulators per lane</span><span class="v" data-o="acc"></span></div>
+    <div><span class="k">Workgroups (tiles of C)</span><span class="v" data-o="wg"></span></div>
+    <div><span class="k">CUs / SMs with a tile</span><span class="v" data-o="busy"></span></div>
+  </div>
+  <div class="tc-bar" aria-hidden="true"><span data-o="bar"></span></div>
+  <p class="tc-note" data-o="verdict"></p>
+  <p class="tc-src" data-o="src"></p>
+</figure>
+
+<style>
+  .tc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .tc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .tc-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 8px 18px; font-size: 0.875rem; }
+  .tc-in label { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+  .tc-in select { accent-color: var(--color-primary); }
+  .tc-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px 14px; margin-top: 14px; }
+  .tc-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .tc-out .k { font-size: 0.75rem; color: var(--color-muted); }
+  .tc-out .v { font-size: 1.0625rem; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .tc-out .v.bad { color: #e5484d; }
+  .tc-bar { height: 14px; margin-top: 12px; border-radius: 999px; overflow: hidden; background: var(--color-gray-100); }
+  .tc-bar span { display: block; height: 100%; background: var(--color-primary); }
+  .tc-note { margin-top: 8px; font-size: 0.875rem; }
+  .tc-src { margin-top: 2px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-tc]')) {
+    const { gpus, shapes } = JSON.parse(fig.dataset.tc!);
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const v = (k: string) => $<HTMLSelectElement>(`[data-k=${k}]`).value;
+    const o = (k: string) => $<HTMLElement>(`[data-o=${k}]`);
+    const kb = (n: number) => `${(n / 1024).toFixed(0)} KB`;
+    const update = () => {
+      const g = gpus[v('gpu')], s = shapes[Number(v('shape'))];
+      const mt = Number(v('mt')), nt = Number(v('nt')), kt = Number(v('kt')), b = Number(v('b')), st = Number(v('st')), w = Number(v('w'));
+      const I = (2 * mt * nt) / ((mt + nt) * b);
+      const lds = st * (mt + nt) * kt * b;
+      const acc = (mt * nt) / (w * g.lanes);
+      const wg = Math.ceil(s.M / mt) * Math.ceil(s.N / nt);
+      const busy = Math.min(wg, g.units);
+      const ldsOk = lds <= g.lds, accOk = acc <= g.accMax;
+      o('I').textContent = I.toFixed(I < 10 ? 1 : 0);
+      o('lds').textContent = `${kb(lds)} of ${kb(g.lds)}`;
+      o('lds').classList.toggle('bad', !ldsOk);
+      o('acc').textContent = `${acc} of ${g.accMax}`;
+      o('acc').classList.toggle('bad', !accOk);
+      o('wg').textContent = `${Math.ceil(s.M / mt)} × ${Math.ceil(s.N / nt)} = ${wg.toLocaleString('en-US')}`;
+      o('busy').textContent = `${busy} of ${g.units} (${((busy / g.units) * 100).toFixed(0)} %)`;
+      o('bar').style.width = `${(busy / g.units) * 100}%`;
+      const msgs: string[] = [];
+      if (!ldsOk) msgs.push(`Does not fit: ${st} stage(s) × (${mt} + ${nt}) × ${kt} × ${b} B = ${kb(lds)} of LDS. Use fewer stages, a smaller K-step or a smaller tile.`);
+      if (!accOk) msgs.push(`Too many accumulators: ${mt} × ${nt} FP32 results over ${w} × ${g.lanes} lanes = ${acc} registers per lane. Use more waves or a smaller tile.`);
+      if (ldsOk && accOk) msgs.push(wg < g.units
+        ? `Fits, but only ${wg} tiles for ${g.units} units: ${g.units - wg} sit idle. Smaller tiles, split-K or stream-K fix this (see below).`
+        : `Fits, and ${(wg / g.units).toFixed(2)} tiles per unit keeps every unit busy${wg % g.units ? `; the last round fills only ${wg % g.units} of ${g.units} (tail effect)` : ''}.`);
+      o('verdict').textContent = msgs.join(' ');
+      o('src').textContent = `${v('gpu')}: ${g.note}. Q/K/V shapes from gpt-oss-120b (N = 5,120). Simplified: ignores allocation granularity and registers for A/B fragments.`;
+    };
+    fig.querySelectorAll('select').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

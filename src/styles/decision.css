@@ -1,0 +1,189 @@
+/* <DecisionTree> (components/content/DecisionTree.astro, scripts/decision.ts). Everything is under .dt. */
+.dt {
+  --dt-ink: var(--color-text);
+  --dt-muted: var(--color-gray-700);
+  --dt-line: var(--color-gray-300);
+  --dt-soft: var(--color-gray-100);
+  --dt-bg: var(--color-background);
+  --dt-accent: var(--color-primary);
+  /* One colour per outcome (decision.ts OUTCOMES). */
+  --o-works: var(--color-success);
+  --o-limited: var(--color-warning-700);
+  --o-sim-limited: var(--color-info);
+  --o-expected: var(--color-gray-700);
+  --o-fails: var(--color-error);
+  --o-untested: var(--color-gray-500);
+  --o-blocked: var(--color-gray-300);
+  position: relative;
+  margin: 24px 0;
+  padding: 8px;
+  border: 1px solid var(--dt-soft);
+  border-radius: 8px;
+  background: var(--dt-bg);
+  color: var(--dt-ink);
+  font-size: 0.875rem;
+}
+.dt:focus-visible { outline: 2px solid var(--dt-accent); }
+:where(.dt) button { font: inherit; color: inherit; cursor: pointer; }
+.dt code { font-family: var(--font-family-mono); font-size: 0.92em; }
+.dt-dim { color: var(--dt-muted); font-size: 0.8125rem; }
+.is-works { --o: var(--o-works); }
+.is-limited { --o: var(--o-limited); }
+.is-sim-limited { --o: var(--o-sim-limited); }
+.is-expected { --o: var(--o-expected); }
+.is-fails { --o: var(--o-fails); }
+.is-untested { --o: var(--o-untested); }
+.is-blocked { --o: var(--o-blocked); }
+
+/* Without JavaScript: only the nested list. */
+.dt:not(.is-js) > :not(.dt-fallback, script, .dt-caption) { display: none; }
+.dt.is-js > .dt-fallback { display: none; }
+.dt-fallback ul { margin: 4px 0 4px 18px; }
+
+/* Top bar: title, lens switch, controls. ------------------------------------------------------------------- */
+.dt-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.dt-title { flex: 1 1 240px; font-weight: var(--font-weight-bold); }
+.dt-lens { display: inline-flex; padding: 2px; border: 1px solid var(--dt-line); border-radius: 999px; }
+.dt-lens button { height: 24px; padding: 0 10px; border: 0; border-radius: 999px; background: none; font-size: 0.75rem; }
+.dt-lens button[aria-checked='true'] { background: var(--dt-ink); color: var(--dt-bg); }
+.dt-ctrl { display: inline-flex; gap: 4px; }
+.dt .dg-btn { width: 28px; height: 28px; }
+.dt .dg-btn svg { width: 15px; height: 15px; }
+
+/* Legend: one toggle per outcome; pressed ones highlight their roads. */
+.dt-legend { display: flex; flex-wrap: wrap; gap: 4px 6px; margin: 8px 0 4px; }
+.dt-key { display: inline-flex; align-items: center; gap: 5px; height: 24px; padding: 0 8px; border: 1px solid var(--dt-line); border-radius: 999px; background: var(--dt-bg); font-size: 0.75rem; }
+.dt-key i { width: 9px; height: 9px; border-radius: 50%; background: var(--o); }
+.dt-key.is-untested i { background: none; border: 1.5px dashed var(--o); }
+.dt-key.is-blocked i { background: none; border: 1.5px solid var(--o); }
+.dt-key[aria-pressed='true'] { border-color: var(--o); box-shadow: inset 0 0 0 1px var(--o); }
+.dt-n { color: var(--dt-muted); font-variant-numeric: tabular-nums; }
+
+/* The tree and the detail pane side by side when there is room. ------------------------------------------- */
+.dt-body { position: relative; }
+.dt-scroll { position: relative; overflow-x: auto; padding: 26px 4px 8px; }
+.dt-heads { position: absolute; top: 2px; left: 4px; height: 16px; }
+.dt-head { position: absolute; top: -2px; display: flex; align-items: center; gap: 5px; overflow: hidden; white-space: nowrap; color: var(--dt-muted); font-size: 0.6875rem; font-weight: var(--font-weight-bold); letter-spacing: 0.04em; text-transform: uppercase; }
+.dt-head-t { overflow: hidden; text-overflow: ellipsis; }
+/* A column's info button: the site's "i" (diagram.css .dg-info-*), in HTML. */
+.dt-hinfo { --s: var(--dt-muted); flex: 0 0 auto; width: 19px; height: 19px; padding: 0; border: 0; background: none; }
+.dt-hinfo svg { display: block; width: 19px; height: 19px; overflow: visible; }
+.dt-hinfo:hover .dg-info-bg { transform: scale(1.12); }
+.dt-hinfo:focus-visible { outline: 2px solid var(--dt-accent); border-radius: 50%; }
+.dt-hinfo.is-open { --s: var(--dt-accent); }
+.dt-hinfo.is-open .dg-info-bg { fill: var(--s); }
+.dt-hinfo.is-open .dg-info-dot { fill: var(--dg-bg); }
+.dt-hinfo.is-open .dg-info-ic { stroke: var(--dg-bg); }
+.dt-svg { display: block; max-width: none; overflow: visible; }
+.dt [hidden] { display: none !important; }
+
+.dt-edge { fill: none; stroke: var(--o); stroke-width: 1.6; opacity: 0.55; transition: opacity 120ms, stroke-width 120ms; }
+.dt-edge.is-untested { stroke-dasharray: 4 4; }
+.dt-edge.is-blocked { stroke-dasharray: 1 4; stroke-linecap: round; }
+.dt-edge.is-path, .dt-edge.is-hover { opacity: 1; stroke-width: 2.6; }
+.dt-edge.is-dim { opacity: 0.12; }
+
+.dt-node { cursor: pointer; outline: none; transition: opacity 120ms; }
+.dt-node.is-dim { opacity: 0.25; }
+.dt-box { fill: var(--dt-bg); stroke: var(--dt-line); stroke-width: 1.2; }
+.dt-node.is-branch .dt-box { fill: var(--dt-soft); }
+.dt-node.is-leaf .dt-box { stroke: var(--o); fill: color-mix(in srgb, var(--o) 9%, var(--dt-bg)); }
+.dt-node.is-untested .dt-box { stroke-dasharray: 5 4; fill: var(--dt-bg); }
+.dt-node.is-blocked .dt-box { stroke-dasharray: 1 4; stroke-linecap: round; fill: var(--dt-bg); }
+.dt-node.is-blocked .dt-label { text-decoration: line-through; fill: var(--dt-muted); }
+.dt-node:hover .dt-box, .dt-node.is-hover .dt-box { stroke-width: 2; }
+.dt-node:focus-visible .dt-box { stroke: var(--dt-accent); stroke-width: 2.4; }
+.dt-node.is-sel .dt-box { stroke: var(--dt-accent); stroke-width: 2.6; }
+.dt-node.is-path:not(.is-sel) .dt-box { stroke: var(--dt-accent); }
+.dt-label { fill: var(--dt-ink); font-size: 13px; font-weight: var(--font-weight-bold); }
+.dt-note { fill: var(--dt-muted); font-size: 11px; }
+.dt-more { fill: var(--dt-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+/* Two zones on a branch: the fold zone (right) and the info button (top left, diagram.css .dg-info-btn). */
+.dt { --dg-bg: var(--dt-bg); }
+.dt-node { --s: var(--dt-muted); }
+.dt-node.is-leaf { --s: var(--o); }
+.dt-node.is-sel { --s: var(--dt-accent); }
+.dt-fold-hit { fill: transparent; }
+.dt-node.is-info-open .dg-info-bg { fill: var(--s); }
+.dt-node.is-info-open .dg-info-dot { fill: var(--dg-bg); }
+.dt-node.is-info-open .dg-info-ic { stroke: var(--dg-bg); }
+.dt-fold:hover .dt-fold-hit { fill: color-mix(in srgb, var(--dt-accent) 12%, transparent); }
+.dt-fold:hover .dt-chev { stroke: var(--dt-accent); }
+.dt-chev { pointer-events: none; fill: none; stroke: var(--dt-muted); stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.dt-bar { fill: var(--o); }
+.dt-bar.is-untested { fill: none; stroke: var(--o); stroke-width: 1; stroke-dasharray: 2 2; }
+.dt-dot { fill: var(--o); stroke: var(--dt-bg); stroke-width: 1.5; }
+.dt-dot.is-untested { fill: var(--dt-bg); stroke: var(--o); stroke-dasharray: 2 2; }
+.dt-dot.is-lens { stroke: var(--dt-ink); stroke-width: 2; }
+
+/* Marked roads (spec.marks): the same links, in their own colours, a little thicker; a small tag after the leaf. */
+.dt-edge.is-taken { stroke-width: 3; opacity: 0.9; }
+.dt-edge.is-taken.is-path, .dt-edge.is-taken.is-hover { stroke-width: 3.6; }
+.dt-node.is-taken .dt-box { stroke-width: 1.8; }
+.dt-tag rect { fill: var(--dt-bg); stroke: var(--dt-muted); stroke-width: 1.2; }
+.dt-tag text { fill: var(--dt-ink); font-size: 11px; font-weight: var(--font-weight-bold); }
+.dt-mkey { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; font-size: 0.75rem; font-weight: var(--font-weight-bold); }
+.dt-mkey i { width: 22px; height: 0; border-top: 3px solid var(--dt-muted); border-radius: 2px; }
+.dt-lvtitle { flex: 1; display: flex; flex-direction: column; }
+.dt-lvtitle strong { font-size: 1rem; }
+.dt-opts { margin: 8px 0 0; }
+.dt-opts dt { margin-top: 10px; font-weight: var(--font-weight-bold); }
+.dt-opts dd { margin: 2px 0 0; padding-left: 10px; border-left: 2px solid var(--dt-soft); }
+.dt-opts .dt-md p { margin: 3px 0; }
+.dt-markpill { margin: 8px 0 0; padding: 6px 10px; border-left: 3px solid var(--dt-muted); border-radius: 4px; background: var(--dt-soft); }
+
+/* Detail pane. --------------------------------------------------------------------------------------------- */
+/* A drawer over the left columns, level with the selected road (scripts/decision.ts sets top). */
+.dt-detail { position: absolute; z-index: 2; left: 6px; top: 0; width: min(380px, calc(100% - 12px)); max-height: min(72vh, 680px); overflow: auto; padding: 10px 12px; border: 1px solid var(--dt-line); border-radius: 8px; background: var(--dt-bg); box-shadow: 0 8px 28px rgb(0 0 0 / 0.18); }
+.dt-dhead { display: flex; align-items: flex-start; gap: 8px; }
+.dt-crumbs { flex: 1; display: flex; flex-wrap: wrap; gap: 4px; }
+.dt-crumb { display: inline-flex; flex-direction: column; align-items: flex-start; padding: 2px 8px; border: 1px solid var(--dt-line); border-radius: 6px; background: var(--dt-soft); line-height: 1.2; }
+.dt-crumb-k { color: var(--dt-muted); font-size: 0.625rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.dt-crumb-v { font-size: 0.8125rem; font-weight: var(--font-weight-bold); }
+.dt-crumb:hover { border-color: var(--dt-accent); }
+.dt-dnote { margin: 8px 0 0; color: var(--dt-muted); }
+.dt-md p { margin: 6px 0; line-height: 1.5; }
+.dt-md code { padding: 1px 4px; border-radius: 4px; background: var(--color-inline-code-bg); }
+.dt-pill { display: inline-block; margin: 8px 0; padding: 2px 10px; border-radius: 999px; background: var(--dt-soft); }
+.dt-sw { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; background: var(--o); vertical-align: 0; }
+.dt-sw.is-untested { background: none; border: 1.5px dashed var(--o); }
+.dt-sw.is-blocked { background: none; border: 1.5px solid var(--o); }
+.dt-sum { margin: 6px 0; border-collapse: collapse; font-size: 0.8125rem; }
+.dt-sum th, .dt-sum td { padding: 3px 8px; border-bottom: 1px solid var(--dt-soft); text-align: left; font-weight: normal; }
+.dt-sum tr:first-child th { color: var(--dt-muted); font-size: 0.75rem; }
+.dt-sum td { text-align: right; font-variant-numeric: tabular-nums; }
+.dt-lensrun h4 { margin: 12px 0 4px; font-size: 0.875rem; }
+.dt-run { margin: 6px 0; padding: 6px 8px; border-left: 3px solid var(--o); border-radius: 4px; background: var(--dt-soft); }
+.dt-run-top { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
+.dt-run-id { font-weight: var(--font-weight-bold); }
+.dt-run-title { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
+.dt-extra { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.dt-extra code { padding: 1px 4px; border-radius: 4px; background: var(--dt-bg); font-size: 0.6875rem; word-break: break-all; }
+.dt-checks { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 2px; padding: 0; list-style: none; }
+.dt-check { display: inline-flex; overflow: hidden; border: 1px solid var(--c, var(--dt-line)); border-radius: 4px; font-size: 0.6875rem; }
+.dt-check-k { padding: 1px 5px; background: var(--dt-bg); }
+.dt-check-v { padding: 1px 5px; background: color-mix(in srgb, var(--c) 18%, var(--dt-bg)); font-weight: var(--font-weight-bold); }
+.dt-check.is-pass { --c: var(--o-works); }
+.dt-check.is-fail { --c: var(--o-fails); }
+.dt-check.is-known.is-real { --c: var(--o-limited); }
+.dt-check.is-known.is-sim { --c: var(--o-sim-limited); }
+.dt-check.is-known.is-expected { --c: var(--o-expected); }
+.dt-finding, .dt-log { margin-top: 6px; }
+.dt-finding summary, .dt-log summary { cursor: pointer; font-size: 0.8125rem; }
+.dt-scope { display: inline-block; margin-right: 6px; padding: 0 6px; border-radius: 999px; color: var(--dt-bg); font-size: 0.6875rem; font-weight: var(--font-weight-bold); }
+.dt-finding.is-real .dt-scope { background: var(--o-limited); }
+.dt-finding.is-sim .dt-scope { background: var(--o-sim-limited); }
+.dt-finding.is-expected .dt-scope { background: var(--o-expected); }
+.dt-log pre { max-height: 220px; overflow: auto; margin: 4px 0 0; padding: 6px 8px; border-radius: 4px; background: var(--dt-bg); font-size: 0.6875rem; line-height: 1.45; }
+.dt-x { flex: 0 0 auto; }
+.dt-caption { margin-top: 6px; color: var(--dt-muted); font-size: 0.8125rem; }
+
+
+/* Full window. */
+.dt.is-full { position: fixed; inset: 0; z-index: var(--z-overlay); margin: 0; display: flex; flex-direction: column; border: 0; border-radius: 0; overflow: hidden; }
+.dt.is-full .dt-body { flex: 1; min-height: 0; }
+.dt.is-full .dt-scroll { height: 100%; overflow: auto; }
+.dt.is-full .dt-detail { max-height: calc(100% - 12px); }
+html.dt-lock { overflow: hidden; }
+
+@media (prefers-reduced-motion: reduce) { .dt-edge, .dt-node { transition: none; } }

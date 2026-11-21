@@ -1,0 +1,297 @@
+@import '@fontsource-variable/albert-sans';
+@import '@fontsource-variable/jetbrains-mono';
+
+/* ==========================================================================
+   Design tokens
+   ========================================================================== */
+:root {
+  --font-family: 'Albert Sans Variable', system-ui, sans-serif;
+  --font-family-mono: 'JetBrains Mono Variable', ui-monospace, monospace;
+  /* Aliases some components use; keep them on the site fonts (not the system monospace). */
+  --font-mono: var(--font-family-mono);
+  --font-sans: var(--font-family);
+  --font-weight-light: 400;
+  --font-weight-medium: 500;
+  --font-weight-bold: 600;
+
+  --viewport-padding: 32px;
+  --content-width: 1036px;
+  --header-height: 64px;
+  --radius: 8px;
+
+  /* Stacking order, lowest to highest. Page content (diagrams included) stays
+     at auto/0; only these layers float. Expanded diagrams and the skip link
+     cover everything; the search dialog uses the browser's top layer. */
+  --z-sticky: 10;     /* sticky content inside an article (Scrolly stage) */
+  --z-header: 50;     /* site header */
+  --z-toc: 60;        /* contents rail and its flyout: above the page, header and diagrams */
+  --z-overlay: 200;   /* expanded (full-window) diagram */
+  --z-skip: 300;      /* skip-to-content link */
+
+  /* A spring curve expressed with linear(). Bouncy, but cheap. */
+  --spring-easing: linear(0, 0.1407 4.43%, 0.9383 16.72%, 1.0774 20.43%, 1.1493 24.31%, 1.1629 26.95%,
+      1.1536 29.93%, 1.0168 43.09%, 0.9766 51%, 1.0033 76.88%, 1);
+  --spring-duration: 833ms;
+  --ease-out: cubic-bezier(0.17, 0.67, 0.3, 1);
+
+  color-scheme: light;
+  /* Links: grey text and a light grey underline, not the blue primary (easier on the eyes). */
+  --color-link: var(--color-gray-700);
+  --color-link-line: var(--color-gray-300);
+  --color-link-hover: var(--color-text);
+  /* Palette sampled from the reference design (light). */
+  --color-text: rgb(10 12 16);
+  --color-background: rgb(255 255 255);
+  --color-blurred-background: rgb(246 246 246 / 0.94);
+  --color-muted-background: rgb(166 203 221 / 0.85);
+  --color-primary: rgb(66 66 250);
+  --color-secondary: rgb(230 0 103);
+  --color-tertiary: rgb(44 11 142);
+  --color-decorative: rgb(99 188 233);
+  --color-muted: rgb(90 96 114);
+
+  --color-gray-100: rgb(230 232 240);
+  --color-gray-300: rgb(200 202 208);
+  --color-gray-500: rgb(146 149 160);
+  --color-gray-700: rgb(90 96 114);
+  --color-gray-800: rgb(61 69 92);
+  --color-gray-900: rgb(38 45 64);
+
+  --color-cloud-100: rgb(235 244 250);
+  --color-cloud-300: rgb(221 238 248);
+  --color-cloud-400: rgb(198 226 241);
+  --color-cloud-500: rgb(177 223 246);
+  --color-cloud-700: rgb(106 140 175);
+  --color-sky-from: rgb(160 212 238);
+  --color-sky-to: rgb(125 196 232);
+  --color-footer-muted: rgb(41 78 96);
+
+  --color-info: rgb(68 51 255);
+  --color-info-background: rgb(0 85 204 / 0.1);
+  --color-success: rgb(0 138 57);
+  --color-success-background: rgb(0 204 85 / 0.1);
+  --color-alert: rgb(255 157 0);
+  --color-alert-background: rgb(255 221 0 / 0.25);
+  --color-error: rgb(194 5 68);
+  --color-error-background: rgb(214 5 75 / 0.1);
+  --color-code-bg: rgb(232 241 252);
+  /* Code blocks, terminals and logs: a light theme here, a dark one in dark mode (Shiki: github-light-default /
+     github-dark-default, astro.config.mjs). */
+  --code-bg: rgb(246 248 250);
+  --code-fg: rgb(31 35 40);
+  --code-muted: rgb(89 99 110);
+  --code-soft: rgb(87 96 106);
+  --code-bright: rgb(31 35 40);
+  --code-bar: rgb(234 238 242);
+  --code-border: rgb(209 217 224);
+  --code-hover: rgb(230 235 241);
+  --code-prompt: rgb(5 80 174);
+  --code-ok: rgb(26 127 55);
+  --code-err: rgb(207 34 46);
+  --code-warn: rgb(154 103 0);
+  --code-caret: rgb(154 103 0);
+  --color-inline-code-bg: rgb(208 221 247);
+  --color-info-100: rgb(232 241 252);
+  --color-warning-100: rgb(251 244 208);
+  --color-success-100: rgb(236 248 244);
+  --color-error-100: rgb(252 232 239);
+  --color-warning-700: rgb(204 112 0);
+  --color-sky-subtle: rgb(197 234 252);
+  --color-card-bg: rgb(255 255 255);
+  --shadow-card: 0.3px 0.5px 0.7px rgb(155 174 187 / 0.28), 0.8px 1.6px 2px -0.8px rgb(155 174 187 / 0.28),
+    1.9px 3.8px 4.8px -1.6px rgb(155 174 187 / 0.29), 4.5px 9.1px 11.6px -2.4px rgb(155 174 187 / 0.3);
+
+  --color-input-bg: rgb(255 255 255);
+  --color-button-bg: rgb(13 15 18);
+  --color-button-text: rgb(255 255 255);
+  --color-cta-bg: var(--color-gray-900);
+  --color-cta-well: var(--color-gray-800);
+
+
+  --shadow-elevation-medium: 0 0.5px 0.6px hsl(220 40% 40% / 0.2), 0 2px 2.4px -0.8px hsl(220 40% 40% / 0.2),
+    0 5px 6px -1.7px hsl(220 40% 40% / 0.2), 0 12px 14px -2.5px hsl(220 40% 40% / 0.2);
+  --selection-background: rgb(139 133 173 / 0.35);
+}
+
+html[data-color-mode="dark"] {
+  color-scheme: dark;
+  /* Palette sampled from the reference design (dark). */
+  --color-text: rgb(227 230 232);
+  --color-background: rgb(13 15 18);
+  --color-blurred-background: rgb(13 15 18 / 0.94);
+  --color-muted-background: rgb(24 38 53 / 0.85);
+  --color-primary: rgb(128 159 255);
+  --color-secondary: rgb(255 26 129);
+  --color-tertiary: rgb(230 179 255);
+  --color-decorative: rgb(102 170 204);
+  --color-muted: rgb(156 168 180);
+
+  --color-gray-100: rgb(40 46 52);
+  --color-gray-300: rgb(69 77 84);
+  --color-gray-500: rgb(117 128 138);
+  --color-gray-700: rgb(156 168 180);
+  --color-gray-800: rgb(190 200 210);
+  --color-gray-900: rgb(217 224 232);
+
+  --color-cloud-100: rgb(13 15 18);
+  --color-cloud-300: rgb(14 22 32);
+  --color-cloud-400: rgb(15 24 36);
+  --color-cloud-500: rgb(18 29 43);
+  --color-cloud-700: rgb(106 140 175);
+  --color-sky-from: rgb(17 27 39);
+  --color-sky-to: rgb(38 89 115);
+  --color-footer-muted: rgb(175 207 222);
+
+  --color-info: rgb(153 179 255);
+  --color-info-background: rgb(153 179 255 / 0.1);
+  --color-success: rgb(0 204 136);
+  --color-success-background: rgb(0 204 136 / 0.1);
+  --color-alert: rgb(255 170 0);
+  --color-alert-background: rgb(255 170 0 / 0.1);
+  --color-error: rgb(250 56 121);
+  --color-error-background: rgb(214 5 75 / 0.1);
+  --color-code-bg: rgb(26 31 35);
+  --code-bg: rgb(13 15 18);
+  --code-fg: rgb(227 230 232);
+  --code-muted: rgb(156 168 180);
+  --code-soft: rgb(170 185 205);
+  --code-bright: rgb(245 247 250);
+  --code-bar: rgb(27 31 37);
+  --code-border: rgb(40 46 52);
+  --code-hover: rgb(40 46 52);
+  --code-prompt: rgb(128 159 255);
+  --code-ok: rgb(130 230 160);
+  --code-err: rgb(255 130 150);
+  --code-warn: rgb(250 205 90);
+  --code-caret: rgb(245 197 66);
+  --color-inline-code-bg: rgb(35 47 67);
+  --color-info-100: rgb(23 36 54);
+  --color-warning-100: rgb(35 28 21);
+  --color-success-100: rgb(17 34 33);
+  --color-error-100: rgb(34 17 23);
+  --color-warning-700: rgb(255 215 112);
+  --color-sky-subtle: rgb(24 41 57);
+  --color-card-bg: rgb(27 37 50);
+  --shadow-card: 0 0 0 1px rgb(69 77 84 / 0.4);
+
+  --color-input-bg: rgb(13 15 18);
+  --color-button-bg: rgb(128 159 255);
+  --color-button-text: rgb(13 15 18);
+  --color-cta-bg: rgb(39 46 53);
+  --color-cta-well: rgb(69 77 84);
+
+
+  --shadow-elevation-medium: 0 4px 12px hsl(0 0% 0% / 0.4);
+  --selection-background: rgb(139 133 173 / 0.35);
+}
+
+/* ==========================================================================
+   Reset (modern CSS reset)
+   ========================================================================== */
+*, *::before, *::after { box-sizing: border-box; }
+* { margin: 0; }
+html { -webkit-text-size-adjust: none; text-size-adjust: none; scroll-padding-top: calc(var(--header-height) + 16px); }
+@media (prefers-reduced-motion: no-preference) {
+  html { interpolate-size: allow-keywords; scroll-behavior: smooth; }
+}
+body {
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  font-family: var(--font-family);
+  font-weight: var(--font-weight-light);
+  color: var(--color-text);
+  background: var(--color-background);
+  transition: background 350ms, color 350ms;
+}
+img, picture, video, canvas, svg { display: block; max-width: 100%; }
+input, button, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; background: none; border: none; padding: 0; }
+p, h1, h2, h3, h4, h5, h6 { overflow-wrap: break-word; }
+p { text-wrap: pretty; }
+h1, h2, h3, h4, h5, h6 { text-wrap: balance; font-weight: var(--font-weight-bold); line-height: 1.2; }
+a { color: inherit; }
+ul[role='list'], ol[role='list'] { list-style: none; padding: 0; }
+::selection { background: var(--selection-background); }
+
+code { font-family: var(--font-family-mono); font-size: 0.9em; font-weight: 700; }
+
+.visually-hidden {
+  position: absolute; width: 1px; height: 1px; overflow: hidden;
+  clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+}
+
+.max-width-wrapper {
+  max-width: calc(var(--content-width) + var(--viewport-padding) * 2);
+  margin-inline: auto;
+  padding-inline: var(--viewport-padding);
+}
+
+:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 3px; border-radius: 2px; }
+/* A mouse click on a focusable figure (tabindex, for its keys) gets no ring; keyboard focus keeps the one above. */
+:focus:not(:focus-visible) { outline: none; }
+
+/* ==========================================================================
+   Shared keyframes
+   ========================================================================== */
+@keyframes fadeIn { from { opacity: 0; } }
+@keyframes fromShrunken { from { transform: scale(0); } }
+@keyframes spin { to { transform: rotate(1turn); } }
+@keyframes selfDraw { to { stroke-dashoffset: 0; } }
+@keyframes slideIn { from { opacity: 0; transform: translateY(-15%); } }
+@keyframes enter { from { opacity: 0; transform: translateY(50%) scale(0.8); } }
+
+/* Reduced motion: stop looping/entrance keyframes, but keep short state
+   transitions (colour, opacity, small transforms) which aid comprehension. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* Theme switch (ThemeToggle): the old view shrinks into the click point on top
+   of the new one, in both directions. During it the header joins the root
+   snapshot and no colour transition runs. */
+html.theme-vt .header-wrapper { view-transition-name: none !important; backdrop-filter: none !important; background: var(--color-background) !important; }
+html.theme-vt, html.theme-vt *, html.theme-vt *::before, html.theme-vt *::after { transition: none !important; }
+html.theme-vt::view-transition-old(root),
+html.theme-vt::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
+html.theme-vt::view-transition-old(root) { z-index: 9999; }
+html.theme-vt::view-transition-new(root) { z-index: 1; }
+
+/* Glossary terms (src/lib/remark-terms.ts): the first use of a defined term on a
+   page; hover or focus shows its definition (scripts/terms.ts). */
+span.term {
+  text-decoration: underline dotted color-mix(in srgb, var(--color-primary) 70%, transparent);
+  text-decoration-thickness: 2px; text-underline-offset: 3px;
+  cursor: help; border-radius: 2px;
+}
+span.term:hover, span.term:focus-visible { text-decoration-style: solid; outline: none; background: var(--color-info-background); }
+.term-card {
+  position: absolute; z-index: var(--z-toc);
+  padding: 10px 12px;
+  background: var(--color-background);
+  border: 1px solid var(--color-gray-100); border-radius: var(--radius);
+  box-shadow: var(--shadow-card);
+  font-size: 0.875rem; line-height: 1.5;
+  opacity: 0; translate: 0 4px; transition: opacity 150ms ease, translate 200ms var(--ease-out);
+}
+.term-card.is-on { opacity: 1; translate: 0 0; }
+.term-card-name { font-weight: var(--font-weight-bold); font-size: 0.9375rem; color: var(--color-text); }
+.term-card-def { margin: 4px 0 8px; color: var(--color-text); }
+.term-card-links { display: flex; flex-wrap: wrap; gap: 4px 10px; margin: 0 0 8px; font-size: 0.8125rem; }
+.term-card-links a { color: var(--color-link); text-decoration: none; }
+.term-card-links a:hover { text-decoration: underline; }
+.term-card-links a::after { content: ' ↗'; font-size: 0.75em; }
+.term-card-more { font-size: 0.8125rem; font-weight: var(--font-weight-medium); color: var(--color-link); text-decoration: none; }
+.term-card-more:hover { text-decoration: underline; }
+
+/* Shiki dual themes (astro.config.mjs shikiConfig.themes): light colours inline, dark ones as --shiki-dark*. */
+html[data-color-mode='dark'] .astro-code,
+html[data-color-mode='dark'] .astro-code span {
+  color: var(--shiki-dark) !important;
+  background-color: var(--shiki-dark-bg) !important;
+  font-style: var(--shiki-dark-font-style) !important;
+  font-weight: var(--shiki-dark-font-weight) !important;
+  text-decoration: var(--shiki-dark-text-decoration) !important;
+}

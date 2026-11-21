@@ -1,0 +1,46 @@
+{
+ "name": "amdgcn",
+ "scopeName": "source.amdgcn",
+ "fileTypes": [
+  "s",
+  "amdgcn"
+ ],
+ "patterns": [
+  {
+   "name": "comment.line.semicolon.amdgcn",
+   "match": ";.*$"
+  },
+  {
+   "name": "comment.line.double-slash.amdgcn",
+   "match": "//.*$"
+  },
+  {
+   "name": "entity.name.label.amdgcn",
+   "match": "^\\s*[.$A-Za-z_][\\w.$]*:"
+  },
+  {
+   "name": "storage.type.directive.amdgcn",
+   "match": "^\\s*\\.[A-Za-z_][\\w.]*"
+  },
+  {
+   "name": "keyword.other.opcode.amdgcn",
+   "match": "\\b(?:[sv]_[a-z0-9_]+|global_[a-z0-9_]+|buffer_[a-z0-9_]+|ds_[a-z0-9_]+|flat_[a-z0-9_]+|scratch_[a-z0-9_]+|image_[a-z0-9_]+|exp)\\b"
+  },
+  {
+   "name": "variable.other.register.amdgcn",
+   "match": "\\b(?:[svat]\\[\\d+:\\d+\\]|[sva]\\d+|vcc(?:_lo|_hi)?|exec(?:_lo|_hi)?|m0|scc|vccz|execz|ttmp\\d+)\\b"
+  },
+  {
+   "name": "support.constant.modifier.amdgcn",
+   "match": "\\b(?:off|offset:\\d+|glc|slc|dlc|sc0|sc1|nt|lds|idxen|offen|neg_lo|neg_hi|op_sel(?:_hi)?|clamp|cbsz:\\d+|abid:\\d+|blgp:\\d+)\\b"
+  },
+  {
+   "name": "constant.numeric.amdgcn",
+   "match": "\\b(?:0[xX][0-9a-fA-F]+|-?\\d+(?:\\.\\d+)?)\\b"
+  },
+  {
+   "name": "punctuation.amdgcn",
+   "match": "[\\[\\],:]"
+  }
+ ]
+}

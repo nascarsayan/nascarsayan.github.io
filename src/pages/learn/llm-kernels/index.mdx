@@ -1,0 +1,282 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Prefill and decode as GPU kernels"
+short: "Prefill & decode kernels"
+description: "One gpt-oss-120b transformer layer as the kernels a GPU actually runs (norms, GEMMs, RoPE, KV-cache write, attention, MoE routing and grouped GEMMs), their shapes in prefill vs decode, what changes at kernel level between the two, real compiled PTX and AMDGCN for the KV-cache write, and how to see real kernels with rocprofv3 and Nsight."
+updated: "2026-11-10"
+track: silicon
+order: 6
+requires: [gemm-tiling, flash-attention, prefill-phase, decode-phase]
+eyebrow: "Learn · Kernels & silicon"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import Step from '@/components/content/Step.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import KStats from './_KStats.astro';
+import DecodeCalc from './_DecodeCalc.astro';
+import { prefillLayer, decodeLayer } from './_layer.diagram';
+import idea from './_idea.diagram';
+import * as ex from './_example';
+
+The pages before this one built up the pieces: [how waves run](/learn/gpu-execution-model/), [what instructions exist](/learn/gpu-isa-ptx/), [why memory decides speed](/learn/gpu-memory-hierarchy/), [GEMM tiling](/learn/gemm-tiling/) and [FlashAttention](/learn/flash-attention/). This page puts them together: what a GPU actually runs for one step of an LLM, and why prefill and decode behave so differently on the same hardware.
+
+## The idea first
+
+**What a "kernel" is here.** The model is a recipe of about ten steps per layer: normalise, project, attend, project, route, run experts. The GPU runs each step as one or a few **kernels** (GPU functions launched over a grid of threads). The same kernels run in prefill and in decode. What changes is how many token rows go through each one at once.
+
+**The analogy: a heavy tool fetched from the warehouse.** Each weight matrix is a heavy tool kept in HBM (the warehouse). Every step, the GPU carries each tool to the matrix cores (the workbench), because the full set ({ex.fBytes(ex.allWeightBytes)}) is far bigger than any cache. Then it uses the tool on every row it has:
+
+| Kernel kind | What it does to each token | The question it answers | Cost driver |
+| --- | --- | --- | --- |
+| **GEMM** (QKV, output, router, experts) | multiply the token's vector by a weight matrix | "Transform this token" | the weights, read once per step for all rows |
+| **Attention** | mix in earlier tokens' keys and values | "What do earlier tokens tell me?" | the KV cache, per sequence |
+| **Element-wise** (norm, RoPE, KV write) | tidy, rotate or copy each vector | "Prepare this token for the next step" | reading and writing the vectors |
+
+- **Prefill** brings thousands of prompt tokens to the bench at once: one fetch of a tool, thousands of uses. The bench (math) is the bottleneck.
+- **Decode** brings one new token per sequence: with a batch of 64, one fetch, 64 uses. The trips to the warehouse (HBM bandwidth) are the bottleneck.
+
+<Diagram spec={idea} title="One fetch, many uses (prefill) or few uses (decode)" caption="Uses per byte fetched is arithmetic intensity (FLOP/B). Above the GPU's ridge point the math is the limit; below it, memory is.">
+  <Step title="Fetch the tool" focus="w, mc, w -> mc" path="mc -> w">Every step reads each weight matrix from HBM once.</Step>
+  <Step title="Prefill: thousands of rows per fetch" focus="pre, mc, pre -> mc">A 4,085-token prompt runs all its rows through each fetched matrix: about 4,000 uses per weight. The matrix cores are the limit.</Step>
+  <Step title="Decode: a few rows per fetch" focus="dec, mc, dec -> mc">64 sequences give 64 uses per weight. The cores finish long before the next weights arrive; HBM bandwidth is the limit.</Step>
+  <Step title="Attention reads per-sequence memory" focus="kv, mc, kv -> mc">Attention reads each sequence's own KV cache. Batching does not help here: one sequence's cache is useless to another.</Step>
+</Diagram>
+
+**Where the analogy breaks.** Caches do keep some data close (L2, Infinity Cache), and kernels overlap fetching with math, so real time is not a clean sum. And MoE splits the tools: 128 expert matrices, 4 used per token, so in decode most experts get one or two tokens each.
+
+## One layer, as kernels
+
+The example is **gpt-oss-120b**, a public open-weight mixture-of-experts model. Shapes from its published config: hidden size 2,880; 36 layers (alternating sliding-window and full attention); 64 query heads and 8 KV heads of size 64; 128 experts, 4 per token, expert width 2,880. Pick a phase, then step through the layer: each box shows that kernel's intensity, its roofline time bound on one MI355X, and what limits it (green: compute, amber: memory).
+
+<Explorer id="layer-phase" options={[{ key: 'phase', label: 'Phase', default: 'prefill', values: [{ value: 'prefill', label: ("Prefill: " + (ex.T.toLocaleString('en-US')) + " prompt tokens") }, { value: 'decode', label: ("Decode: " + (ex.Bdec) + " sequences × 1 token, " + (ex.ctx.toLocaleString('en-US')) + " cached") }] }]} variants={[{ match: { phase: 'prefill' }, id: 'phase-prefill' }, { match: { phase: 'decode' }, id: 'phase-decode' }]}>
+  <Variant id="phase-prefill">
+    <Diagram spec={prefillLayer} title={("Prefill: one full-attention layer, " + (ex.T.toLocaleString('en-US')) + " tokens")} caption="Roofline lower bounds on one MI355X (spec peaks); real kernels reach a fraction of them.">
+      {ex.pre.map((r) => <Step title={r.name} focus={r.id}>{ex.stepText(r, 'prefill')}</Step>)}
+    </Diagram>
+  </Variant>
+  <Variant id="phase-decode">
+    <Diagram spec={decodeLayer} title={("Decode: one full-attention layer, " + (ex.Bdec) + " sequences")} caption="Roofline lower bounds on one MI355X (spec peaks); real kernels reach a fraction of them.">
+      {ex.dec.map((r) => <Step title={r.name} focus={r.id}>{ex.stepText(r, 'decode')}</Step>)}
+    </Diagram>
+  </Variant>
+</Explorer>
+
+Assumptions behind every number on this page (all computed in the page's `_example.ts`): BF16 activations, KV cache and attention/router weights; MXFP4 expert weights at 4.25 bits each, with expert math at the FP8 peak (the `w4a8` path, not verified); MI355X spec peaks of 8 TB/s, 2.5 PFLOP/s BF16 and 5.0 PFLOP/s FP8 (approximate); uniform expert routing; FlashAttention with 128-row query blocks. `moe_align_block_size` (sorting tokens by expert) and the residual adds are left out: small next to the rest.
+
+### Worked example: one token through one layer
+
+<Walkthrough title="Follow one prompt token through layer 1 (full attention)" caption="“This token” = the FLOPs spent on one token in prefill. Both columns are whole-kernel numbers on one MI355X, lower bounds.">
+  <WStep title="1 · In: a vector of 2,880 numbers">
+    <KStats id="n1" />
+    The token arrives as its hidden state: 2,880 BF16 values, 5,760 bytes. RMSNorm divides it by its root-mean-square and scales it: a few FLOPs per value, so about 1 FLOP per byte in both phases. Servers fuse it into a neighbour so it costs no separate trip to HBM.
+  </WStep>
+  <WStep title="2 · QKV projection: 2,880 → 5,120">
+    <KStats id="qkv" />
+    One GEMM produces the query (64 heads × 64 = 4,096 values), key (8 × 64 = 512) and value (512) for the token. The {ex.fBytes(2880 * 5120 * 2)} weight matrix is read once per step: in prefill {ex.T.toLocaleString('en-US')} tokens share that read, in decode only {ex.Bdec}.
+  </WStep>
+  <WStep title="3 · RoPE and the KV write">
+    <KStats id="rope" />
+    RoPE rotates q and k by the token's position. Then `reshape_and_cache` copies k and v (1,024 values, 2 KiB) into the token's slot in the paged KV cache (see [the kernel below](#writing-the-kv-cache-a-real-kernel)). Pure data movement: under 1 FLOP per byte.
+  </WStep>
+  <WStep title="4 · Attention: look back at earlier tokens">
+    <KStats id="fa" />
+    In prefill, FlashAttention scores every token against all earlier ones in tiles; each K/V block it reads serves 128 query rows and 8 query heads, so it is compute-bound. In decode each sequence brings one query and reads its whole cache ({ex.ctx.toLocaleString('en-US')} tokens × 2 KiB): about 8 FLOP/B, memory-bound, and batching cannot help.
+  </WStep>
+  <WStep title="5 · Sliding-window layers are cheaper">
+    <KStats id="fa" sliding />
+    Half of gpt-oss's layers only look back 128 tokens. There, attention costs the same per token however long the context is: in prefill it drops from compute-bound to a small memory-bound kernel; in decode the cache read shrinks from {ex.ctx.toLocaleString('en-US')} to 128 tokens.
+  </WStep>
+  <WStep title="6 · Output projection: 4,096 → 2,880">
+    <KStats id="o" />
+    The 64 head outputs (4,096 values) are mapped back to 2,880 and added to the residual stream. Same pattern as step 2: compute-bound with thousands of rows, memory-bound with 64.
+  </WStep>
+  <WStep title="7 · Router: pick 4 of 128 experts">
+    <KStats id="rt" />
+    A small GEMM scores the token against 128 experts; top-4 keeps the best four and their weights. Cheap in both phases. What matters is what it decides: in prefill each expert gets about {Math.round((ex.T * 4) / 128)} tokens; in decode the {ex.Bdec * 4} picks of {ex.Bdec} tokens land on about {Math.round(ex.touched(ex.Bdec))} experts, ~2 each (uniform routing assumed).
+  </WStep>
+  <WStep title="8 · Experts gate/up: 2,880 → 5,760, then SwiGLU">
+    <KStats id="g1" />
+    Each of the token's 4 experts multiplies it by its own 2,880 × 5,760 matrix (MXFP4, {ex.fBytes(2880 * 5760 * 4.25 / 8)} per expert), then SwiGLU combines the two halves to 2,880. A grouped GEMM runs all experts in one launch. This is the largest weight read of the layer, and in decode it is read for ~2 tokens per expert.
+  </WStep>
+  <WStep title="9 · Experts down: 2,880 → 2,880, combine">
+    <KStats id="g2" />
+    Each expert maps back to 2,880; the four results are summed with the router's weights and added to the residual. The token leaves the layer as 2,880 numbers again and enters layer 2.
+  </WStep>
+  <WStep title="10 · The whole step: 36 layers">
+    <Kpis items={[
+      { label: 'Prefill step, lower bound', value: ex.fTime(ex.preStep), detail: ("" + (ex.T.toLocaleString('en-US')) + " tokens, 18 full + 18 sliding layers + LM head"), tone: 'good' },
+      { label: 'Decode step, lower bound', value: ex.fTime(ex.decStep), detail: ("" + (ex.Bdec) + " sequences, " + (ex.ctx.toLocaleString('en-US')) + " cached tokens each"), tone: 'warn' },
+    ]} />
+    <Matrix title="Share of the step's lower-bound time, % (36 layers)" rows={ex.shareNames} cols={['prefill', 'decode']} data={ex.shares} digits={1} scale="seq" />
+    Summed over all 36 layers, the roofline says a {ex.T.toLocaleString('en-US')}-token prefill needs at least {ex.fTime(ex.preStep)} on one MI355X. Real prefills take several times longer: real kernels do not reach peak, and launches and scheduling add time. In both phases the experts dominate; in decode, attention's share grows with context length.
+  </WStep>
+</Walkthrough>
+
+## Prefill vs decode, side by side
+
+| Property | Prefill | Decode |
+| --- | --- | --- |
+| Rows per GEMM | thousands | batch size (tens) |
+| Arithmetic intensity (computed above) | QKV {ex.fI(ex.pre[1].intensity)}, experts {ex.fI(ex.pre[7].intensity)} FLOP/B (T = {ex.T.toLocaleString('en-US')}) | QKV {ex.fI(ex.dec[1].intensity)}, experts {ex.fI(ex.dec[7].intensity)} FLOP/B (B = {ex.Bdec}) |
+| Bound by | matrix-core FLOPs | HBM bandwidth (weights + KV cache) |
+| GEMM tiles / workgroups | hundreds to thousands; fills 256 CUs | few; needs split-K, small tiles or GEMV |
+| Attention kernel | FlashAttention: Q block × streamed K/V, causal | paged decode attention: one query, block-table lookups, split-KV |
+| MoE | grouped GEMM with well-filled tiles | grouped GEMM mostly padding; each expert's weights read for 1–3 tokens |
+| Time per step | tens of ms for a few thousand tokens | ~ms; kernel launch overhead becomes visible |
+| Launch strategy | normal launches | often **graph capture** (CUDA/HIP graphs): the whole step's kernel sequence recorded once, replayed with one launch |
+| LM head [M × 2,880] · [2,880 × 201,088] | only for the last prompt token | every sequence, every step: {ex.fBytes(2880 * 201088 * 2)} of weights read each time |
+| Precision effect | FP8/FP4 matrix instructions raise peak FLOPs | smaller weights cut bytes read: near-proportional speed-up |
+
+Move the slider to see where one GEMM crosses the ridge. Dense layers need a few hundred rows; the MoE experts need far more, because the rows are split over 128 experts:
+
+<DecodeCalc />
+
+### Fusion
+
+Element-wise steps (norms, RoPE, activation, residual add, quantizing activations to FP8) are memory-bound: each reads and writes the whole hidden state for a handful of FLOPs. Servers **fuse** them into neighbours: RMSNorm with the FP8 quantize, SiLU-and-multiply into the gate/up GEMM epilogue, RoPE with the KV write. In decode, where every step is short, fusion also cuts the number of kernel launches. Graph capture removes most of the remaining per-launch CPU cost.
+
+## Writing the KV cache: a real kernel
+
+After the K and V projections, each token's K and V rows must land in its slot of the paged KV cache. vLLM does this in `reshape_and_cache_flash_kernel` (`csrc/cache_kernels.cu`). Its key idea is simple:
+
+- The scheduler (on the CPU) has already decided where each token goes and passes a **`slot_mapping`** array: one slot number per token. $$\text{Slot} = \text{physical block} \times \text{block size} + \text{offset in block}$$. A value of −1 marks a padded token to skip.
+- The kernel runs **one workgroup per token**. Its threads copy that token's K and V rows (all KV heads) into `key_cache[block][offset]` and `value_cache[block][offset]`, 16 bytes at a time.
+
+A simplified version (NHD layout, BF16, no FP8 scaling), written for this page from the vLLM kernel and compiled for both vendors:
+
+```cpp
+// Simplified from vLLM reshape_and_cache_flash_kernel. Compiles with nvcc and hipcc.
+struct alignas(16) vec16 { unsigned int w[4]; };          // 8 BF16 values
+extern "C" __global__ void kv_write(const vec16* key, const vec16* value,
+                                    vec16* key_cache, vec16* value_cache,
+                                    const long long* slot_mapping, int block_size, int row_vecs) {
+  long long token = blockIdx.x;                             // one workgroup per token
+  long long slot  = slot_mapping[token];
+  if (slot < 0) return;                                     // padded token
+  long long block = slot / block_size, offset = slot % block_size;
+  long long dst   = (block * block_size + offset) * row_vecs;
+  for (int i = threadIdx.x; i < row_vecs; i += blockDim.x) {
+    key_cache[dst + i]   = key[token * row_vecs + i];
+    value_cache[dst + i] = value[token * row_vecs + i];
+  }
+}
+```
+
+**Example** PTX (`nvcc -arch=sm_90 -ptx`, illustrative, trimmed):
+
+```ptx
+mov.u32              %r6, %ctaid.x;                 // token = blockIdx.x
+mul.wide.u32         %rd15, %r6, 8;
+add.s64              %rd16, %rd14, %rd15;
+ld.global.nc.u64     %rd2, [%rd16];                 // slot = slot_mapping[token]
+setp.lt.s64          %p1, %rd2, 0;
+@%p1 bra             $L__BB0_4;                     // padded: skip
+...
+mul.lo.s64           %rd8, %rd2, %rd17;             // dst = slot * row_vecs  (compiler folded block*bs+offset back to slot)
+$L__BB0_3:                                          // copy loop
+ld.global.nc.v4.u32  {%r7, %r8, %r9, %r10}, [%rd22];       // 16 B of K
+st.global.v4.u32     [%rd24], {%r7, %r8, %r9, %r10};
+ld.global.nc.v4.u32  {%r15, %r16, %r17, %r18}, [%rd25];    // 16 B of V
+st.global.v4.u32     [%rd26], {%r15, %r16, %r17, %r18};
+add.s32              %r23, %r23, %r2;               // i += blockDim.x
+setp.lt.s32          %p3, %r23, %r5;
+@%p3 bra             $L__BB0_3;
+```
+
+**Example** gfx950 assembly (example ROCm 7.0.0, `--save-temps`, illustrative, trimmed):
+
+```amdgcn
+s_lshl_b64          s[6:7], s[2:3], 3              ; token * 8 bytes
+s_add_u32           s4, s4, s6
+s_addc_u32          s5, s5, s7
+s_load_dwordx2      s[12:13], s[4:5], 0x0          ; slot = slot_mapping[token]  -> SCALAR load
+s_waitcnt           lgkmcnt(0)
+v_cmp_lt_i64_e64    s[4:5], s[12:13], 0            ; slot < 0 ?
+s_and_b64           vcc, exec, s[4:5]
+s_cbranch_vccnz     .LBB0_4                        ; padded: whole wave exits
+...
+.LBB0_3:                                           ; copy loop, per lane
+global_load_dwordx4 v[2:5], v[2:3], off            ; 16 B of K
+global_load_dwordx4 v[6:9], v[6:7], off            ; 16 B of V
+...
+s_waitcnt           vmcnt(1)
+global_store_dwordx4 v[12:13], v[2:5], off
+s_waitcnt           vmcnt(1)
+global_store_dwordx4 v[10:11], v[6:9], off
+s_andn2_b64         exec, exec, s[2:3]             ; lanes that finished switch off
+s_cbranch_execnz    .LBB0_3
+```
+
+What to notice:
+
+- **Uniform values go scalar on AMD.** `slot` is the same for every thread in the workgroup, so the compiler loads it once with `s_load_dwordx2` into SGPRs and branches with the scalar unit. NVIDIA loads it per thread (`ld.global.nc.u64`), though hardware merges the identical addresses.
+- **It is a pure copy.** No math beyond address arithmetic: 16-byte loads and stores, $$I \approx 0$$. It is memory-bound and cheap: for gpt-oss one token is 8 KV heads × 64 × 2 B = 1 KB of K plus 1 KB of V per layer. Prefill of 4,000 tokens writes about 8 MB per layer, about 0.3 GB for all 36 layers ([about 72 KB per token](/learn/attention-and-kv-cache/)).
+- **The layout is a contract.** The attention kernel that reads the cache must agree on block size and on the order `[block][offset][head][dim]` (NHD) vs `[block][head][offset][dim]` (HND). In disaggregated serving the prefill side also ships these blocks to a separate decode side, which may expect a different layout.
+
+## Seeing real kernels
+
+You do not need to read source to learn what a server runs. Profilers list every kernel launch with its name, grid, registers, LDS and duration.
+
+<Callout tone="warn" title="Not on production Pods">
+Profilers slow the workload and `rocprofv3 --attach` instruments a running process. On a production node this touches live inference. Profile on a dev or test node, or get explicit approval first.
+</Callout>
+
+**AMD, `rocprofv3`** (rocprofiler-sdk):
+
+```bash
+# Trace every kernel dispatch and add per-kernel statistics (rocpd database by default).
+rocprofv3 --kernel-trace --stats -d ./prof -- python3 my_bench.py
+# Convert to CSV when needed.
+rocpd convert -i ./prof/<...>_results.db --output-format csv
+```
+
+The kernel trace has one row per dispatch with `Kernel_Name`, `Start_Timestamp`, `End_Timestamp`, `LDS_Block_Size`, `Scratch_Size`, `VGPR_Count`, `Accum_VGPR_Count`, `SGPR_Count`, workgroup and grid sizes. Sorting by total time shows where a step goes. For hardware counters (cache hit rates, MFMA busy) use `--pmc` or rocprofiler-compute (formerly Omniperf).
+
+**NVIDIA, Nsight Systems and Nsight Compute** (CUDA CLI):
+
+```bash
+nsys profile -t cuda,nvtx --stats=true python3 my_bench.py        # timeline + per-kernel summary
+ncu --set full -k regex:fused_moe -c 1 python3 my_bench.py         # one kernel, all sections incl. roofline
+```
+
+Nsight Systems answers "which kernels, how long, in what order". Nsight Compute answers "why is this kernel slow": occupancy, memory throughput, a roofline chart, and per-instruction stalls.
+
+**Inside the framework.** `torch.profiler` gives the same per-kernel list from Python and maps kernels back to model layers. vLLM logs which attention backend it picked at start-up. → [FlashAttention: vLLM backends](/learn/flash-attention/#vllm-attention-backends)
+
+**How to read a trace of one step:**
+
+| You see | It means |
+| --- | --- |
+| A few GEMM kernels take most of the time | prefill-like, compute-bound; check matrix-core utilization |
+| Hundreds of short kernels with gaps between them | decode-like; launch overhead; graph capture missing or not covering this batch size |
+| `fused_moe_kernel` dominating | MoE layers; in decode, mostly padding and weight streaming |
+| Attention dominating | long contexts; check backend and KV dtype |
+| Names starting `Cijk_` | Tensile GEMM kernels from rocBLAS/hipBLASLt |
+
+## Common misconceptions
+
+- **"Decode is just prefill with one token."** The math is the same; the kernels are not. Different attention kernel, different GEMM tiles, graph capture, and the opposite bottleneck.
+- **"Batching decode fixes everything."** It raises intensity for dense GEMMs, but not for attention (each sequence has its own KV) and only weakly for MoE (tokens spread over 128 experts).
+- **"The GPU is idle between kernels, so it is free."** In decode those gaps are part of the step time, which is why launch overhead and graph capture matter.
+
+## How this shows up in operations
+
+- **Prefill and decode want different hardware.** Prefill saturates GPU matrix cores; decode is bandwidth-bound, which is why some systems run the two phases on different hardware.
+- **Prefill Pods are sized by HBM, then by FLOPs.** Weights plus KV cache must fit; after that, prompt throughput follows matrix-core speed.
+- **The KV write is the hand-off point.** Prefill writes KV with `reshape_and_cache`, then the connector ships it over RDMA. A layout or block-size mismatch between the two sides is a correctness bug, not a performance one.
+
+## Further reading
+
+- [vLLM `csrc/cache_kernels.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/cache_kernels.cu): `reshape_and_cache_flash_kernel`, `slot_mapping`
+- [vLLM `fused_moe.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/fused_moe/fused_moe.py): grouped MoE GEMM
+- [PagedAttention / vLLM paper (arXiv 2309.06180)](https://arxiv.org/abs/2309.06180)
+- [rocprofv3: kernel trace](https://rocm.docs.amd.com/projects/rocprofiler-sdk/en/latest/how-to/using-rocprofv3.html#kernel-trace) · [rocprofiler-compute](https://rocm.docs.amd.com/projects/rocprofiler-compute/en/latest/)
+- [Nsight Systems user guide](https://docs.nvidia.com/nsight-systems/UserGuide/index.html) · [Nsight Compute CLI](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html)
+- [gpt-oss-120b config](https://huggingface.co/openai/gpt-oss-120b/blob/main/config.json)
+- [AITER](https://github.com/ROCm/aiter): AMD-tuned attention, MoE and GEMM kernels used by vLLM on ROCm

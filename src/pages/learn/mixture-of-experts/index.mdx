@@ -1,0 +1,184 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Mixture of experts: 117 B parameters, 5 B per token"
+short: "Mixture of experts"
+description: "How a mixture-of-experts layer routes each token to 4 of 128 expert MLPs in gpt-oss-120b, worked through with numbers: router scores, top-4, softmax, weighted sum. Why total and active parameters differ, simulated expert load per batch, and a calculator for what routing does to bytes read and arithmetic intensity."
+updated: "2026-11-10"
+track: inference
+order: 2
+requires: [tokens-and-transformers]
+eyebrow: "Learn · LLM inference"
+links:
+  - { label: "gpt-oss model card", href: "https://arxiv.org/abs/2508.10925" }
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import MatRow from '@/components/content/MatRow.astro';
+import Op from '@/components/content/Op.astro';
+import route from './_route.diagram';
+import MoeCalc from './_MoeCalc.astro';
+import * as ex from './_example';
+
+In every transformer layer, after attention, each token goes through an MLP (see [Tokens and transformers](/learn/tokens-and-transformers/)). In a **dense** model that MLP is one big block that every token uses. In a **mixture-of-experts (MoE)** model it is many smaller blocks, the **experts**, and each token uses only a few. gpt-oss-120b, the running example on these pages, is an MoE model.
+
+## The idea
+
+Picture a clinic with 128 specialists and a receptionist. Each patient (a token) is sent to the 4 specialists the receptionist thinks fit best, and the patient's notes are a blend of their 4 reports, weighted by how confident the receptionist was. The clinic can employ a huge staff (lots of knowledge stored) while each patient costs only 4 consultations (little compute).
+
+- The **router** is the receptionist: it answers "which experts suit this token?"
+- The **top-4** cut answers "how many do we pay for?" The other 124 do no work for this token.
+- The **weights** answer "how much does each opinion count?"
+- The **weighted sum** is the blended report, added to the token's vector.
+
+Where the analogy breaks: experts are not topic specialists (no "code expert" or "French expert"); routing is learned per token and per layer, so the same word visits a different 4 in each of the 36 layers. And all 128 specialists must be on site at all times, because any token may need any of them: MoE saves compute, not memory.
+
+<Kpis items={[
+  { label: 'Experts per layer', value: '128', detail: '4 used per token' },
+  { label: 'One expert', value: '24.9 M', detail: 'parameters (3 × 2,880 × 2,880)' },
+  { label: 'Stored', value: '116.8 B', detail: 'parameters, all must be loaded' },
+  { label: 'Used per token', value: '5.1 B', detail: '~9 GFLOP of compute', tone: 'primary' },
+]} />
+
+<Diagram spec={route} title="One MoE layer, one token" caption="gpt-oss-120b: 128 experts per layer, top-4 routing. Expert numbers and weights are the worked example's below. Another token, or the same token in the next layer, may pick a completely different 4.">
+  <Step path="x => router" title="Route">The token's normed hidden state (2,880 numbers) is multiplied by the router matrix: 128 scores, one per expert.</Step>
+  <Step focus={("router, " + (ex.top.map((e) => ("router -> e" + (e))).join(', ')) + ", rest")} path={("router => e" + (ex.top[0]))} title="Top 4">Keep the 4 highest scores; softmax over those 4 gives weights that sum to 1. The 124 other experts are skipped.</Step>
+  <Step focus={ex.top.map((e) => ("e" + (e))).join(', ')} path={("router => e" + (ex.top[1]))} title="Run">Each chosen expert is a full SwiGLU MLP on the same input vector. They are independent, so a kernel runs them side by side.</Step>
+  <Step focus={("sum, " + (ex.top.map((e) => ("e" + (e) + " -> sum")).join(', ')))} path={("e" + (ex.top[0]) + " => sum")} title="Combine">Output = Σ weight × expert output, added to the residual stream like any MLP output.</Step>
+</Diagram>
+
+## Worked example: routing one token
+
+Real gpt-oss layout (128 experts, top 4), but a toy hidden size of 4 instead of 2,880. The router and expert weights come from a seeded random generator; every other number is computed from them at build time.
+
+<Walkthrough title="One token through one MoE layer" caption="Toy hidden size 4; 128 experts and top-4 as in gpt-oss-120b. Weights are pseudo-random, not learned.">
+  <WStep title="1 · The token's vector arrives">
+    <MatRow>
+      <Matrix title="x (after RMSNorm)" rows={['token']} cols={ex.dims} data={[ex.x]} scale="div" />
+      <Op>×</Op>
+      <Matrix title={("Router W<sub>r</sub>, columns for experts " + (ex.top[0]) + " and " + (ex.top[1]) + " (of 128)")} rows={ex.dims} cols={[("e" + (ex.top[0])), ("e" + (ex.top[1]))]} data={ex.Wr.map((r) => [r[ex.top[0]], r[ex.top[1]]])} scale="div" digits={1} />
+    </MatRow>
+    The router is a single small matrix: 4 × 128 here, 2,880 × 128 in gpt-oss (0.37 M parameters per layer, tiny next to one expert's 24.9 M). Each column belongs to one expert. Expert {ex.top[0]}'s score: {ex.scoreText(ex.top[0])}.
+  </WStep>
+  <WStep title="2 · 128 scores, one per expert">
+    <MatRow>
+      <Matrix title="Router scores x · W<sub>r</sub> (row = experts 0–15, 16–31, …)" rows={ex.gridRows} cols={ex.gridCols} data={ex.grid(ex.scores.map((v) => Math.round(v * 10) / 10 + 0))} scale="div" digits={1} highlight={{ cells: ex.topCells }} />
+    </MatRow>
+    Blue is high, red low. The 4 outlined cells are the highest: experts {ex.top.join(', ')}. Nothing makes neighbours special; expert numbers are just column indices.
+  </WStep>
+  <WStep title="3 · Keep the top 4, softmax over them">
+    <MatRow>
+      <Matrix title="Top-4 scores" rows={ex.top.map(ex.expertLabel)} cols={['score']} data={ex.topScores.map((s) => [s])} scale="seq" />
+      <Op>softmax →</Op>
+      <Matrix title="Weights (sum to 1)" rows={ex.top.map(ex.expertLabel)} cols={['weight']} data={ex.weights.map((w) => [w])} scale="seq" />
+    </MatRow>
+    The softmax runs over the 4 kept scores only (the model card describes this for gpt-oss): {ex.softText()}, each divided by their sum. The other 124 experts get weight 0 and are not computed at all.
+  </WStep>
+  <WStep title="4 · Run the 4 chosen experts">
+    <MatRow>
+      <Matrix title="Expert outputs (each a SwiGLU MLP of x)" rows={ex.top.map(ex.expertLabel)} cols={ex.dims} data={ex.outs} scale="div" />
+    </MatRow>
+    Each expert is a full MLP: `down( silu(x·W_gate) * (x·W_up) )`. In gpt-oss each one is three 2,880 × 2,880 matrices, 24.9 M parameters, stored in MXFP4 (13.2 MB). gpt-oss also clamps the activation (`swiglu_limit: 7.0`).
+  </WStep>
+  <WStep title="5 · Weighted sum → back into the residual stream">
+    <MatRow>
+      <Matrix title="Weights" rows={ex.top.map(ex.expertLabel)} data={ex.weights.map((w) => [w])} scale="seq" />
+      <Op>·</Op>
+      <Matrix title="Expert outputs" rows={ex.top.map(ex.expertLabel)} cols={ex.dims} data={ex.outs} scale="div" highlight={{ cols: [0] }} />
+      <Op>=</Op>
+      <Matrix title="MoE output" rows={['token']} cols={ex.dims} data={[ex.mixed]} scale="div" highlight={{ cells: [[0, 0]] }} />
+    </MatRow>
+    First number: {ex.mixText(0)}. This vector is added to the token's residual stream. Over a 36-layer pass one token touches 4 × 36 = 144 expert-MLPs out of 4,608.
+  </WStep>
+</Walkthrough>
+
+## Training keeps the load spread
+
+If the router sent most tokens to a few favourite experts, those would become a bottleneck and the rest would waste memory. Training adds an auxiliary **load-balancing loss** that penalises uneven use (gpt-oss's config lists `router_aux_loss_coef: 0.9`). In inference nothing forces balance; the router does what it learned.
+
+## Total versus active parameters
+
+| | Total | Per token ("active") |
+| --- | --- | --- |
+| Experts | 128 × 36 × 24.9 M ≈ 114.7 B | 4 × 36 × 24.9 M ≈ 3.6 B |
+| Attention, router, norms | ≈ 0.97 B | all of it |
+| Embedding + unembedding | 1.16 B | the unembedding (0.58 B) |
+| **Model** | **116.8 B** | **5.1 B** |
+
+Two different costs follow:
+
+- **Compute per token tracks active parameters.** About 2 FLOPs per active weight, so roughly 9 GFLOP per token (excluding the unembedding). A dense 117 B model would need about 230 GFLOP.
+- **Memory tracks total parameters.** All 128 experts must be loaded, because any token may pick any expert. That is why gpt-oss-120b quantizes the experts to MXFP4 (4.25 bits per weight on average): the experts shrink to about 61 GB and the whole checkpoint to 60.8 GiB, so it fits one 80 GB GPU, and leaves an MI355X (288 GB) with over 200 GB for the [KV cache](/learn/attention-and-kv-cache/).
+
+**MXFP4** is a "microscaling" 4-bit floating-point format: each weight is a 4-bit float, and each block of 32 weights shares one 8-bit scale. That is where 4.25 bits per weight comes from (4 + 8/32). MI355X has matrix instructions for MXFP4 and MXFP6 ([spec sheet](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html): about 10 PFLOP/s peak). Whether a given server's kernels run the matrix math in 4-bit or upconvert to 8-bit depends on the kernel library.
+
+## What routing does to batching
+
+One expert's weights are read from memory once per layer per step, then used for **every token routed to it in that step**. So the useful question is: how many tokens does each expert get?
+
+The walkthrough below simulates it: each token picks 4 of 128 experts at random (the simple model used on this page; real routers are less even). Each grid is one layer's 128 experts; the number is how many tokens of the step each expert received.
+
+<Walkthrough title="Expert load in one layer, as the batch grows (simulated)" caption="Random top-4 routing over 128 experts, seeded so the page is reproducible. Expected experts touched = 128 × (1 − (1 − 4/128)^B). Bytes: touched experts × 36 layers × 13.2 MB (MXFP4).">
+  {ex.batches.map((s, n) => (
+    <WStep title={("" + (n + 1) + " · " + (s.b) + " token" + (s.b > 1 ? 's' : '') + " in the step")}>
+      <MatRow>
+        <Matrix title={("Tokens per expert (" + (s.touched) + " of 128 touched; formula expects " + (s.expected) + ")")} rows={ex.gridRows} cols={ex.gridCols} data={ex.grid(s.load)} scale="seq" digits={0} />
+      </MatRow>
+      {s.b === 1 && <p>One user decoding: 4 experts work, 124 idle. Expert bytes read for the whole 36-layer step: about {ex.stepGB(s.touched)} GB.</p>}
+      {s.b === 8 && <p>8 tokens wake {s.touched} experts, almost all with a single token: {ex.stepGB(s.touched)} GB per step, about {Math.round(ex.stepGB(s.touched) / ex.stepGB(4))}× the single-user read for 8× the tokens. Batching barely shares weight reads yet.</p>}
+      {s.b === 64 && <p>{s.touched} experts touched, each with {s.mean} tokens on average (most busy: {s.max}). {ex.stepGB(s.touched)} GB per step. A dense model would read the same weights at batch 64 as at batch 1; here the bytes grew about {Math.round(ex.stepGB(s.touched) / ex.stepGB(4))}×.</p>}
+      {s.b === 512 && <p>All 128 experts are busy, {s.mean} tokens each on average, most busy {s.max}. The step now reads the whole expert set, {ex.stepGB(s.touched)} GB, and further tokens add compute but no bytes. From here on, the bigger the step, the better each byte is used.</p>}
+    </WStep>
+  ))}
+  <WStep title={("5 · Uneven routing: the same " + (ex.skewed.b) + " tokens, some experts popular")}>
+    <MatRow>
+      <Matrix title={("Tokens per expert, skewed routing (busiest: " + (ex.skewed.max) + "; even routing: " + (ex.batches[3].max) + ")")} rows={ex.gridRows} cols={ex.gridCols} data={ex.grid(ex.skewed.load)} scale="seq" digits={0} />
+    </MatRow>
+    Same average ({ex.skewed.mean} per expert), but a few "hot" experts get {ex.skewed.max} tokens. On one GPU that matters little. When experts are split across GPUs (below), the GPU holding the hot experts sets the pace for everyone. The skew here is made up to show the effect; real routing statistics depend on the traffic.
+  </WStep>
+</Walkthrough>
+
+Try other step sizes:
+
+<MoeCalc />
+
+Two lessons:
+
+1. **Decode batching helps MoE less than dense models.** Going from 1 to 64 users multiplies the expert bytes read per step by about 27–28× (simulation above, formula in the calculator), because new users wake new experts. Each expert still sees only 2–3 tokens, so arithmetic intensity barely rises. See [Decode](/learn/decode-phase/) and [Batching and scheduling](/learn/batching-and-scheduling/).
+2. **Prefill needs big steps to be compute-bound.** An expert does 2 FLOPs per weight per token and costs 0.53 bytes per weight, so its intensity is about 3.8 × tokens per expert. MI355X's ridge point is about 5 PFLOP/s ÷ 8 TB/s ≈ 625 FLOP/byte (spec sheet, approximate; see [roofline](/learn/gpu-memory-hierarchy/)). An expert becomes compute-bound at about 165 tokens, which needs a step of about 165 × 128 / 4 ≈ **5,300 tokens**.
+
+### What it means for short prompts
+
+Short prompts pay a near-fixed cost: every step must read all the experts at least once (about 61 GB at 8 TB/s is 7.6 ms at full bandwidth), plus fixed per-request overhead. Throughput in tokens per second only climbs to its plateau once a step holds several thousand tokens.
+
+## Splitting experts across GPUs
+
+When a model does not fit one GPU, or to raise throughput, servers use **expert parallelism (EP)**: different GPUs hold different experts. Each MoE layer then needs two all-to-all exchanges: send each token's hidden state to the GPUs owning its chosen experts, then gather the results. That traffic runs over the GPU-to-GPU links (XGMI on AMD, NVLink on NVIDIA; see [GPU memory and interconnects](/learn/gpu-memory-and-interconnects/)), and uneven routing makes the busiest GPU set the pace.
+
+gpt-oss-120b fits on **one whole MI355X** (the ~65 GB checkpoint in 288 GB), so a replica can run without tensor or expert parallelism. Larger MoE models, or NVL72-style racks, are where EP matters.
+
+## On the GPU
+
+A naive implementation would loop over experts. Real servers sort tokens by expert and run one **grouped GEMM** (many small matrix multiplies in one kernel launch), often fused with the routing and the weighted sum (vLLM calls it fused MoE). The kernel view is on [Prefill and decode as kernels](/learn/llm-kernels/).
+
+<Callout tone="note" title="How this shows up on dashboards">
+MoE explains two things you may see on GPU dashboards: prefill GPUs with full HBM (weights ~65 GB plus a large KV reservation) but modest compute use at low traffic, and per-request latency that hardly changes between a 50-token and a 500-token prompt. Neither is a fault.
+</Callout>
+
+## Common misconceptions
+
+- **"Experts are topic specialists (one for code, one for French)."** Routing is per token per layer and is learned for loss, not for human topics. Experts do not map cleanly to subjects.
+- **"Only 5 B parameters, so it needs 5 B parameters of memory."** It needs all 117 B loaded; only compute shrinks.
+- **"MoE makes decode cheap."** Per user, yes: 1.9 GB of expert bytes instead of 61 GB. At a batch of 64, the step reads most of the model anyway.
+
+## Further reading
+
+- [gpt-oss model card](https://arxiv.org/abs/2508.10925) (Section 2.2: MoE, top-4 routing, MXFP4)
+- [Outrageously large neural networks: the sparsely-gated mixture-of-experts layer](https://arxiv.org/abs/1701.06538)
+- [GShard](https://arxiv.org/abs/2006.16668) · [Switch Transformers](https://arxiv.org/abs/2101.03961) (scaling MoE, load balancing)
+- [vLLM expert parallel deployment](https://docs.vllm.ai/en/latest/serving/expert_parallel_deployment.html)
+- [AMD Instinct MI355X specifications](https://www.amd.com/en/products/accelerators/instinct/mi350/mi355x.html) (MXFP4, FP8 peak, HBM bandwidth)

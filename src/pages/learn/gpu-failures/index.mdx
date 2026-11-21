@@ -1,0 +1,160 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "How GPUs fail"
+short: "GPU failures"
+description: "The GPU failure classes (memory errors, hangs and resets, wedged firmware, falling off the bus, heat and power limits, link errors) shown on a node's eight GPUs, how each shows up on AMD and NVIDIA, a blast-radius calculator, and a silent fatal event read signal by signal."
+updated: "2026-11-10"
+track: operations
+order: 4
+requires: [amd-ras-and-ecc, nvidia-gpu-tools]
+eyebrow: "Learn · Operating GPU nodes"
+---
+import Callout from '@/components/content/Callout.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Badge from '@/components/content/Badge.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Timeline from '@/components/content/Timeline.astro';
+import TimelineItem from '@/components/content/TimelineItem.astro';
+import Diagram from '@/components/content/Diagram.astro';
+import Hive from './_Hive.astro';
+import BlastCalc from './_BlastCalc.astro';
+import TestCalc from './_TestCalc.astro';
+import { CLASSES } from './_classes';
+
+A CPU server mostly fails as a whole: it crashes, reboots, or loses a disk. A GPU node fails in more ways, and more often. One MI355X has 288 GB of HBM stacked next to compute chiplets and draws up to 1400 W. Eight of them share one baseboard and one coherent fabric. Each part can fail on its own, a failure usually kills every process on that GPU, and on MI35x it often takes the other seven GPUs too.
+
+The error machinery behind memory faults is in [AMD RAS and ECC](/learn/amd-ras-and-ecc/).
+
+## The idea
+
+Picture an eight-cylinder engine on one crankshaft. A dirty spark plug makes one cylinder misfire: the engine runs a little rough. A seized piston stops the whole engine, because all eight share the crankshaft. The eight GPUs of an MI355X node share one fabric (the XGMI **hive**) the same way, and the driver resets them together.
+
+So for every failure, ask three questions:
+
+- **How far does it spread?** One process, one GPU, all eight, or the whole node until someone pulls the power. That is the **blast radius**.
+- **Who notices?** The kernel log, a counter, the exporter, Kubernetes, or only a user.
+- **What fixes it?** Nothing, a restart, a reset, a cold power cycle, or a new part.
+
+Where the analogy breaks: a seized engine is loud. A wedged GPU node can be silent: the node stays `Ready`, the metrics read healthy, and the scheduler keeps sending work to it. That silence, not the hardware fault, is what makes such incidents last hours.
+
+## Pick a failure
+
+<Explorer id="fail" options={[{ key: 'fail', label: 'Failure', default: 'fatal', values: CLASSES.map((c) => ({ value: c.id, label: c.label })) }]} variants={CLASSES.map((c) => ({ match: { fail: c.id }, id: ("f-" + (c.id)) }))}>
+  {CLASSES.map((c) => (
+    <Variant id={("f-" + (c.id))}>
+      <Hive tiles={c.tiles} who={("Blast radius: " + (c.radius) + ".")} />
+      <table>
+        <tbody>
+          <tr><th>AMD MI35x signal</th><td>{c.amd}</td></tr>
+          <tr><th>NVIDIA signal</th><td>{c.nvidia}</td></tr>
+          <tr><th>Usual fix</th><td>{c.fix}</td></tr>
+        </tbody>
+      </table>
+    </Variant>
+  ))}
+</Explorer>
+
+The last class is not a GPU fault, but it can decide an incident: when the exporter freezes, every metric looks healthy.
+
+## Memory errors
+
+Memory errors come in three kinds: **correctable** (fixed silently), **uncorrectable** (data is wrong) and **deferred/poisoned** (wrong, but not yet read). HBM wears gracefully. The driver retires a bad page (one row is 16 pages) and the GPU keeps working until 128 pages are retired. A UE in a compute or fabric block has no such tolerance. So "any uncorrectable error → quarantine" is too blunt for HBM and right for everything else. See [AMD RAS and ECC](/learn/amd-ras-and-ecc/).
+
+On a new fleet, `sum(increase(gpu_ecc_correct_total[7d]))` can read 0 across every GPU; a background rate appears with age.
+
+## Hangs, resets and the wedge
+
+A **hang** means a GPU queue stops making progress. The driver notices a timeout and resets: first the smallest unit it can, and in the worst case the whole GPU. On MI35x a whole-GPU reset is a **MODE1** reset, and it covers the entire 8-GPU **hive**. The eight GPUs share one coherent XGMI fabric, and the driver must reset them all within about a second so the links renegotiate. Every process on every GPU of the node dies.
+
+After MODE1, the **PSP** (the GPU's own boot processor) must restart and reload all firmware. If it does not, the driver logs `PSP resume failed` with error `-62` after a long poll (it can take about half an hour, with one CPU core spinning per GPU). The GPUs are then **wedged**: present on PCIe, useless to software. A warm reboot does not help, because the GPU baseboard stays powered. Only removing power recovers them.
+
+<Callout tone="risk" title="cycle is not a power cycle">A BMC "power cycle" that maps to Redfish `ForceRestart` restarts the host but never drops the GPU rails, and the GPUs can come back worse. The working recovery is power off, confirm the state reads Off, then power on. Expect several minutes with no ping; firmware POST alone can take over 3 minutes on a large GPU server.</Callout>
+
+NVIDIA has the same shape with other names. Xid 79 ("fallen off the bus") has the immediate action RESTART_BM, a bare-metal restart. GSP timeouts (Xid 119/120) and initialization errors (143) need a GPU reset. On HGX the reset scope is one GPU, not the whole baseboard.
+
+## Heat and power
+
+GPUs protect themselves by slowing down before they break. Example limits for an MI355X, as `amd-smi static -l` prints them (illustrative values):
+
+| Sensor | Slowdown | Shutdown |
+| --- | --- | --- |
+| Hotspot (junction) | 100 °C | 110 °C |
+| HBM (VRAM) | 105 °C | 115 °C |
+| Socket power cap (PPT0) | 1400 W | — |
+
+The driver reports these trip points on the node, so there is no need to guess thresholds.
+
+On a busy fleet, a typical day might peak at around 75 °C junction and 65 °C memory, with package power at the 1400 W cap, and some GPUs spending 60 % of their time limited by the power cap (`gpu_violation_ppt_residency_percentage`). That is **power throttling**: normal for a busy GPU and not a fault, but it caps throughput. **Thermal throttling** (`SOCKET_THERMAL`, `HBM_THERMAL` or `VR_THERMAL` residency above 0) is different. It points at cooling, airflow or a failing fan, and it is a facility ticket.
+
+Worked example: if inference latency rises on one node only and `gpu_violation_socket_thermal_residency_percentage` reads 30 % there and 0 % elsewhere, the GPUs on that node spend almost a third of their time at reduced clocks. Expect up to roughly that much lost throughput (an upper bound; not measured). Fix the cooling, not the software.
+
+## PCIe and the host link
+
+Each GPU talks to the CPU over a PCIe Gen5 x16 link (32 GT/s), through retimers on the baseboard. Problems show up in steps:
+
+1. **Replays**: the link layer retransmits a corrupted packet. `pcie_replay_count` and `amd-smi metric -P` count them. A few are tolerable; a steady climb is a bad riser, retimer or slot.
+2. **Recovery**: the link drops to retraining (`L0_TO_RECOVERY_COUNT`, exporter `pcie_recovery_count`).
+3. **Degraded link**: `current_link_width` below 16 or speed below 32 GT/s in sysfs. The GPU works, slower on host copies.
+4. **AER errors**: Advanced Error Reporting counts correctable, non-fatal and fatal errors per device (`aer_dev_*` in sysfs, `AER:` in the kernel log). A fatal AER error usually means the device is lost.
+5. **Off the bus**: the GPU disappears from `lspci` and `amd-smi list`. On NVIDIA this is Xid 79.
+
+
+## Peer links: XGMI and NVLink
+
+Inside an MI355X node each GPU has seven XGMI links, one to each peer. `amd-smi xgmi` shows each link Up, Down or Disabled; `gpu_ecc_*_xgmi_wafl` counts link errors. A down link does not stop single-GPU work. It does break peer traffic (tensor-parallel work) and puts the hive reset at risk. On NVIDIA, NVLink errors appear as Xid 74 or 145 and in `nvidia-smi nvlink -e`. On NVL72 the "peers" span 18 trays and a switch fabric, so the blast radius is a rack. See [Rack-scale GPUs](/learn/rack-scale-gpus/).
+
+## Blast radius is the real problem
+
+<Callout tone="warn" title="One GPU fault, eight replicas lost">If all 8 replicas of one model land on a single MI355X node, and the Deployment has no anti-affinity, no topology spread and no disruption budget, one hardware fault takes the whole model offline in the same second.</Callout>
+
+For a Kubernetes operator, the unit of failure on MI35x is the **node**, not the GPU: a fatal error resets all 8 GPUs, a wedge needs a node power cycle, and simple quarantine is whole-node. Try it: one replica uses one GPU; one node holds at most 8.
+
+<BlastCalc />
+
+Plan capacity and placement replica-aware: spread replicas of one model across nodes.
+
+## A silent fatal event, signal by signal
+
+The worst failure is the one nobody sees. An illustrative pattern: a fatal hive-wide event, MODE1 reset, and a PSP that never comes back. What each signal shows:
+
+| Signal | Reading |
+| --- | --- |
+| Kernel log | `RAS Intr triggered` repeating, `GPU reset begin`, later `PSP resume failed` (-62) |
+| ECC counters, `gpu_health` | unchanged: the fatal path moves no counter |
+| Exporter | `up = 1`, serves the values captured at the fault; `gpu_energy_consumed` stops changing |
+| Exporter sample count | drops: hundreds of series stop existing |
+| Node | `Ready`, untainted: the kubelet does not watch GPU health |
+| ResourceSlice | still lists all 8 GPUs: it is a boot-time inventory with no health field |
+| Scheduler | keeps placing new GPU Pods on the dead node |
+
+So a rule on the kernel log fires within seconds; every rule that compares a metric level with a threshold never fires, because a frozen value never crosses one. Until someone notices by hand, new Pods keep landing on dead GPUs.
+
+The reporting BDF in such log lines moves between events, but that proves nothing: it names the GPU whose interrupt handler won a software race, not the failing die. And intermittent faults are hard to reproduce on demand. What does a two-hour diagnostic tell you about a fault that comes every few days?
+
+<TestCalc />
+
+**Lessons.**
+
+- Detect from the kernel log first; the exporter is supplementary.
+- Add a freshness check (`changes(gpu_energy_consumed[15m]) == 0` while `up == 1`) and a sample-count drop alert.
+- Isolate the whole node with a taint, because DRA cannot exclude a dead device.
+- Capture evidence before any power cycle.
+- Spread replicas of one model across nodes.
+
+GPU nodes also fail through ordinary host plumbing. For example, a node re-added without its mounted containerd storage puts images on a small OS disk, which fills up (DiskPressure, image pulls failing with ENOSPC).
+
+## Misconceptions
+
+- *"The node is Ready, so the GPUs are fine."* The kubelet does not check GPU health.
+- *"`gpu_health=1` means healthy."* It only reflects ECC counters. It stays 1 through fatal events.
+- *"A reboot is a power cycle."* Not for the GPUs. Only removing power resets the PSP.
+- *"The BDF in the error line is the bad GPU."* For hive-wide fatal events it is the first interrupt handler, not the culprit.
+- *"No errors in the counters means good hardware."* Counters cannot report the fatal ATHUB path at all.
+
+## Further reading
+
+- [NVIDIA Xid catalog](https://docs.nvidia.com/deploy/xid-errors/analyzing-xid-catalog.html) · [AMD SMI CLI](https://rocm.docs.amd.com/projects/amdsmi/en/latest/how-to/amdsmi-cli-tool.html) · [PCIe AER (kernel docs)](https://docs.kernel.org/PCI/pcieaer-howto.html)
+- [AMD GPU Operator auto-remediation](https://instinct.docs.amd.com/projects/gpu-operator/en/latest/autoremediation/auto-remediation.html)

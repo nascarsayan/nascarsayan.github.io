@@ -1,0 +1,45 @@
+---
+/**
+ * One window of a Nest and, recursively, the windows inside it: the plain grid that <Nest> shows without
+ * JavaScript (and that lintNest checks). Format: src/diagrams/nest.ts.
+ */
+import '@/styles/nest.css';
+import type { Nest } from '@/diagrams/nest';
+import { KIND_TAG } from '@/diagrams/chronicle-model';
+import { ICONS } from '@/diagrams/icons';
+import { inlineMd } from '@/diagrams/md';
+import MdInline from './MdInline.astro';
+
+interface Props { spec: Nest; at: string }
+const { spec, at } = Astro.props;
+const b = spec.boxes.find((x) => x.id === at)!;
+const kids = spec.boxes.filter((x) => x.parent === b.id);
+const arts = (spec.arts ?? []).filter((a) => a.on === b.id);
+const tag = b.tag ?? KIND_TAG[b.kind] ?? '';
+const ic = b.icon ? (ICONS as Record<string, { title: string; color: string; path: string }>)[b.icon] : undefined;
+const gridStyle = b.cols ? `grid-template-columns: repeat(${b.cols}, minmax(0, 1fr))` : undefined;
+const winStyle = b.span ? `grid-column: span ${b.span}` : undefined;
+const cls = ['nest-win', `nest-k-${b.kind}`, b.tone && `nest-t-${b.tone}`, !kids.length && 'is-leaf'].filter(Boolean).join(' ');
+---
+
+<section class={cls} style={winStyle} aria-label={b.label}>
+  <header class="nest-head">
+    <span class="nest-title">
+      {ic && <svg class="nest-icon" viewBox="0 0 24 24" aria-hidden="true"><path d={ic.path} fill={ic.color} /></svg>}
+      {tag && <span class="nest-kind">{tag}</span>}
+      {b.src ? <a class="nest-name" href={b.src}>{b.label}</a> : <span class="nest-name">{b.label}</span>}
+    </span>
+    {b.sub && <span class="nest-sub">{b.sub}</span>}
+    {b.note && <span class="nest-note"><MdInline items={inlineMd(b.note)} /></span>}
+  </header>
+  {arts.length > 0 && (
+    <div class="nest-arts">
+      {arts.map((a) => <span class={`nest-art nest-art-${a.kind}`} title={a.title ?? a.label}><span class="nest-art-k">{a.kind}</span>{a.label}</span>)}
+    </div>
+  )}
+  {kids.length > 0 && (
+    <div class="nest-grid" style={gridStyle}>
+      {kids.map((k) => <Astro.self spec={spec} at={k.id} />)}
+    </div>
+  )}
+</section>

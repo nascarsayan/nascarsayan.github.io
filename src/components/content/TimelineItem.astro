@@ -1,0 +1,23 @@
+---
+/** One entry of a <Timeline>: <TimelineItem when="Phase 1" title="Cache reads" tone="note">Body.</TimelineItem> */
+import './tones.css';
+interface Props { when: string; title?: string; tone?: 'note' | 'good' | 'warn' | 'risk' | 'neutral' | 'primary' }
+const { when, title, tone = 'neutral' } = Astro.props;
+---
+
+<li class:list={['item', `tone-${tone}`]}>
+  <span class="dot" aria-hidden="true"></span>
+  <span class="when">{when}</span>
+  {title && <strong class="title">{title}</strong>}
+  <div class="body"><slot /></div>
+</li>
+
+<style>
+  .item { position: relative; padding: 0 0 18px 22px; }
+  .dot { position: absolute; left: -7px; top: 6px; width: 12px; height: 12px; border-radius: 999px; background: var(--t-fg); box-shadow: 0 0 0 3px var(--color-background); }
+  .when { display: block; font-size: 0.8125rem; color: var(--color-muted); }
+  .title { display: block; }
+  .body { font-size: 0.9375rem; }
+  .body :global(> :first-child) { margin-top: 0; }
+  .body :global(> :last-child) { margin-bottom: 0; }
+</style>

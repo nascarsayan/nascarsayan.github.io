@@ -1,0 +1,187 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Speculative decoding: draft and target"
+short: "Speculative decoding"
+description: "A small draft model guesses several tokens; the big target model checks them all in one pass and keeps the ones it agrees with, with the same output distribution. A worked round with real numbers (greedy and sampling rules, KV kept and dropped), a speedup calculator, EAGLE-style and other variants, and why a disaggregated server needs a draft prefill as well as a target prefill."
+updated: "2026-11-10"
+track: inference
+order: 8
+requires: [prefill-phase, decode-phase]
+eyebrow: "Learn · LLM inference"
+links:
+  - { label: "Leviathan et al. 2022", href: "https://arxiv.org/abs/2211.17192" }
+  - { label: "vLLM speculative decoding", href: "https://docs.vllm.ai/en/latest/features/speculative_decoding/" }
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import MatRow from '@/components/content/MatRow.astro';
+import Op from '@/components/content/Op.astro';
+import verify from './_verify.diagram';
+import Chips from './_Chips.astro';
+import SpecCalc from './_SpecCalc.astro';
+import * as ex from './_example';
+
+export const ctx = ex.context.map((t) => ({ t, s: 'ctx' }));
+export const hl = ex.draft.map((d, i) => [i, ex.vocab.indexOf(d)]);
+export const prefixes = ['after “that”', 'after “the”', 'after “pod”', 'after “is”', 'after “ready”'];
+export const g = ex.greedy;
+export const sm = ex.sampled;
+export const roundChips = (acc, bad, fix) => [
+  ...ctx,
+  ...ex.draft.map((t, i) => ({ t, s: i < acc ? 'ok' : i === bad ? 'bad' : 'drop' })),
+  { t: fix, s: bad < 0 ? 'bonus' : 'fix' },
+];
+
+[Decode](/learn/decode-phase/) makes one token per step, and each step is limited by reading weights and KV from memory, not by arithmetic. So a decode step has plenty of spare compute. **Speculative decoding** spends that spare compute to make several tokens per step, without changing what the model outputs.
+
+## The idea
+
+**A junior drafts, a senior reviews.** Writing is slow because the senior (the big **target** model) has to "open the whole file" for every single word: one full read of its weights per token. Reading a few proposed words costs the senior almost the same as writing one, because opening the file is the expensive part. So let a fast junior (a small **draft** model) write the next few words, and have the senior check them all in one sitting. The senior keeps the words it would have written itself and replaces the first one it disagrees with.
+
+| Piece | What it is for | The question it answers |
+| --- | --- | --- |
+| Draft model | cheap guesses | "What are the next $$k$$ tokens, probably?" |
+| One target pass over $$k + 1$$ positions | the check, at the price of one decode step | "What would the target have said at each position?" |
+| Accept/reject rule | keep the target's answer exactly | "Do I keep this guess?" |
+| Acceptance rate $$\alpha$$ | how often guesses survive | "How much faster will this be?" |
+
+**Why checking is cheap.** A forward pass predicts the next token at **every** input position at once (that is how prefill works). Feed the target the current token plus the $$k$$ guesses and it returns its own predictions after each prefix, in one pass that reads the weights once.
+
+**Where the analogy breaks.** The review is not a judgement call: it is exact arithmetic on probabilities, so the output is exactly what the target alone would produce (same distribution). And one rejection throws away **every** guess after it, because those guesses were built on a word that is no longer there.
+
+<Diagram spec={verify} title="One speculative round, k = 4" caption="The draft guesses four tokens; the target checks them in one pass; two are accepted and the target supplies the third." autoSteps />
+
+## Worked example: one round, real numbers
+
+A toy vocabulary of 9 tokens and made-up probabilities (a real model has about 200,000 tokens and learns its probabilities). The text so far is "kubectl reports that"; the draft proposes $$k$$ = {ex.k} tokens. Every number below is computed from the distributions; the random numbers come from a fixed seed.
+
+<Walkthrough title="Draft 4 tokens, verify in one pass" caption="p = target probabilities, q = draft probabilities. Rows are positions, columns are tokens; the outlined cell in each row is the drafted token.">
+  <WStep title="1 · The cache holds the context">
+    <Chips tokens={ctx} label="Text so far" kv />
+    <p>Both models already have the KV cache of "kubectl reports that" (from prefill or earlier rounds). Plain decoding would now run the target once per token. Instead, the draft goes first.</p>
+  </WStep>
+  <WStep title="2 · Draft: 4 cheap steps">
+    <MatRow>
+      <Matrix title="q: draft's probabilities" rows={['q₁', 'q₂', 'q₃', 'q₄']} cols={ex.vocab} data={ex.r2m(ex.Q)} scale="seq" highlight={{ cells: hl }} />
+    </MatRow>
+    <Chips tokens={[...ctx, ...ex.draft.map((t) => ({ t, s: 'draft' }))]} label="After drafting" kv />
+    <p>The draft runs 4 ordinary decode steps of its own and picks "the", "pod", "is", "ready". Each step appends a KV entry in the **draft's** cache. Being small, it is fast: here we assume each draft step costs 5% of a target step.</p>
+  </WStep>
+  <WStep title="3 · Verify: one target pass over 5 positions">
+    <MatRow>
+      <Matrix title="p: target's probabilities, one row per prefix" rows={prefixes} cols={ex.vocab} data={ex.r2m(ex.P)} scale="seq" highlight={{ cells: hl }} />
+    </MatRow>
+    <p>The target runs **once** over "that the pod is ready" and returns 5 distributions: what it would say after each prefix. Row 5 (after "ready") is only used if all 4 guesses survive. The target's cache now has 4 new KV entries too, one per drafted token.</p>
+  </WStep>
+  <WStep title="4 · Greedy rule: keep guesses that match the target's top token">
+    <table>
+      <thead><tr><th>Position</th><th>Draft guessed</th><th>Target's top token</th><th>Verdict</th></tr></thead>
+      <tbody>
+        {g.rows.map((r, i) => (
+          <tr><td>{r.pos}</td><td><code>{r.draft}</code></td><td><code>{r.target}</code></td><td>{i < g.firstBad || g.firstBad < 0 ? 'accept' : i === g.firstBad ? ("reject: emit “" + (r.target) + "”") : 'discarded (after a reject)'}</td></tr>
+        ))}
+      </tbody>
+    </table>
+    <Chips tokens={roundChips(g.accepted, g.firstBad, g.emitted[g.emitted.length - 1])} label="Result" />
+    <p>With greedy decoding (always take the most likely token) the rule is a comparison. "the" and "pod" match. At position 3 the target prefers "was" (0.48) over the draft's "is" (0.30): reject, and emit the target's "was" instead. Position 4 is never looked at, even though "ready" happens to match. **{g.emitted.length} tokens from one target pass** instead of one.</p>
+  </WStep>
+  <WStep title="5 · Sampling rule: accept with probability min(1, p/q)">
+    <table>
+      <thead><tr><th>Position</th><th>Draft token</th><th>p</th><th>q</th><th>min(1, p/q)</th><th>random u</th><th>u &lt; min?</th></tr></thead>
+      <tbody>
+        {sm.rows.map((r) => (
+          <tr><td>{r.pos}</td><td><code>{r.draft}</code></td><td>{r.p}</td><td>{r.q}</td><td>{r.ratio}</td><td>{r.u}</td><td>{r.ok ? 'accept' : 'reject'}</td></tr>
+        ))}
+      </tbody>
+    </table>
+    <p>When the server samples (temperature above 0), a guess is kept with probability min(1, p/q): always if the target likes it at least as much as the draft did, otherwise in proportion. "the": the target gives 0.62 where the draft gave 0.70, so it survives with chance 0.89; u = {sm.rows[0].u} survives. Position 3: "is" survives with chance only {sm.rows[2].ratio}; u = {sm.rows[2].u} rejects it.</p>
+  </WStep>
+  <WStep title="6 · On reject: sample from what the draft under-predicted">
+    <MatRow>
+      <Matrix title="Position 3: target, draft, and the residual" rows={['p₃ target', 'q₃ draft', 'max(0, p − q)', 'r = normalized']} cols={ex.vocab} data={[ex.r2m(ex.P)[2], ex.r2m(ex.Q)[2], ex.r2m([ex.P[2].map((x, j) => Math.max(0, x - ex.Q[2][j]))])[0], sm.resid]} scale="seq" highlight={{ cells: [[3, ex.vocab.indexOf(sm.extra)]] }} />
+    </MatRow>
+    <Chips tokens={roundChips(sm.accepted, sm.reject, sm.extra)} label="Result" kv />
+    <p>The replacement is drawn from the **residual**: the probability the target wanted but the draft did not cover. "was" holds {sm.resid[5]} of it; u = {sm.extraU} picks "{sm.extra}". This correction is what makes the output distribution exactly the target's. Then clean-up: KV entries for "is" and "ready" are freed in both caches (✕). The KV for "{sm.extra}" is written when the next round feeds it in.</p>
+  </WStep>
+  <WStep title="7 · Check: the output really is the target's distribution">
+    <MatRow>
+      <Matrix title={("Position 1: " + (ex.TRIALS.toLocaleString('en-US')) + " simulated rounds")} rows={['p₁ target', 'q₁ draft', 'emitted']} cols={ex.vocab} data={[ex.r2m(ex.P)[0].map((x) => x), ex.r2m(ex.Q)[0], ex.check.emp]} scale="seq" digits={3} />
+    </MatRow>
+    <p>Run the rule {ex.TRIALS.toLocaleString('en-US')} times at position 1 (draft samples from q₁, accept or replace) and count what comes out. The result matches p₁ (0.62 "the", 0.25 "a"), not q₁ (0.70, 0.20): the draft changed the speed, not the answer. vLLM calls the method "theoretically lossless up to the precision limits of hardware numerics".</p>
+  </WStep>
+</Walkthrough>
+
+Every round yields at least one token (the correction or, if all $$k$$ survive, a **bonus** token from the last distribution) and at most $$k + 1$$.
+
+## How much faster
+
+Let $$\boldsymbol{\alpha}$$ be the **acceptance rate**: the chance a draft token survives, assumed equal at every position. For a sampled draft token it is $$\sum \min(p, q)$$ over the vocabulary; in the example above that is {ex.alphaPos.join(', ')} at the four positions, about {ex.alphaMean} on average. From [Leviathan et al.](https://arxiv.org/abs/2211.17192):
+
+$$
+\begin{aligned}
+\text{expected tokens per round} \quad E &= \frac{1 - \alpha^{k+1}}{1 - \alpha} \\
+\text{cost of a round} \quad &= k\,c + 1 \qquad \left(c = \frac{\text{draft step cost}}{\text{target step cost}}\right) \\
+\text{expected speedup} \quad S &= \frac{E}{k\,c + 1}
+\end{aligned}
+$$
+
+<SpecCalc />
+
+With $$c = 0.05$$:
+
+<table>
+  <thead><tr><th>Acceptance rate</th><th>Draft length k</th><th>Tokens per round E</th><th>Round cost</th><th>Speedup S</th></tr></thead>
+  <tbody>{ex.table.map((r, i) => <tr><td>{r.a}{i === ex.table.length - 1 ? ' (the example above)' : ''}</td><td>{r.k}</td><td>{r.E}</td><td>{r.cost}</td><td>{r.S}×</td></tr>)}</tbody>
+</table>
+
+- **$$\alpha$$ matters most.** A draft that agrees 80% of the time is worth far more than a slightly cheaper one.
+- **Longer guesses have diminishing returns.** All of the first $$i$$ guesses survive with chance $$\alpha^i$$, so late guesses are rarely used, while each costs a draft step. Move $$k$$ in the calculator and watch the curve flatten, then fall.
+- **Acceptance depends on the text.** Code, boilerplate and repeated context are easy to guess; creative text is hard. Speedup varies per request.
+
+## When it helps less
+
+- **At large batch sizes.** The cheap check assumes spare compute. A big decode batch already uses more of it, and verifying $$k + 1$$ positions for every sequence multiplies the work. Gains shrink as load grows; some servers adapt $$k$$ or turn speculation off under load (vLLM lists "dynamic speculative decoding").
+- **With a poorly matched draft.** Low $$\alpha$$ makes each round cost more than it returns ($$S$$ below 1 in the calculator).
+- **Memory.** The draft's weights and its own KV cache take space.
+
+## Variants
+
+| Method | Where guesses come from |
+| --- | --- |
+| **Draft model** | a separate small LM with the same tokenizer (the original method) |
+| **Medusa** | extra prediction heads on the target that guess tokens t+2, t+3… from its last hidden state |
+| **EAGLE** | a light draft head (about one transformer layer) that runs autoregressively on the target's **hidden states** rather than on tokens alone; candidates form a **tree** verified in one pass with a tree-shaped attention mask |
+| **EAGLE-2** | same, but grows the tree dynamically where the draft is confident |
+| **EAGLE-3** | fuses low-, mid- and high-level target features and trains the head on its own predictions, improving acceptance at longer depths |
+| **MTP** (multi-token prediction) | modules trained with the model itself to predict further ahead (DeepSeek-V3), reused as the draft |
+| **N-gram / prompt lookup** | copy a continuation of the last few tokens from earlier in the prompt; free, good for edits and RAG |
+
+vLLM supports, among others, draft models, EAGLE, MTP, n-gram and suffix decoding ([docs](https://docs.vllm.ai/en/latest/features/speculative_decoding/)). EAGLE-style heads usually get higher $$\alpha$$ than a separate draft model of similar cost because they see the target's internal features.
+
+## Why it means two prefills in a disaggregated server
+
+Both models need the prompt's KV cache before the first round: the draft to make its first guess, the target to verify. A server that runs prefill and decode on separate machines therefore needs **two prefill pools**, one per model, and the decode side receives KV from both.
+
+- **The draft pool is cheaper.** A draft with a few layers prefills several times faster than a 36-layer target and sends far less KV (one transfer per layer), so it needs fewer replicas.
+- **Both pools gate the first token.** A request needs a target prefill *and* a draft prefill before decode can start, so a shortage in either pool raises TTFT for everyone. The smaller draft pool loses a larger share of its capacity when one node fails; spreading both pools across nodes matters.
+
+Acceptance rates are measured on the decode side. vLLM-based decoders export `vllm:spec_decode_num_accepted_tokens_per_pos`.
+
+## Common misconceptions
+
+- **"Speculative decoding trades quality for speed."** With the standard rejection rule the output distribution is the target's (step 7 above). Only explicitly lossy variants change it.
+- **"The draft writes the answer."** The target decides every token; the draft only proposes.
+- **"Speedup = k."** Speedup is $$E / \text{cost}$$, usually 1.5–3× in practice, and it varies with the text and the load.
+
+## Further reading
+
+- [Fast inference from transformers via speculative decoding](https://arxiv.org/abs/2211.17192) (Leviathan et al.: algorithm and speedup formula)
+- [Accelerating LLM decoding with speculative sampling](https://arxiv.org/abs/2302.01318) (Chen et al.)
+- [Medusa](https://arxiv.org/abs/2401.10774) · [EAGLE](https://arxiv.org/abs/2401.15077) · [EAGLE-2](https://arxiv.org/abs/2406.16858) · [EAGLE-3](https://arxiv.org/abs/2503.01840)
+- [Inference with reference: lossless acceleration](https://arxiv.org/abs/2304.04487) (copying from the prompt)
+- [DeepSeek-V3 technical report](https://arxiv.org/abs/2412.19437) (multi-token prediction)
+- [vLLM speculative decoding](https://docs.vllm.ai/en/latest/features/speculative_decoding/)

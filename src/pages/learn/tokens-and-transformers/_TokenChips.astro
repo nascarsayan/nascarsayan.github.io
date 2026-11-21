@@ -1,0 +1,35 @@
+---
+/**
+ * Real tokenizer output as chips: each piece with its integer id underneath.
+ * A leading space is drawn as ␣ so it is visible. Data: _tokens.ts.
+ */
+import type { Tok } from './_tokens';
+interface Props { text: string; tokens: Tok[]; compact?: boolean }
+const { text, tokens, compact = false } = Astro.props;
+const show = (s: string) => s.replace(/ /g, '␣').replace(/\n/g, '↵');
+---
+
+<figure class:list={['tc', { 'tc-compact': compact }]}>
+  <figcaption><code>"{text}"</code> <span class="tc-n">→ {tokens.length} tokens, {text.length} characters</span></figcaption>
+  <ol>
+    {tokens.map((t, i) => (
+      <li class={`tc-${i % 4}`}><span class="tc-p">{show(t.text)}</span><span class="tc-id">{t.id}</span></li>
+    ))}
+  </ol>
+</figure>
+
+<style>
+  .tc { margin: 6px 0 14px; }
+  .tc figcaption { margin-bottom: 6px; font-size: 0.875rem; }
+  .tc-n { color: var(--color-muted); }
+  .tc ol { display: flex; flex-wrap: wrap; gap: 4px; margin: 0; padding: 0; list-style: none; }
+  .tc li { display: flex; flex-direction: column; align-items: center; min-width: 40px; margin: 0; padding: 4px 8px; border-radius: 8px; font-family: var(--font-mono, ui-monospace, monospace); }
+  .tc li::before { content: none; }
+  .tc-p { font-size: 0.9375rem; white-space: pre; }
+  .tc-id { font-size: 0.6875rem; color: var(--color-gray-700); font-variant-numeric: tabular-nums; }
+  .tc-0 { background: color-mix(in srgb, #3b82f6 18%, transparent); }
+  .tc-1 { background: color-mix(in srgb, #f59e0b 20%, transparent); }
+  .tc-2 { background: color-mix(in srgb, #10b981 18%, transparent); }
+  .tc-3 { background: color-mix(in srgb, #ec4899 16%, transparent); }
+  .tc-compact { margin: 2px 0 8px; }
+</style>

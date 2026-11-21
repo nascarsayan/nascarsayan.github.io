@@ -1,0 +1,413 @@
+/* <Chronicle> (components/content/Chronicle.astro, scripts/chronicle.ts). Everything is under .ch. */
+.ch {
+  --ch-ink: var(--color-text);
+  --ch-muted: var(--color-gray-700);
+  --ch-line: var(--color-gray-300);
+  --ch-soft: var(--color-gray-100);
+  --ch-bg: var(--color-background);
+  --ch-tint: var(--color-cloud-100);
+  --ch-accent: var(--color-primary);
+  --ch-ok: var(--color-success);
+  --ch-warn: var(--color-warning-700);
+  --ch-risk: var(--color-error);
+  --ch-note: var(--color-info);
+  /* Desktop look: gaps between windows show the desk; windows have a solid frame and a title-bar strip. */
+  --ch-desk: color-mix(in srgb, var(--color-gray-500) 5%, var(--ch-bg));
+  --ch-win: var(--color-gray-500);
+  --ch-chrome: color-mix(in srgb, var(--color-gray-200) 75%, var(--ch-bg));
+  /* Title bar: a thin ink wash over whatever the window's body is (plain or kind-tinted), so the bar is always
+     a shade darker than its contents, in light and dark. */
+  --ch-titlebar: color-mix(in srgb, var(--ch-ink) 7%, transparent);
+  /* Shared edge between tiled windows (CHROME.padX in the model counts it). */
+  --ch-edge: 3px;
+  --ch-shadow: 0 1px 2px rgb(0 0 0 / 0.10), 0 4px 12px rgb(0 0 0 / 0.08);
+  --ch-h: 640px;
+  position: relative;
+  margin: 24px 0;
+  padding: 6px;
+  border: 1px solid var(--ch-soft);
+  border-radius: 8px;
+  background: var(--ch-bg);
+  color: var(--ch-ink);
+  font-size: 0.875rem;
+}
+.ch:focus-visible { outline: 2px solid var(--ch-accent); }
+:where(.ch) button { font: inherit; color: inherit; cursor: pointer; }
+.ch code { font-family: var(--font-family-mono); font-size: 0.92em; }
+.ch-dim { color: var(--ch-muted); font-size: 0.8125rem; }
+.ch-md p { margin: 0 0 6px; line-height: 1.5; }
+.ch-md p:last-child { margin-bottom: 0; }
+.ch-md ul { margin: 0 0 6px 18px; padding: 0; }
+.ch-md code { padding: 1px 4px; border-radius: 4px; background: var(--color-inline-code-bg); }
+
+/* Without JavaScript: only the stage list. */
+.ch:not(.is-js) > :not(.ch-fallback, script) { display: none; }
+.ch-fallback ol { margin: 6px 0 14px 20px; }
+.ch-fallback li { margin-bottom: 6px; }
+
+/* Top bar: one thin row (path, stage, clock, controls), then the stage strip. ------------------------------ */
+.ch-top { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; }
+.ch-paths { display: inline-flex; }
+.ch-path-sel { height: 28px; max-width: 230px; padding: 0 8px; border: 1px solid var(--ch-line); border-radius: 999px; background: var(--ch-bg); color: var(--ch-ink); font: inherit; font-size: 0.75rem; }
+.ch.is-failure .ch-path-sel { border-color: var(--ch-risk); color: var(--ch-risk); background: var(--color-error-100); }
+.ch-stage-line { flex: 1 1 260px; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 0.8125rem; }
+.ch-stage-title { font-weight: var(--font-weight-bold); }
+.ch-stage-meta { color: var(--ch-muted); font-variant-numeric: tabular-nums; }
+.ch-clock { padding: 2px 8px; border-radius: 999px; background: var(--ch-soft); font-family: var(--font-family-mono); font-size: 0.71875rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ch-ctrl { display: inline-flex; align-items: center; gap: 4px; }
+.ch .dg-btn { width: 28px; height: 28px; }
+.ch .dg-btn svg { width: 15px; height: 15px; }
+.ch .dg-play svg { fill: none; stroke: currentColor; }
+.ch .dg-btn:disabled { opacity: 0.35; cursor: default; }
+.ch .dg-speed { margin-left: 2px; height: 28px; }
+.ch .dg-speed button { height: 26px; }
+
+.ch-timeline { display: flex; gap: 2px; margin: 6px 0 4px; }
+.ch-seg-wrap { position: relative; flex: 1 1 0; min-width: 0; display: flex; }
+.ch-seg {
+  --p: 0;
+  --c: var(--ch-accent);
+  position: relative; flex: 1; height: 7px; padding: 0; overflow: hidden; border-radius: 3px;
+  background: var(--ch-soft);
+}
+.ch-seg::before { content: ''; position: absolute; inset: 0; width: calc(var(--p) * 100%); background: var(--c); opacity: 0.85; transition: width var(--t, 200ms) linear var(--d, 0ms); }
+.ch-seg.is-cur { outline: 1.5px solid var(--c); outline-offset: 1px; }
+.ch-seg-n { display: none; }
+.ch-ph-preflight { --c: var(--ch-note); }
+.ch-ph-setup { --c: var(--ch-accent); }
+.ch-ph-validate { --c: var(--ch-ok); }
+.ch-ph-teardown { --c: var(--color-gray-500); }
+.ch-ph-fail { --c: var(--ch-risk); }
+.ch-ph-prefix { --c: var(--color-gray-500); opacity: 0.55; }
+.ch-fork svg { width: 9px; height: 9px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+.ch-fork {
+  position: absolute; top: -7px; right: -1px; z-index: 2; display: inline-flex; align-items: center; height: 13px; min-width: 13px; padding: 0 2px;
+  border-radius: 999px; background: var(--ch-risk); color: #fff !important; font-size: 0.5625rem; line-height: 13px;
+}
+.ch-fork:hover { transform: scale(1.15); }
+
+.ch-banner[hidden] { display: none; }
+.ch-banner { display: flex; align-items: center; gap: 8px; margin: 0 0 4px; padding: 3px 4px 3px 10px; border-radius: 8px; background: var(--color-error-100); color: var(--color-gray-900); font-size: 0.75rem; }
+.ch-banner-back { margin-left: auto; height: 22px; padding: 0 10px; border-radius: 999px; background: var(--ch-bg); border: 1px solid var(--ch-line); font-size: 0.75rem; }
+
+/* Stage -------------------------------------------------------------------------------------------------- */
+.ch-body { position: relative; }
+.ch-stage {
+  position: relative; height: var(--ch-h); overflow: hidden; padding: 4px; border-radius: 6px;
+  background: var(--ch-tint);
+}
+.ch[data-phase='fail'] .ch-stage { background: var(--color-error-100); }
+.ch-btn { height: 34px; padding: 0 16px; border-radius: 999px; background: var(--ch-ink); color: var(--ch-bg) !important; font-weight: var(--font-weight-medium); }
+.ch-btn-go { justify-self: center; }
+.ch-btn-risk { background: var(--ch-risk); }
+.ch-btn-good { background: var(--ch-ok); }
+
+.ch-frame { position: relative; display: flex; flex-direction: column; height: 100%; min-height: 0; overflow: hidden; border: 1.5px solid var(--ch-win); border-radius: 8px; background: var(--ch-desk); box-shadow: var(--ch-shadow); }
+.ch-frame > .ch-head { padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--ch-line); background: var(--ch-titlebar); font-size: 0.875rem; }
+.ch-frame > .ch-arts { padding: 6px 10px 0; }
+.ch-split { display: grid; grid-template-columns: minmax(176px, 21%) 1fr; gap: 8px; flex: 1; min-height: 0; padding: 8px; }
+.ch-desk { display: flex; flex-direction: column; gap: 4px; height: 100%; min-height: 0; }
+.ch-desk > .ch-frame { flex: 1; height: auto; }
+.ch-taskbar { display: flex; align-items: center; gap: 4px; padding: 4px 5px; overflow-x: auto; border: 1px solid var(--ch-line); border-radius: 8px; background: var(--ch-desk); scrollbar-width: thin; }
+.ch-app { display: inline-flex; flex: none; align-items: center; gap: 5px; height: 28px; padding: 0 9px; border: 1.5px solid var(--ch-line); border-radius: 6px; background: var(--ch-bg); font-size: 0.75rem; white-space: nowrap; }
+.ch-app:hover { border-color: var(--ch-accent); }
+.ch-app.is-up { padding-right: 10px; border-color: transparent; background: none; font-weight: var(--font-weight-bold); }
+.ch-app.is-up::after { content: '▸'; margin-left: 2px; color: var(--ch-muted); }
+.ch-app .ch-icon { width: 16px; height: 16px; }
+.ch-app.is-active { border-color: var(--ch-accent); box-shadow: inset 0 -2px 0 var(--ch-accent); font-weight: var(--font-weight-bold); }
+.ch-app-sub { color: var(--ch-muted); font-family: var(--font-family-mono); font-size: 0.6875rem; font-weight: 400; }
+.ch-app-n { padding: 0 5px; border-radius: 999px; background: var(--ch-soft); color: var(--ch-muted); font-size: 0.625rem; }
+.ch-split.is-solo { grid-template-columns: 1fr; }
+.ch-rail { display: flex; flex-direction: column; gap: 5px; min-height: 0; overflow: auto; }
+.ch-rail-h { margin: 0 0 2px; color: var(--ch-muted); font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.04em; }
+.ch-card { padding: 5px 7px; border: 1px solid var(--ch-soft); border-radius: 8px; background: var(--ch-tint); cursor: pointer; font-size: 0.75rem; }
+.ch-card .ch-head { flex-wrap: nowrap; }
+.ch-card .ch-kind { display: none; }
+.ch-card .ch-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-card-n { color: var(--ch-muted); font-size: 0.6875rem; }
+/* The maximized box is the desk: its kind keeps its border style, not its tint (the tiles carry that). */
+.ch-desk > .ch-frame.is-focus { border: var(--ch-edge) solid var(--ch-win); background: var(--ch-desk); }
+/* Every wall of the tiling is one --ch-edge: the frame draws the outer ones, the title bar (or the data-piece
+   row under it) the top one; the tiles' own right and bottom edges on the outside fall under the frame. */
+.ch-desk > .ch-frame.is-focus > .ch-head { border-bottom: var(--ch-edge) solid var(--ch-win); }
+.ch-desk > .ch-frame.is-focus > .ch-arts { padding-bottom: 6px; border-bottom: var(--ch-edge) solid var(--ch-win); }
+.ch-desk > .ch-frame.is-focus > .ch-head:has(+ .ch-arts) { border-bottom-width: 0; }
+.ch-split > .ch-frame.is-focus { height: auto; }
+.ch-grid, .ch-rail, .ch-detail { scrollbar-color: var(--color-gray-300) transparent; }
+/* Tiling with no gaps: tiles share edges (each draws its right and bottom edge; the grid draws top and left). */
+.ch-grid { flex: 1; min-height: 0; display: grid; grid-auto-flow: row dense; align-content: stretch; gap: 0; padding: 0; margin: 0 calc(-1 * var(--ch-edge)) calc(-1 * var(--ch-edge)) 0; overflow: auto; }
+/* The outer edges of the last column and row fall under the frame's own border (the frame clips them). */
+/* Scrollbars never take width here (a classic scrollbar would narrow the grid but not the strip, and the walls
+   would stop lining up); the grid and crowded tiles still scroll with a wheel or trackpad when they must. */
+.ch-grid, .ch-box.is-tight > .ch-pills { scrollbar-width: none; }
+.ch-grid::-webkit-scrollbar, .ch-box.is-tight > .ch-pills::-webkit-scrollbar { display: none; }
+.ch-grid + .ch-strip { border-top: var(--ch-edge) solid var(--ch-win); }
+.ch-empty { color: var(--ch-muted); padding: 10px; }
+.ch-tray { display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 10px; border-top: 1px dashed var(--ch-line); }
+.ch-tray-item { display: inline-flex; align-items: center; gap: 5px; padding: 2px 4px 2px 8px; border-radius: 999px; background: var(--ch-tint); font-size: 0.75rem; }
+
+/* A tile is a window in a tiling layout: a title-bar strip across the top (padding: CHROME in the model), and
+   shared 1.5 px edges with its neighbours (right and bottom here; the frame draws the outer ones). */
+.ch-box { position: relative; display: flex; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; margin: 0; overflow: hidden; padding: 0 12px 8px; border: 0 solid var(--ch-win); border-width: 0 var(--ch-edge) var(--ch-edge) 0; border-radius: 0; background: var(--ch-bg); }
+.ch-box > .ch-head { margin: 0 -12px; padding: 6px 8px 6px 12px; border-bottom: 1px solid var(--ch-line); background: var(--ch-titlebar); }
+.ch-sub-inline { flex: 0 1 auto; min-width: 0; }
+.ch-sub-inline::before { content: '·'; margin-right: 0.45em; color: var(--ch-muted); }
+.ch-box.is-tight > .ch-pills { overflow: auto; min-height: 0; }
+/* One muted accent for every window (Nord frost, lightly mixed): a faint body, a slightly stronger
+   title bar, so the bar always stands apart from what is inside. Kinds differ by icon and tag, not colour. */
+.ch-box { background: color-mix(in srgb, var(--th-accent) 3%, var(--th-base)); }
+.ch-box > .ch-head, .ch-desk > .ch-frame.is-focus > .ch-head, .ch-desk > .ch-frame.is-focus > .ch-arts {
+  /* surface0 is one step away from the body in either mode (lighter in dark themes, darker in light ones). */
+  background: color-mix(in srgb, var(--th-accent) 10%, var(--th-surface0));
+}
+.ch-box > .ch-pills .ch-pill, .ch-strip .ch-strip-item { background: color-mix(in srgb, var(--th-accent) 6%, var(--th-base)); }
+
+/* Title bar: never wraps. The name gives way (ellipsis) only past the smallest content scale. */
+.ch-head { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ch-title { display: flex; flex-wrap: nowrap; align-items: center; gap: 0.45em; min-width: 0; }
+.ch-title > * { flex: none; }
+.ch-title > .ch-name { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.ch-icon { width: 18px; height: 18px; flex: none; }
+.ch-pill .ch-icon { width: 14px; height: 14px; }
+.ch-kind { padding: 0 5px; border-radius: 4px; background: var(--ch-bg); border: 1px solid var(--ch-line); color: var(--ch-muted); font-size: 0.625rem; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap; }
+.ch-name { padding: 0; background: none; font-size: 1rem; font-weight: var(--font-weight-bold); text-align: left; }
+.ch-box.is-big > .ch-head .ch-name { font-size: 1.125rem; }
+.ch-name:hover { color: var(--ch-accent); text-decoration: underline; }
+.ch-sub { overflow: hidden; color: var(--ch-muted); font-size: 0.78125rem; font-family: var(--font-family-mono); white-space: nowrap; text-overflow: ellipsis; }
+.ch-badge { padding: 0 6px; border-radius: 999px; background: var(--ch-soft); font-size: 0.6875rem; }
+/* Window buttons (TOOL in the model): fixed size, framed, bold glyphs. */
+.ch-tools { margin-left: auto; display: inline-flex; gap: 3px; }
+.ch-tb { width: 24px; height: 22px; padding: 0; border: 1px solid var(--ch-line); border-radius: 5px; background: var(--ch-bg); font-size: 13px; font-weight: 700; line-height: 1; }
+.ch-tb:hover { border-color: var(--ch-accent); background: var(--ch-accent); color: var(--ch-bg) !important; }
+.ch-st { width: 8px; height: 8px; flex: none; border-radius: 999px; background: var(--color-gray-300); }
+.ch-st-none { background: transparent; border: 1px solid var(--color-gray-300); }
+.ch-st-boot { background: var(--color-alert); animation: ch-pulse 1.1s ease-in-out infinite; }
+.ch-st-ok { background: var(--ch-ok); }
+.ch-st-warn { background: var(--ch-warn); }
+.ch-st-fail { background: var(--ch-risk); }
+.ch-st-off { background: var(--color-gray-500); }
+@keyframes ch-pulse { 50% { opacity: 0.35; } }
+
+.ch-arts { display: flex; flex-wrap: wrap; gap: 4px; }
+.ch-art { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; height: 25px; padding: 0 8px 0 4px; border: 1px solid var(--ch-line); border-radius: 6px; background: var(--ch-bg); font-size: 0.78125rem; }
+.ch-art:hover { border-color: var(--ch-accent); }
+.ch-art-k { padding: 0 4px; border-radius: 3px; background: var(--ch-soft); color: var(--ch-muted); font-size: 0.5625rem; text-transform: uppercase; }
+.ch-art-l { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ch-art-ref { width: 14px; height: 14px; border-radius: 999px; background: var(--ch-warn); color: #fff; font-size: 0.625rem; line-height: 14px; text-align: center; font-weight: 700; }
+.ch-art-image .ch-art-k { background: color-mix(in srgb, rgb(50 108 229) 18%, transparent); }
+.ch-art-yaml .ch-art-k, .ch-art-file .ch-art-k { background: color-mix(in srgb, var(--color-alert) 25%, transparent); }
+.ch-art-cmd .ch-art-k, .ch-art-script .ch-art-k { background: color-mix(in srgb, var(--ch-ok) 18%, transparent); }
+.ch-art-secret .ch-art-k { background: color-mix(in srgb, var(--ch-risk) 18%, transparent); }
+.ch-more { padding: 0 7px; color: var(--ch-muted); }
+
+.ch-pills { display: flex; flex-wrap: wrap; gap: 4px; }
+.ch-pill { display: inline-flex; align-items: center; gap: 5px; height: 25px; max-width: 100%; padding: 0 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; border: 1px solid var(--ch-soft); border-radius: 999px; background: var(--ch-tint); font-size: 0.8125rem; }
+.ch-pill:hover { border-color: var(--ch-accent); }
+
+/* Travelling data and callouts ----------------------------------------------------------------------------- */
+/* Ends of a travelling dot: lit like a focused box in <Diagram> (accent stroke, 9% tint, the dg-glow pulse). */
+.ch .is-src, .ch .is-dst {
+  border-color: var(--ch-accent) !important; box-shadow: inset 0 0 0 1.4px var(--ch-accent);
+  background: color-mix(in srgb, var(--ch-accent) 9%, var(--ch-bg)); animation: dg-glow 700ms var(--ease-soft) forwards;
+}
+.ch-dot { position: absolute; left: -6px; top: -6px; z-index: 6; width: 12px; height: 12px; border-radius: 999px; background: var(--ch-accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--ch-accent) 25%, transparent); pointer-events: none; }
+.ch-calls { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+.ch-mark {
+  position: absolute; left: 0; top: 0; width: 20px; height: 20px; padding: 0; border-radius: 999px; border: 2px solid var(--ch-bg);
+  color: #fff !important; font-size: 0.6875rem; font-weight: 700; line-height: 16px; text-align: center; pointer-events: auto;
+  box-shadow: 0 0 0 0 currentColor; animation: ch-mark 1.8s ease-out infinite;
+}
+.ch-mark.ch-tone-note { background: var(--ch-note); }
+.ch-mark.ch-tone-good { background: var(--ch-ok); }
+.ch-mark.ch-tone-warn { background: var(--ch-warn); }
+.ch-mark.ch-tone-risk { background: var(--ch-risk); }
+.ch-mark:hover { transform-origin: center; filter: brightness(1.1); }
+@keyframes ch-mark { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--ch-accent) 45%, transparent); } 70%, 100% { box-shadow: 0 0 0 9px transparent; } }
+.ch-tone-note { background: var(--color-info-100); border-color: var(--ch-note); }
+.ch-tone-good { background: var(--color-success-100); border-color: var(--ch-ok); }
+.ch-tone-warn { background: var(--color-warning-100); border-color: var(--ch-warn); }
+.ch-tone-risk { background: var(--color-error-100); border-color: var(--ch-risk); }
+.ch-call-ref { display: inline-block; margin: 0 6px 2px 0; padding: 0 5px; border-radius: 4px; background: var(--ch-ink); color: var(--ch-bg); font-family: var(--font-family-mono); font-size: 0.625rem; }
+.ch-refs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 2px; margin: 4px 0 8px; }
+.ch-ref-name { margin-right: 10px; color: var(--ch-muted); font-size: 0.75rem; }
+@keyframes ch-in { from { opacity: 0; transform: translateY(4px); } }
+
+/* Details panel and dialogs ---------------------------------------------------------------------------------- */
+.ch-detail {
+  position: absolute; z-index: 8; width: min(380px, 92%); max-height: min(70%, 520px); overflow: auto; padding: 8px 10px 10px;
+  border: 1px solid var(--ch-line); border-radius: 6px; background: var(--ch-bg); box-shadow: var(--shadow-elevation-medium);
+  font-size: 0.8125rem;
+}
+.ch-detail.is-wide { width: min(620px, 94%); }
+.ch-detail[hidden] { display: none; }
+.ch-detail-x { position: sticky; top: 0; float: right; margin-left: 6px; }
+.ch-detail h4, .ch-dialog h4 { margin: 0 0 6px; font-size: 1rem; }
+.ch-detail-eyebrow, .ch-dialog-eyebrow { margin: 0; color: var(--ch-muted); font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.ch-detail-h { margin: 10px 0 4px; font-weight: var(--font-weight-medium); }
+.ch-detail pre { max-height: 360px; overflow: auto; margin: 4px 0 8px; padding: 8px 10px; border-radius: 8px; background: var(--color-code-bg); font-size: 0.75rem; line-height: 1.45; white-space: pre; }
+/* Highlighted code (Shiki, light/dark pair): the site's code panel colour, as for page code blocks. */
+.ch-detail pre, .ch-detail pre.astro-code, html[data-color-mode='dark'] .ch-detail pre.astro-code { background-color: var(--code-bg) !important; box-shadow: 0 0 0 1px var(--code-border); }
+.ch-detail details summary { cursor: pointer; color: var(--ch-accent); margin: 6px 0; }
+.ch-dialog { position: absolute; inset: 0; z-index: 9; display: grid; place-items: center; padding: 16px; background: color-mix(in srgb, var(--ch-ink) 30%, transparent); border-radius: 12px; }
+.ch-dialog[hidden] { display: none; }
+.ch-dialog-card { width: min(560px, 100%); max-height: 100%; overflow: auto; padding: 16px 18px; border-radius: 14px; border-top: 4px solid var(--ch-risk); background: var(--ch-bg); box-shadow: var(--shadow-elevation-medium); }
+.ch-dialog-card.ch-lesson { border-top-color: var(--ch-ok); }
+.ch-dialog-card .ch-md { margin: 6px 0; }
+.ch-dialog-pick { display: flex; flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+.ch-dialog-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.ch-dialog-row .ch-btn:not(.ch-btn-risk, .ch-btn-good) { background: var(--ch-soft); color: var(--ch-ink) !important; }
+
+/* Log ------------------------------------------------------------------------------------------------------ */
+.ch-log { margin-top: 4px; border: 1px solid var(--code-border); border-radius: 6px; background: var(--code-bg); color: var(--code-fg); }
+.ch-log-body { scrollbar-color: var(--code-border) transparent; height: 150px; scroll-behavior: smooth; padding-bottom: 66px !important; overflow: auto; padding: 4px 0; font-family: var(--font-family-mono); font-size: 0.71875rem; line-height: 1.45; }
+.ch-line { display: block; width: 100%; padding: 0 10px; background: none; text-align: left; white-space: pre-wrap; word-break: break-all; opacity: 0.6; }
+.ch-line.is-cur { opacity: 0.85; }
+.ch-line.is-gen { color: var(--code-soft); }
+.ch-line.is-now { opacity: 1; padding-block: 2px; color: var(--code-bright); font-size: 0.934rem; font-weight: 700; }
+.ch-line.is-now.is-ok { color: var(--code-ok); }
+.ch-line.is-now.is-err { color: var(--code-err); }
+.ch-line.is-now.is-warn { color: var(--code-warn); }
+.ch-line.is-typing::after { content: '▋'; margin-left: 1px; color: var(--code-caret); animation: ch-blink 1s steps(1) infinite; }
+.ch-line.is-next { margin-top: 2px; opacity: 0.55; font-style: italic; color: var(--code-soft); }
+.ch-line.is-next:hover { opacity: 0.9; }
+@keyframes ch-blink { 50% { opacity: 0; } }
+.ch-line:hover { background: var(--code-hover); }
+.ch-line.is-head { margin-top: 4px; color: var(--code-prompt); font-weight: 600; opacity: 1; }
+.ch-line.is-err { color: var(--code-err); }
+.ch-line.is-warn { color: var(--code-warn); }
+.ch-line.is-ok { color: var(--code-ok); }
+
+/* Full window: the whole figure, with the stage taking the free height. */
+html.ch-lock { overflow: hidden; }
+.ch.is-full { position: fixed; inset: 0; z-index: var(--z-overlay); margin: 0; display: flex; flex-direction: column; border-radius: 0; border: 0; overflow: hidden; }
+.ch.is-full .ch-body { flex: 1; min-height: 0; display: flex; }
+.ch.is-full .ch-stage { flex: 1; height: auto; }
+.ch.is-full .ch-log-body { height: 18vh; }
+.ch.is-full .ch-fallback { display: none; }
+@media (max-width: 720px) {
+  .ch { --ch-h: 620px; padding: 10px; }
+  .ch-split { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .ch-rail { flex-direction: row; overflow-x: auto; }
+  .ch-card { min-width: 140px; }
+}
+@media (prefers-reduced-motion: reduce) { .ch-st-boot, .ch-mark { animation: none; } }
+
+/* Tiles scale their content by --k (set per tile from contentScale in diagrams/chronicle-model.ts: the
+   tile's shorter side over 160 px, 1 to 2, never more than the content can take). The build check uses the
+   same function, so what it measures is what is drawn. */
+.ch-box > .ch-head { gap: 0.25em 0.45em; font-size: calc(13px * var(--k, 1)); }
+.ch-box > .ch-head .ch-name { font-size: 1.23em; }
+.ch-box.is-big > .ch-head .ch-name { font-size: 1.3em; }
+.ch-box > .ch-head .ch-icon { width: 1.45em; height: 1.45em; }
+.ch-box > .ch-head .ch-kind { font-size: 0.62em; }
+.ch-box > .ch-head .ch-sub { font-size: 0.92em; }
+.ch-box > .ch-head .ch-st { width: 0.7em; height: 0.7em; }
+.ch-box > .ch-arts { gap: 0.4em; font-size: calc(12.5px * var(--k, 1)); }
+.ch-box > .ch-arts .ch-art { height: 2.1em; padding: 0 0.65em 0 0.3em; font-size: 1em; border-radius: 0.4em; }
+.ch-box > .ch-arts .ch-art-k { font-size: 0.68em; }
+.ch-box > .ch-arts .ch-art-ref { width: 1.15em; height: 1.15em; line-height: 1.15em; font-size: 0.8em; }
+/* Child boxes as square cells tiled edge to edge (each draws its right and bottom edge, the list its top and
+   left), sharing the tile's free space; long names wrap to two lines. */
+.ch-box > .ch-pills {
+  flex: 1; display: grid; grid-template-columns: repeat(auto-fill, minmax(9.5em, 1fr)); grid-auto-rows: minmax(2.8em, 4.2em);
+  align-content: start; gap: 0; font-size: calc(13px * var(--k, 1));
+  /* Flush with the tile: no side or bottom margin; the tile's own edges close the outer cells. */
+  margin: 0 -14px -8px -13px;
+}
+/* Right under the title bar (no data pieces): the cards' top edge is the title bar's own line. */
+.ch-box > .ch-head + .ch-pills { margin-top: -6px; }
+.ch-box > .ch-pills .ch-pill {
+  height: auto; max-width: none; padding: 0.35em 0.7em; border-radius: 0; font-size: 1em; font-weight: var(--font-weight-medium);
+  background: var(--ch-chrome); border: 1px solid var(--ch-win); margin: -1px 0 0 -1px; white-space: normal; text-align: left; line-height: 1.2;
+}
+.ch-box > .ch-pills .ch-pill > span:last-child { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ch-box > .ch-pills .ch-pill .ch-icon { width: 1.2em; height: 1.2em; flex: none; }
+.ch-box > .ch-pills .ch-pill .ch-st { width: 0.6em; height: 0.6em; flex: none; }
+
+/* Boxes with nothing inside: square cells tiled edge to edge under the grid (heights: stripHeight in the model). */
+/* Cells draw their right and bottom walls at --ch-edge, like tiles; the outer ones fall under the frame. */
+.ch-strip { display: grid; gap: 0; padding: 0; margin: 0 calc(-1 * var(--ch-edge)) calc(-1 * var(--ch-edge)) 0; }
+.ch-strip-item {
+  display: inline-flex; align-items: center; gap: 6px; min-width: 0; height: 40px; padding: 0 10px;
+  border: 0 solid var(--ch-win); border-width: 0 var(--ch-edge) var(--ch-edge) 0; border-radius: 0; background: var(--ch-bg); text-align: left; font-size: 0.875rem;
+}
+.ch-traypop .ch-strip-item { border-width: 1px; border-radius: 6px; }
+.ch-strip-item:hover { border-color: var(--ch-accent); }
+.ch-strip-item .ch-icon { width: 16px; height: 16px; }
+/* Name on top, sub line under it (both get the cell's width); status, icon and badge span both lines. */
+.ch-strip .ch-strip-item { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-rows: 1fr 1fr; column-gap: 6px; row-gap: 0; }
+.ch-strip .ch-strip-item > .ch-st { grid-column: 1; grid-row: 1 / 3; }
+.ch-strip .ch-strip-item > .ch-icon { grid-column: 2; grid-row: 1 / 3; }
+.ch-strip .ch-strip-item > .ch-strip-name { grid-column: 3; grid-row: 1; align-self: end; min-width: 0; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
+.ch-strip .ch-strip-item:not(:has(.ch-strip-sub)) > .ch-strip-name { grid-row: 1 / 3; align-self: center; }
+.ch-strip .ch-strip-item > .ch-strip-sub { grid-column: 3; grid-row: 2; align-self: start; line-height: 1.25; }
+.ch-strip .ch-strip-item > .ch-app-n { grid-column: 4; grid-row: 1 / 3; }
+.ch-strip-name { font-weight: var(--font-weight-bold); white-space: nowrap; }
+.ch-strip-sub { min-width: 0; overflow: hidden; color: var(--ch-muted); font-family: var(--font-family-mono); font-size: 0.71875rem; white-space: nowrap; text-overflow: ellipsis; }
+
+/* The bottom bar's tray: a chevron that opens the boxes with nothing to open, above the bar. */
+.ch-traywrap { position: relative; flex: none; }
+.ch-bar-apps { display: flex; align-items: center; gap: 4px; flex: 1 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.ch-bar-apps::-webkit-scrollbar { display: none; }
+.ch-bar-apps > * { flex: none; }
+.ch-bar-right { display: flex; align-items: center; gap: 4px; flex: none; margin-left: auto; padding-left: 4px; }
+.ch-chev .ch-chev-i { display: inline-block; transition: transform 150ms; }
+.ch-chev.is-open .ch-chev-i { transform: rotate(180deg); }
+.ch-traypop {
+  position: absolute; right: 0; bottom: calc(100% + 6px); z-index: 7; display: flex; flex-direction: column; gap: 4px;
+  width: 300px; max-height: 320px; overflow: auto; padding: 6px; border: 1px solid var(--ch-line); border-radius: 6px;
+  background: var(--ch-bg); box-shadow: var(--shadow-elevation-medium);
+}
+.ch-traypop .ch-strip-item { flex: none; width: 100%; }
+.ch-taskbar { overflow: visible; }
+
+/* Go back: right end of the taskbar, only while the reader is off the step's view. */
+.ch-goback { flex: none; color: var(--ch-accent); font-weight: 600; }
+.ch-goback-i { font-size: 0.875rem; line-height: 1; }
+
+/* Theme variables (--th-*) come from chronicle-themes.css (generated); this maps them onto the timeline. */
+.ch {
+  --ch-ink: var(--th-text);
+  --ch-muted: var(--th-subtext);
+  --ch-line: color-mix(in srgb, var(--th-accent) 18%, var(--th-surface0));
+  --ch-soft: var(--th-mantle);
+  --ch-bg: var(--th-base);
+  --ch-tint: var(--th-mantle);
+  --ch-accent: var(--th-accent);
+  --ch-ok: var(--th-green);
+  --ch-warn: var(--th-yellow);
+  --ch-risk: var(--th-red);
+  --ch-note: var(--th-blue);
+  --ch-desk: color-mix(in srgb, var(--th-accent) 6%, var(--th-mantle));
+  --ch-win: color-mix(in srgb, var(--th-accent) 25%, var(--th-surface1));
+  --ch-chrome: color-mix(in srgb, var(--th-accent) 8%, var(--th-base));
+}
+
+/* Inside the timeline the site's own colour tokens come from the theme too, so callouts, dialogs, code blocks
+   and the controls follow it even when a light theme sits on a dark page (or the other way round). */
+.ch {
+  --color-text: var(--th-text); --color-background: var(--th-base);
+  --color-gray-100: var(--th-mantle); --color-gray-200: var(--th-crust); --color-gray-300: var(--th-surface0);
+  --color-gray-500: var(--th-surface1); --color-gray-700: var(--th-subtext); --color-gray-800: var(--th-text); --color-gray-900: var(--th-text);
+  --color-primary: var(--th-accent); --color-decorative: var(--th-accent); --color-cloud-100: var(--th-mantle);
+  --color-success: var(--th-green); --color-error: var(--th-red); --color-info: var(--th-blue);
+  --color-alert: var(--th-yellow); --color-warning-700: var(--th-yellow);
+  --color-success-100: color-mix(in srgb, var(--th-green) 16%, var(--th-base));
+  --color-error-100: color-mix(in srgb, var(--th-red) 16%, var(--th-base));
+  --color-warning-100: color-mix(in srgb, var(--th-yellow) 16%, var(--th-base));
+  --color-info-100: color-mix(in srgb, var(--th-blue) 16%, var(--th-base));
+  --color-code-bg: var(--th-crust); --color-inline-code-bg: var(--th-mantle);
+}
+/* Theme chooser (top bar). */
+.ch-theme-sel { height: 28px; max-width: 150px; padding: 0 6px; border: 1px solid var(--ch-line); border-radius: 999px; background: var(--ch-bg); color: var(--ch-ink); font: inherit; font-size: 0.75rem; }
+
+/* <Chronicle static>: no playback. Only the window views, their details and the full-window / theme buttons. */
+.ch.is-static .ch-timeline, .ch.is-static .ch-log, .ch.is-static .ch-paths, .ch.is-static .ch-stage-line,
+.ch.is-static .ch-clock, .ch.is-static .dg-speed, .ch.is-static [data-ch='prev'], .ch.is-static [data-ch='next'],
+.ch.is-static [data-ch='prev-stage'], .ch.is-static [data-ch='next-stage'], .ch.is-static .ch-banner { display: none; }
+.ch.is-static .ch-top { justify-content: flex-end; }
+/* Window buttons (scripts/chronicle.ts WIN_ICON): stroked icons in the button's text colour. */
+.ch-tb { display: inline-flex; align-items: center; justify-content: center; }
+.ch-tb svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linejoin: round; stroke-linecap: round; }
+/* A figure inside an article sits in .prose, whose code-block rule (32 px padding, negative margins) is for page code. */
+.prose .ch-detail pre.astro-code, .ch-detail pre.astro-code { max-height: 360px; overflow: auto; margin: 4px 0 8px; padding: 8px 10px; border-radius: 8px; font-size: 0.75rem; line-height: 1.45; }

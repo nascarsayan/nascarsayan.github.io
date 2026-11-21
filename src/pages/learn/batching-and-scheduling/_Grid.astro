@@ -1,0 +1,77 @@
+---
+/**
+ * Page-local step grid for the toy scheduler: one row per request, one column
+ * per engine step, each cell says what that request did in that step.
+ * `upto` hides later steps (for the walkthrough); `at` outlines one step.
+ */
+import type { Sim, Req } from './_example';
+interface Props { sim: Sim; reqs: Req[]; budget: number; at?: number; upto?: number; title?: string }
+const { sim, reqs, budget, at, upto, title } = Astro.props;
+const cols = [...Array(sim.steps).keys()];
+const hidden = (s: number) => upto !== undefined && s > upto;
+const label = (c: Sim['grid'][number][number]) => {
+  switch (c.kind) {
+    case 'prefill': return c.pad ? `${c.tokens}+${c.pad}` : `P ${c.tokens}`;
+    case 'first': return `P ${c.tokens} ✓`;
+    case 'decode': return 'D 1';
+    case 'wait': return 'wait';
+    case 'idle': return 'idle';
+    default: return '';
+  }
+};
+const tip = (c: Sim['grid'][number][number]) =>
+  c.kind === 'prefill' ? (c.pad ? `${c.tokens} prompt tokens + ${c.pad} padding` : `prefill chunk of ${c.tokens} tokens`)
+  : c.kind === 'first' ? `last prefill chunk (${c.tokens} tokens); first output token sampled`
+  : c.kind === 'decode' ? 'one decode token' : c.kind === 'wait' ? 'arrived, not scheduled' : c.kind === 'idle' ? 'finished, but its slot is held until the group ends' : '';
+---
+
+<figure class="sg">
+  {title && <figcaption class="sg-title">{title}</figcaption>}
+  <div class="sg-scroll">
+    <table>
+      <thead><tr><th class="sg-corner">request ↓ step →</th>{cols.map((s) => <th class:list={[{ 'sg-at': s === at }]}>{s + 1}</th>)}</tr></thead>
+      <tbody>
+        {reqs.map((r, i) => (
+          <tr>
+            <th scope="row">{r.id} <span class="sg-meta">arr {r.arrive + 1} · {r.prompt}p/{r.output}o</span></th>
+            {cols.map((s) => {
+              const c = sim.grid[i][s];
+              return hidden(s) ? <td class="k-future"></td> : <td class:list={[`k-${c.kind}`, { 'sg-at': s === at }]} title={tip(c)}>{label(c)}</td>;
+            })}
+          </tr>
+        ))}
+        <tr class="sg-used">
+          <th scope="row">tokens used of {budget}</th>
+          {cols.map((s) => hidden(s) ? <td class="k-future"></td> : <td class:list={[{ 'sg-at': s === at }]}><span class="bar" style={`--u:${sim.used[s] / budget}`}></span>{sim.used[s]}</td>)}
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="sg-legend"><span class="k-prefill">P n</span> prefill chunk · <span class="k-first">P n ✓</span> prompt done, first token · <span class="k-decode">D 1</span> decode · <span class="k-wait">wait</span> queued · <span class="k-prefill">n+m</span> n tokens + m padding · <span class="k-idle">idle</span> slot held after finishing</p>
+</figure>
+
+<style>
+  .sg { margin: 4px 0 12px; }
+  .sg-title { margin-bottom: 4px; font-size: 0.8125rem; font-weight: var(--font-weight-bold); }
+  .sg-scroll { overflow-x: auto; }
+  .sg table { display: table; margin: 0; }
+  .sg tbody tr:hover { background: transparent; }
+  table { border-collapse: separate; border-spacing: 2px; font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
+  .sg th { padding: 2px 6px; border: 0; font-weight: 600; font-size: 0.75rem; text-transform: none; letter-spacing: 0; color: var(--color-gray-700); white-space: nowrap; text-align: center; }
+  th[scope='row'] { text-align: right; }
+  .sg-meta { font-weight: 400; color: var(--color-muted); }
+  .sg th, .sg td { height: 24px; line-height: 16px; vertical-align: middle; font-size: 0.75rem; }
+  .sg td { min-width: 44px; padding: 4px 4px; border: 0; border-radius: 4px; text-align: center; white-space: nowrap; background: transparent; }
+  .k-future { background: var(--color-cloud-100) !important; opacity: 0.5; }
+  .k-wait { color: var(--color-gray-600); background: repeating-linear-gradient(45deg, var(--color-gray-100), var(--color-gray-100) 4px, transparent 4px, transparent 8px) !important; }
+  .k-prefill, .k-first { background: color-mix(in srgb, #ec4899 28%, transparent) !important; }
+  .k-decode { background: color-mix(in srgb, #8b5cf6 28%, transparent) !important; }
+  .k-idle { color: #b45309; background: color-mix(in srgb, #f59e0b 22%, transparent) !important; }
+  .k-done { background: var(--color-gray-100) !important; }
+  .sg td.sg-at, .sg th.sg-at { outline: 2px solid var(--color-primary); outline-offset: -1px; }
+  .sg th.sg-at { color: var(--color-primary); border-radius: 4px; }
+  .sg-used td { position: relative; color: var(--color-gray-800); }
+  .sg-used .bar { position: absolute; left: 0; bottom: 0; height: 3px; width: calc(var(--u) * 100%); background: var(--color-primary); border-radius: 2px; }
+  .sg-legend { margin-top: 4px; font-size: 0.75rem; color: var(--color-muted); line-height: 1.9; }
+  .sg-legend span { padding: 1px 5px; border-radius: 4px; font-family: var(--font-mono, ui-monospace, monospace); color: var(--color-text); }
+</style>

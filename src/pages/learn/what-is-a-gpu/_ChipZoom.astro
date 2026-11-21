@@ -1,0 +1,90 @@
+---
+/**
+ * One zoom level of an MI355X, drawn with plain HTML boxes (counts from _chip.ts).
+ *   <ChipZoom level="package" />  package | xcd | cu | simd
+ * Layout is schematic: box positions are not the real floorplan.
+ */
+import * as c from './_chip';
+interface Props { level: 'package' | 'xcd' | 'cu' | 'simd' }
+const { level } = Astro.props;
+const range = (n: number) => Array.from({ length: n }, (_, i) => i);
+// Which of the 36 CU slots are shown as disabled: illustrative only.
+const off = new Set([8, 17, 26, 35]);
+---
+
+<figure class="cz" data-level={level}>
+  {level === 'package' && (
+    <div class="cz-pkg">
+      {range(c.amd.iods).map((d) => (
+        <div class="cz-side">
+          <div class="cz-hbm">{range(4).map(() => <span>HBM3E<br />{c.amd.hbmGBPerStack} GB</span>)}</div>
+          <div class="cz-iod">
+            <div class="cz-xcds">{range(4).map((i) => <span class:list={['cz-xcd', { on: d === 0 && i === 0 }]}>XCD {d * 4 + i}<small>{c.amd.cuPerXcd} CUs</small></span>)}</div>
+            <div class="cz-iodlab">IOD {d} · Infinity Cache {c.amd.infinityCacheMB / 2} MB · 4 HBM controllers{d === 1 ? ' · PCIe + XGMI' : ''}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  )}
+  {level === 'xcd' && (
+    <div class="cz-xcdview">
+      <div class="cz-cugrid">{range(c.amd.cuPhysPerXcd).map((i) => <span class:list={['cz-cu', { off: off.has(i), on: i === 0 }]}>{off.has(i) ? '×' : 'CU'}</span>)}</div>
+      <div class="cz-bar">L2 cache {c.amd.l2PerXcdMB} MB (shared by the 32 CUs of this XCD)</div>
+      <p class="cz-legend"><span class="cz-cu on">CU</span> the one we zoom into · <span class="cz-cu off">×</span> disabled spare (positions illustrative)</p>
+    </div>
+  )}
+  {level === 'cu' && (
+    <div class="cz-cuview">
+      <div class="cz-simds">{range(c.amd.simdPerCu).map((i) => (
+        <div class:list={['cz-simdpair', { on: i === 0 }]}><span class="cz-simd">SIMD {i}<small>{c.amd.lanesPerSimd} lanes</small></span><span class="cz-mc">matrix core</span></div>
+      ))}</div>
+      <div class="cz-bar">Registers (per SIMD) · scheduler · L1 cache</div>
+      <div class="cz-bar cz-lds">LDS {c.amd.ldsKB} KB: scratch memory shared by one workgroup</div>
+    </div>
+  )}
+  {level === 'simd' && (
+    <div class="cz-simdview">
+      <div class="cz-lanehead"><span></span>{range(c.amd.lanesPerSimd).map((l) => <span>{l}</span>)}</div>
+      {range(c.cyclesPerWave).map((cyc) => (
+        <div class="cz-lanerow"><span class="cz-cyc">pass {cyc + 1}</span>{range(c.amd.lanesPerSimd).map((l) => <span class:list={['cz-thr', `p${cyc}`]}>{cyc * c.amd.lanesPerSimd + l}</span>)}</div>
+      ))}
+      <p class="cz-legend">Columns: the {c.amd.lanesPerSimd} lanes of one SIMD. Numbers: the {c.amd.wave} threads of one wavefront, all running the same instruction, fed through in {c.cyclesPerWave} passes.</p>
+    </div>
+  )}
+</figure>
+
+<style>
+  .cz { margin: 4px 0 12px; font-size: 0.8125rem; }
+  .cz small { display: block; font-size: 0.6875rem; opacity: 0.8; }
+  .cz-pkg { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 10px; border: 2px solid #94a3b8; border-radius: 12px; max-width: 760px; }
+  .cz-side { display: flex; flex-direction: column; gap: 6px; }
+  .cz-hbm { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
+  .cz-hbm span { padding: 4px; border-radius: 6px; text-align: center; font-size: 0.6875rem; background: color-mix(in srgb, #16a34a 18%, transparent); }
+  .cz-iod { padding: 6px; border-radius: 8px; background: color-mix(in srgb, #3b82f6 14%, transparent); }
+  .cz-xcds { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; }
+  .cz-xcd { padding: 8px 4px; border-radius: 6px; text-align: center; font-weight: 600; background: var(--color-background); border: 1px solid var(--color-gray-300); }
+  .cz-iodlab { margin-top: 6px; font-size: 0.6875rem; color: var(--color-gray-700); }
+  .on { outline: 3px solid var(--color-primary); outline-offset: -1px; }
+  .cz-xcdview, .cz-cuview, .cz-simdview { max-width: 760px; }
+  .cz-cugrid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px; padding: 8px; border: 2px solid var(--color-gray-300); border-radius: 10px 10px 0 0; }
+  .cz-cu { display: inline-block; padding: 6px 2px; border-radius: 5px; text-align: center; font-size: 0.6875rem; background: color-mix(in srgb, #3b82f6 18%, transparent); }
+  .cz-cu.off { background: var(--color-gray-100); color: var(--color-gray-500); }
+  .cz-legend .cz-cu { padding: 1px 6px; }
+  .cz-bar { padding: 6px 10px; border: 2px solid var(--color-gray-300); border-top: 0; background: var(--color-cloud-100); }
+  .cz-cuview .cz-bar:last-child { border-radius: 0 0 10px 10px; }
+  .cz-xcdview .cz-bar { border-radius: 0 0 10px 10px; }
+  .cz-lds { background: color-mix(in srgb, #f59e0b 16%, transparent); }
+  .cz-simds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 8px; border: 2px solid var(--color-gray-300); border-radius: 10px 10px 0 0; }
+  .cz-simdpair { display: flex; flex-direction: column; gap: 4px; padding: 4px; border-radius: 8px; }
+  .cz-simd { padding: 10px 4px; border-radius: 6px; text-align: center; font-weight: 600; background: color-mix(in srgb, #3b82f6 18%, transparent); }
+  .cz-mc { padding: 6px 4px; border-radius: 6px; text-align: center; background: color-mix(in srgb, #a855f7 20%, transparent); }
+  .cz-lanehead, .cz-lanerow { display: grid; grid-template-columns: 56px repeat(16, 1fr); gap: 3px; margin-bottom: 3px; }
+  .cz-lanehead span { text-align: center; font-size: 0.6875rem; color: var(--color-muted); }
+  .cz-cyc { font-size: 0.6875rem; color: var(--color-muted); align-self: center; }
+  .cz-thr { padding: 4px 0; border-radius: 4px; text-align: center; font-family: var(--font-family-mono); font-size: 0.6875rem; }
+  .cz-thr.p0 { background: color-mix(in srgb, #3b82f6 40%, transparent); }
+  .cz-thr.p1 { background: color-mix(in srgb, #3b82f6 28%, transparent); }
+  .cz-thr.p2 { background: color-mix(in srgb, #3b82f6 18%, transparent); }
+  .cz-thr.p3 { background: color-mix(in srgb, #3b82f6 10%, transparent); }
+  .cz-legend { margin-top: 6px; font-size: 0.75rem; color: var(--color-muted); }
+</style>

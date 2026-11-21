@@ -1,0 +1,81 @@
+---
+/**
+ * Sampling explorer: the toy logits from _example.ts, with temperature and
+ * top-p. Shows the probability of each candidate, which ones survive top-p,
+ * and what greedy decoding would pick. Plain HTML + a small script.
+ */
+import * as ex from './_example';
+const data = { labels: ex.cand, ids: ex.candIds, logits: ex.logits };
+---
+
+<figure class="smp" data-smp={JSON.stringify(data)}>
+  <figcaption class="smp-title">Sampler: logits → probabilities → one token</figcaption>
+  <div class="smp-in">
+    <label>Temperature <input data-k="t" type="range" min="0" max="8" step="1" value="3" /> <output data-o="t"></output></label>
+    <label>Top-p <input data-k="p" type="range" min="0" max="5" step="1" value="5" /> <output data-o="p"></output></label>
+  </div>
+  <table class="smp-t">
+    <thead><tr><th>token (id)</th><th>logit</th><th>logit ÷ T</th><th>probability</th><th></th></tr></thead>
+    <tbody>
+      {ex.cand.map((c, i) => (
+        <tr data-row={i}><td><code>{c}</code> <span class="smp-id">{ex.candIds[i]}</span></td><td>{ex.logits[i].toFixed(2)}</td><td data-o={`s${i}`}></td><td data-o={`p${i}`}></td><td class="smp-bar"><span data-o={`b${i}`}></span></td></tr>
+      ))}
+    </tbody>
+  </table>
+  <p class="smp-note" data-o="note"></p>
+</figure>
+
+<style>
+  .smp { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .smp-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .smp-in { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px 20px; font-size: 0.875rem; }
+  .smp-in label { display: flex; align-items: center; gap: 6px; }
+  .smp-in input { accent-color: var(--color-primary); }
+  .smp-in output { min-width: 40px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .smp-t { width: 100%; margin-top: 12px; font-size: 0.875rem; font-variant-numeric: tabular-nums; }
+  .smp-t td, .smp-t th { padding: 4px 8px; }
+  .smp-id { font-size: 0.75rem; color: var(--color-muted); }
+  .smp-bar { width: 40%; }
+  .smp-bar span { display: block; height: 12px; border-radius: 999px; background: var(--color-primary); transition: width 150ms; }
+  tr.is-out { opacity: 0.4; }
+  tr.is-out .smp-bar span { background: var(--color-gray-300); }
+  .smp-note { margin-top: 8px; font-size: 0.875rem; }
+</style>
+
+<script>
+  const TS = [0.1, 0.25, 0.5, 1, 1.25, 1.5, 2, 3, 5];
+  const PS = [0.5, 0.7, 0.8, 0.9, 0.95, 1];
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-smp]')) {
+    const d = JSON.parse(fig.dataset.smp!) as { labels: string[]; ids: number[]; logits: number[] };
+    const $ = <T extends Element>(s: string) => fig.querySelector<T>(s)!;
+    const o = (k: string) => $<HTMLElement>(`[data-o="${k}"]`);
+    const update = () => {
+      const t = TS[Number($<HTMLInputElement>('[data-k=t]').value)];
+      const p = PS[Number($<HTMLInputElement>('[data-k=p]').value)];
+      o('t').textContent = String(t);
+      o('p').textContent = p === 1 ? '1 (off)' : String(p);
+      const s = d.logits.map((z) => z / t);
+      const m = Math.max(...s);
+      const e = s.map((z) => Math.exp(z - m));
+      const sum = e.reduce((a, b) => a + b, 0);
+      const pr = e.map((x) => x / sum);
+      // top-p: smallest set, most likely first, whose probabilities reach p
+      const order = pr.map((x, i) => [x, i] as const).sort((a, b) => b[0] - a[0]);
+      const keep = new Set<number>();
+      let acc = 0;
+      for (const [x, i] of order) { keep.add(i); acc += x; if (acc >= p - 1e-9) break; }
+      pr.forEach((x, i) => {
+        o(`s${i}`).textContent = s[i].toFixed(2);
+        o(`p${i}`).textContent = `${(x * 100).toFixed(1)}%`;
+        o(`b${i}`).style.width = `${x * 100}%`;
+        $<HTMLElement>(`[data-row="${i}"]`).classList.toggle('is-out', !keep.has(i));
+      });
+      const top = order[0];
+      const kept = [...keep].map((i) => d.labels[i]).join(', ');
+      o('note').textContent = `Greedy picks ${d.labels[top[1]]} (${(top[0] * 100).toFixed(1)}%). Sampling draws from {${kept}}, renormalized to sum to 100%. ` +
+        (t < 1 ? 'T below 1 sharpens: the top token takes more of the mass.' : t > 1 ? 'T above 1 flattens: unlikely tokens get a real chance.' : 'T = 1 is the model\'s own distribution.');
+    };
+    fig.querySelectorAll('input').forEach((el) => el.addEventListener('input', update));
+    update();
+  }
+</script>

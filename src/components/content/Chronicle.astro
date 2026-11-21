@@ -1,0 +1,99 @@
+---
+/**
+ * A chronological, nested-box story of a system being built: nodes as boxes, the VMs and pods inside them,
+ * data pieces travelling between them, and a log pane in step with the picture.
+ *
+ *   import harness from './_harness.chronicle';
+ *   <Chronicle spec={harness} />
+ *
+ * The figure is the picture only: one thin bar (path, stage, clock, controls), the boxes and the log. Text
+ * about the stages belongs in the page around it. Next plays one sub-step (one event and its log lines)
+ * and stops; Prev steps back; the stage buttons jump to the end of a stage. Two layers show at a time (the
+ * focused box, its parent as a rail); boxes maximize, minimize and restore; data pieces and callout markers
+ * open on click; a log line shows the system at that moment. Failure paths branch off the happy path,
+ * each behind a spoiler warning. Without JavaScript: the stages as a list. Format: src/diagrams/chronicle.ts.
+ *
+ * `static`: no playback. The viewer opens on the final state with no stage strip, step controls or log; the
+ * reader only maximizes, minimizes and restores boxes and opens details. Every box that has boxes inside is
+ * then a view, and each is linted (lintChronicleWindows). The default slot is the fallback without JavaScript.
+ */
+import '@/styles/diagram.css';
+import '@/styles/chronicle.css';
+import '@/styles/chronicle-themes.css';
+import { CH_THEMES } from '@/diagrams/chronicle-themes';
+import { artLang, checkChronicle, type Chronicle } from '@/diagrams/chronicle';
+import { Code } from 'astro:components';
+import { lintChronicleLayout, lintChronicleWindows } from '@/diagrams/chronicle-model';
+import Md from './Md.astro';
+
+interface Props { spec: Chronicle; id?: string; static?: boolean }
+const { spec, id, static: still = false } = Astro.props;
+// Ids and links, then the layout: every step of every path fills >= 85% of the view, tiles 0.7:1 to 2.8:1.
+const errors = [...checkChronicle(spec), ...(still ? lintChronicleWindows(spec) : lintChronicleLayout(spec))];
+if (errors.length) throw new Error(`Chronicle "${spec.title}":\n  ${errors.join('\n  ')}`);
+const happy = spec.paths[0];
+// JSON inside <script type="application/json">: escape "<" so the text can never close the element.
+const payload = JSON.stringify(spec).replace(/</g, '\\u003c');
+---
+
+<figure class:list={["ch", { "is-static": still }]} id={id} data-chronicle data-static={still ? "1" : undefined} tabindex="0" aria-label={spec.title}>
+  <header class="ch-top">
+    <span class="ch-paths"></span>
+    <span class="ch-stage-line"><span class="ch-stage-title"></span> <span class="ch-stage-meta"></span></span>
+    <span class="ch-clock"></span>
+    <span class="ch-ctrl" role="group" aria-label="Steps">
+      <button type="button" class="dg-btn" data-ch="prev-stage" aria-label="End of the previous stage" title="End of the previous stage (Shift+←)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6l-6 6 6 6M11 6l-6 6 6 6" /></svg>
+      </button>
+      <button type="button" class="dg-btn" data-ch="prev" aria-label="Previous step" title="Previous (←)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6" /></svg>
+      </button>
+      <button type="button" class="dg-btn dg-play" data-ch="next" aria-label="Next step" title="Next (→)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6l6 6-6 6" /></svg>
+      </button>
+      <button type="button" class="dg-btn" data-ch="next-stage" aria-label="End of this stage" title="End of this stage (Shift+→)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l6 6-6 6M13 6l6 6-6 6" /></svg>
+      </button>
+      <span class="dg-speed" role="group" aria-label="Animation speed">
+        <button type="button" data-ch="slower" aria-label="Slower" title="Slower">−</button>
+        <button type="button" class="dg-speed-val" aria-label="Speed; reset to 1×" title="Reset speed">1×</button>
+        <button type="button" data-ch="faster" aria-label="Faster" title="Faster">+</button>
+      </span>
+      <select class="ch-theme-sel" data-ch="theme" aria-label="Colour theme" title="Colour theme (Omarchy themes; light or dark follows the site)">
+        {CH_THEMES.map((t) => <option value={t.id === 'nord' ? '' : t.id}>{t.id === 'nord' ? 'Nord (default)' : t.label}</option>)}
+      </select>
+      <button type="button" class="dg-btn" data-ch="full" aria-label="Full window" title="Full window (F, Esc to leave)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" /></svg>
+      </button>
+    </span>
+  </header>
+  <div class="ch-timeline" aria-label="Stages"></div>
+  <div class="ch-banner" hidden></div>
+  <div class="ch-body">
+    <div class="ch-stage"></div>
+    <aside class="ch-detail" hidden aria-label="Details"></aside>
+    <div class="ch-dialog" hidden></div>
+  </div>
+  <div class="ch-log"><div class="ch-log-body" role="log" title="Click a line to see the system at that moment"></div></div>
+  <div class="ch-fallback">
+    {still ? <slot /> : spec.paths.map((p) => (
+      <section>
+        <p class="ch-title">{p.kind === 'happy' ? 'Happy path' : `Failure path (from stage "${happy.stages.find((s) => s.id === p.forkAt)?.title}")`}: {p.title}</p>
+        {p.spoiler && <Md src={p.spoiler} />}
+        <ol>{p.stages.map((s) => <li><strong>{s.title}</strong>{s.took && ` (${s.took})`}<Md src={s.about} /></li>)}</ol>
+        {p.lesson && <Md src={p.lesson} />}
+      </section>
+    ))}
+  </div>
+  <script type="application/json" set:html={payload} />
+  {/* Data pieces' code, highlighted at build time (Shiki, the site's light/dark pair); the viewer clones it into
+      the details panel by data-ch-code (scripts/chronicle.ts codeBlock). */}
+  {spec.arts.flatMap((a) => (['brief', 'body'] as const).filter((k) => a[k]).map((k) => (
+    <template data-ch-code={`${a.id}|${k}`}><Code code={a[k]!} lang={artLang(a) as any} themes={{ light: 'github-light-default', dark: 'github-dark-default' }} /></template>
+  )))}
+</figure>
+
+<script>
+  import { initChronicles } from '@/scripts/chronicle';
+  initChronicles();
+</script>

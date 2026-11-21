@@ -1,0 +1,10 @@
+---
+/** Renders the small diagram Markdown (src/diagrams/md.ts) on the server. */
+import { parseMd } from '@/diagrams/md';
+import MdInline from './MdInline.astro';
+interface Props { src: string; class?: string }
+const { src, class: cls } = Astro.props;
+---
+<div class={cls}>
+  {parseMd(src).map((b) => (b.t === 'p' ? <p><MdInline items={b.c} /></p> : <ul>{b.items.map((i) => <li><MdInline items={i} /></li>)}</ul>))}
+</div>

@@ -1,0 +1,256 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "GPU metrics and monitoring"
+short: "Metrics & monitoring"
+description: "Where GPU metrics come from (AMD device-metrics-exporter, NVIDIA dcgm-exporter): one energy counter followed from the GPU to a PromQL answer with worked numbers, a PromQL explorer with example results, every AMD metric family and label, Pod attribution under DRA, the freshness trap, and a starter alert set."
+updated: "2026-11-10"
+track: operations
+order: 6
+requires: [gpu-operators, gpu-failures]
+eyebrow: "Learn · Operating GPU nodes"
+---
+import Callout from '@/components/content/Callout.astro';
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import Out from '../amd-gpu-tools/_Out.astro';
+import Result from './_Result.astro';
+import pipe from './_pipe.diagram';
+import * as f from './_flow';
+import { QUERIES, Q } from './_promql';
+
+GPU metrics come from a vendor exporter on every GPU node. Prometheus scrapes it like any other target, and GPUs become one more device type in the cluster dashboards. This page follows one counter from the chip to a query result, then covers what the exporter publishes and where it lies. Numbers are illustrative, for an example cluster of 4 nodes with 8× MI355X each (32 GPUs).
+
+## The idea
+
+Think of a weather station. Instruments on the roof measure (the **GPU's firmware**). A clerk reads the dials and writes the numbers on a board by the door (the **exporter**). Every 30 seconds someone copies the board into a notebook with the time (**Prometheus**). Later you ask questions of the notebook, like "how much rain fell this hour?" (**PromQL**).
+
+Each part answers a different question:
+
+- *What is the value now?* The board: one scrape of the exporter.
+- *What was it at 10:00?* The notebook: stored samples.
+- *How fast is it changing?* Arithmetic over samples: `rate()`, `increase()`, `changes()`.
+- *Is the board still being updated?* Nobody checks this by default, and it is the question that matters most.
+
+Where the analogy breaks, and why it matters: if the clerk falls asleep, the board still shows the last numbers, and the notebook keeps copying them every 30 seconds. Every page of the notebook looks normal. That is exactly what happens after some fatal GPU events: the exporter freezes at the moment of the fault, and every threshold check passes for hours.
+
+<Diagram spec={pipe} title="The metrics pipeline on the example cluster">
+  <Step title="Read" path="exp -> drv -> gpu">The exporter asks the driver (through the AMD SMI library) for every counter: temperatures, power, memory, ECC, energy.</Step>
+  <Step title="Scrape" path="prom -> exp" narration={{ exp: 'HTTP 200: about 130 families, about 2,500 samples' }}>Every 30 s a Prometheus shard pulls `/metrics` from the exporter and stores each value with a timestamp.</Step>
+  <Step title="Query" path="you -> thanos -> prom">You ask `thanos-query`, which fans out to both shards and merges the 2 replicas of each. Asking one shard directly gives only part of the 32 GPUs.</Step>
+  <Step title="Frozen exporter" path="prom -> exp" state={{ gpu: { tone: 'risk', detail: 'dead since the fault' }, exp: { tone: 'warn', detail: 'serves the last values' } }} narration={{ exp: 'HTTP 200 again: up = 1, every value unchanged' }}>The GPU is dead, but the exporter still answers with the values it captured at the fault. `up` stays 1. Only a check that asks *did anything change?* sees it.</Step>
+</Diagram>
+
+| Stage | In the example cluster |
+| --- | --- |
+| Exporter | DaemonSet `kube-amd-gpu/default-metrics-exporter`, image `device-metrics-exporter:v1.5.0` (example version), one Pod per GPU node (4), port 5000 |
+| Scrape config | operator-made ServiceMonitor `default-metrics-exporter`, every 30 s, `honorLabels: true` |
+| Prometheus | kube-prometheus-stack, **2 shards × 2 replicas** (`prometheus-prometheus-prometheus-*`) |
+| Query | `thanos-query` merges the shards; Grafana uses it |
+
+<Callout tone="warn" title="Query Thanos, not a shard">The service `prometheus-operated` lands on one shard. Querying it on the example cluster returns about half of the 32 GPUs, a different subset on each call. Query `thanos-query` (or Grafana), which returns all 32.</Callout>
+
+## Worked example: one counter, from the chip to a query
+
+Follow `gpu_energy_consumed` for GPU 4 on `gpu-node-1`, the GPU an inference engine is using. Energy is a good teacher: it only goes up, so every step can be checked against the one before.
+
+<Walkthrough title="GPU 4's energy counter, from firmware to PromQL" caption="Illustrative values with made-up numbers; every derived number is computed from them.">
+  <WStep title="1 · On the chip: amd-smi reads joules">
+    <Out host="gpu-node-1" cmd="amd-smi metric -g 4 -E -p     # twice, 10 s apart" out={f.smiOut} marks={[{ at: 'TOTAL_ENERGY', note: 'Energy so far, in joules. The GPU firmware counts it continuously.' }, { at: ("" + (f.smi[1].joules.toFixed(3))), note: ("10 s later it is " + (Math.round(f.smi[1].joules - f.smi[0].joules).toLocaleString('en-US')) + " J higher: about " + (Math.round(f.avgWatts)) + " W on average."), tone: 'good' }]} />
+    The firmware keeps a running total of energy since power-on. Power readings (520 W, 400 W) are instant snapshots; the energy total integrates everything in between.
+  </WStep>
+  <WStep title="2 · On the exporter: the same counter in microjoules">
+    <Out host="mgmt node" cmd="kubectl get --raw /api/v1/namespaces/kube-amd-gpu/pods/default-metrics-exporter-x7k2p:5000/proxy/metrics" out={f.scrapeOut} marks={[{ at: 'gpu_energy_consumed{', note: ("Scraped at " + (f.scrapeAt) + " UTC. " + (f.scrapeText) + (f.scrapeBetween ? ' (checked).' : '.')), tone: 'good' }, { at: 'gpu_health{', note: '<code>gpu_health</code> rides along in the same scrape. It is derived from ECC counters, not from freshness.' }]} />
+    The exporter publishes the counter as a **gauge** named `gpu_energy_consumed`, in µJ (its HELP line says so). Labels add the node, the GPU index, the board serial and, for a busy GPU, the Pod.
+  </WStep>
+  <WStep title="3 · In Prometheus: one sample every 30 s">
+    <table>
+      <thead><tr><th>time (UTC)</th><th>energy (J)</th><th>Δ energy (J)</th><th>Δ time (s)</th><th>average W</th><th>power sample (W)</th></tr></thead>
+      <tbody>{f.samples.map((s) => <tr><td>{s.t}</td><td>{s.j}</td><td>{s.dJ}</td><td>{s.dt}</td><td><b>{s.w}</b></td><td>{s.p}</td></tr>)}</tbody>
+    </table>
+    The raw samples Thanos holds for the 5 minutes before 10:00:00, `gpu_energy_consumed{hostname="gpu-node-1",gpu_id="4"}[5m]`. Average watts per interval = Δ energy ÷ Δ time. The first two samples come from the two Prometheus replicas 12 s apart, before the value changed. Compare the columns: the power snapshots jump between {f.calc.pmin} W and {f.calc.pmax} W, while the energy-based averages stay between {f.calc.wmin} W and {f.calc.wmax} W.
+  </WStep>
+  <WStep title="4 · increase(): how much in the window">
+    <pre class="pq"><code>{'increase(gpu_energy_consumed{hostname="gpu-node-1",gpu_id="4"}[5m])'}</code></pre>
+    Last sample − first sample = **{f.calc.deltaJ} J** over {f.calc.span} s. The samples do not reach the window edges ({f.calc.startGap} s missing at the start, {f.calc.endGap} s at the end), so Prometheus stretches the change to the full 300 s: {f.calc.deltaJ} J × 300 ÷ {f.calc.span} = **{f.calc.increaseJ} J**. Thanos answered {f.calc.thanosIncrease} µJ{f.calc.match ? ', the same number' : ''}.
+  </WStep>
+  <WStep title="5 · rate(): from a counter to watts">
+    <pre class="pq"><code>{'rate(gpu_energy_consumed{hostname="gpu-node-1",gpu_id="4"}[5m]) / 1e6      # µJ/s ÷ 10⁶ = W'}</code></pre>
+    `rate()` is `increase()` divided by the window: {f.calc.increaseJ} J ÷ 300 s = **{f.calc.rateW} W**. Thanos returned {f.calc.thanosRateW} W. Now compare `avg_over_time(gpu_package_power[5m])`, the average of the 11 power snapshots: {f.calc.avgPower} W (Thanos: {f.calc.thanosAvgPower} W). The snapshots happened to catch two spikes (640 W, 560 W), so they overstate. **For power, rate the energy counter; do not average the gauge.**
+  </WStep>
+  <WStep title="6 · Up the hierarchy: one number per node">
+    <pre class="pq"><code>{'sum by (hostname) (max by (hostname, gpu_id) (rate(gpu_energy_consumed[5m]))) / 1e6'}</code></pre>
+    <Result rows={Q.power.rows} unit="W" max={11200} digits={0} />
+    `max by (hostname, gpu_id)` first collapses any duplicate series to one per GPU; then `sum by (hostname)` adds the 8 GPUs. Bars are scaled to 8 × 1400 W: every node draws about a fifth of its GPU power budget.
+  </WStep>
+  <WStep title="7 · Is it fresh? changes()">
+    <pre class="pq"><code>{'min by (hostname) (changes(gpu_energy_consumed[15m]))'}</code></pre>
+    <Result rows={Q.fresh.rows} max={30} />
+    In 15 minutes the slowest GPU on each node changed its energy value 29–30 times: once per scrape. With a frozen exporter this number is **0** for as long as the freeze lasts, while `up` and `gpu_health` read 1. The alert is `changes(gpu_energy_consumed[15m]) == 0` (with `up == 1`). Temperature does not work for this: on an idle GPU it is whole degrees and may not change for 15 minutes.
+  </WStep>
+</Walkthrough>
+
+## PromQL explorer: prepared queries, example answers
+
+Pick a question. Each result is an illustrative answer from `thanos-query` on the example cluster (4 nodes, 32 GPUs).
+
+<Explorer id="promql" options={[{ key: 'q', label: 'Question', default: 'gpus', values: QUERIES.map((x) => ({ value: x.id, label: x.label })) }]} variants={QUERIES.map((x) => ({ match: { q: x.id }, id: ("q-" + (x.id)) }))}>
+  {QUERIES.map((x) => (
+    <Variant id={("q-" + (x.id))}>
+      <pre><code>{x.q}</code></pre>
+      <Result rows={x.rows} unit={x.unit} max={x.max} digits={x.digits} />
+      <p>{x.read}</p>
+    </Variant>
+  ))}
+</Explorer>
+
+Two more that work:
+
+```promql
+# Join GPU metrics to node state (hostname vs node): hottest GPU per cordoned node
+max by (hostname) (gpu_junction_temperature)
+  and on (hostname)
+  label_replace(kube_node_spec_unschedulable == 1, "hostname", "$1", "node", "(.*)")
+                                     # empty: nothing cordoned (with == 0: all 4 nodes)
+# Nodes reporting fewer than 8 GPUs (a GPU fell off, or the exporter lost it)
+count by (hostname) (gpu_health) < 8                                    # empty
+```
+
+The ECC families are gauges in this exporter version, but they behave as counters; `increase()` works on them as long as they do not reset (a reboot resets them). Two traps when writing your own queries:
+
+- **Duplicate series.** Attribution and scrape labels can split one GPU into several series. In the example cluster `count(gpu_used_vram)` is exactly 32, and only `gpu_process_cu_occupancy` has one series per process. Collapse with `max by (hostname, gpu_id)` anyway before you count or average, and never `sum` percentages.
+- **Absent is not zero.** A filter that returns nothing may mean "no problem" or "no data". Check the unfiltered count first.
+
+## To check if the exporter lies: scrape it directly
+
+From the management node, read-only, no port-forward:
+
+```shell
+kubectl -n kube-amd-gpu get pods -o wide | grep metrics-exporter       # pick the Pod on your node
+kubectl get --raw /api/v1/namespaces/kube-amd-gpu/pods/<exporter-pod>:5000/proxy/metrics | grep '^gpu_health'
+```
+
+One scrape is about 130 metric families and about 2,500 samples. Two scrapes 60 s apart should differ in `gpu_energy_consumed`; a frozen exporter returns byte-identical scrapes.
+
+<Callout tone="risk" title="gpu_health is not a liveness signal">`gpu_health` is computed from ECC counters. A fatal event can move no counter while the exporter keeps serving frozen values for hours: `up=1`, `gpu_health=1`, plausible temperatures. Every threshold rule passed, because a frozen value never crosses a threshold. Two signals catch it: **freshness** (`changes(gpu_energy_consumed[15m]) == 0` while `up == 1`) and **sample count** (`scrape_samples_scraped` dropping against its own baseline; hundreds of series can vanish at the fault).</Callout>
+
+## AMD metric families
+
+Every family from one scrape, grouped:
+
+| Group | Families | Notes |
+| --- | --- | --- |
+| Health | `gpu_health` | 1 healthy, 0 unhealthy. Derived from ECC counters; see the warning below |
+| Inventory | `gpu_nodes_total` | GPUs on the node (8); labelled only by `hostname` |
+| Utilization | `gpu_gfx_activity`, `gpu_umc_activity`, `gpu_gfx_busy_instantaneous`, `gpu_vcn_busy_instantaneous`, `gpu_jpeg_busy_instantaneous` | % busy; `umc` is memory-controller activity |
+| Memory | `gpu_used_vram`, `gpu_free_vram`, `gpu_total_vram`, `*_visible_vram`, `*_gtt`, `gpu_vram_max_bandwidth` | VRAM in MB per the HELP text |
+| Thermal | `gpu_junction_temperature`, `gpu_memory_temperature` | °C. No edge sensor on MI35x |
+| Power and energy | `gpu_package_power`, `gpu_power_usage`, `gpu_energy_consumed` | W, W, µJ. Energy only increases while powered |
+| Clocks | `gpu_clock` (`clock_type`, `clock_index`), `gpu_min_clock`, `gpu_max_clock` | MHz |
+| ECC | `gpu_ecc_{correct,uncorrect,deferred}_{total,<block>}` for 19 blocks | 60 families; only 7 blocks ever report on MI35x ([AMD RAS and ECC](/learn/amd-ras-and-ecc/)) |
+| Throttling | `gpu_violation_*_{accumulated,percentage}` for `ppt`, `socket_thermal`, `vr_thermal`, `hbm_thermal`, `processor_hot`, `low_utilization`, `gfx_clock_below_host_limit_*` | % of time held below max clock, and why |
+| XGMI | `gpu_xgmi_link_rx`, `gpu_xgmi_link_tx` (`link_index`), `gpu_xgmi_nbr_*` | KB transferred per link |
+| PCIe | `pcie_replay_count`, `pcie_recovery_count`, `pcie_replay_rollover_count`, `pcie_nack_sent_count`, `pcie_nack_received_count`, `pcie_speed`, `pcie_max_speed`, `pcie_bandwidth`, `pcie_bidirectional_bandwidth` | host link health |
+| Process | `gpu_process_cu_occupancy` (`process_id`) | one series per GPU process |
+
+## Labels
+
+An example series, GPU 4 on `gpu-node-1`:
+
+```promql
+gpu_used_vram{card_model="102-EXAMPLE-00",container="prefill",deployment_mode="baremetal",
+  gpu_compute_partition_type="spx",gpu_id="4",gpu_memory_partition_type="nps1",gpu_partition_id="0",
+  hostname="gpu-node-1",job_id="",job_partition="",job_user="",
+  namespace="gpu-demo",pod="llm-prefill-5d8f7c9b6-abcde",
+  serial_number="SN-EXAMPLE-0005"} 256000
+```
+
+| Label | Meaning |
+| --- | --- |
+| `hostname` | the node. kube-state-metrics calls it `node`, so joins need `label_replace` |
+| `gpu_id` | amd-smi index (0–7). Not the slot, not the DRA device name |
+| `serial_number` | board serial; what goes on an RMA |
+| `card_model` | board model number (for example `102-EXAMPLE-00`) |
+| `gpu_compute_partition_type`, `gpu_memory_partition_type`, `gpu_partition_id` | `spx`, `nps1`, `0`: whole GPUs |
+| `pod`, `namespace`, `container` | the workload holding the GPU, when there is one |
+| `job_id`, `job_user`, `job_partition` | Slurm attribution; always empty here |
+
+There is no GPU UUID and no DRA device name or claim label. The only key shared with Kubernetes objects is `hostname` (plus `pod` when it is filled).
+
+## Pod attribution under DRA: filled for busy GPUs
+
+A common belief is that the `pod`, `namespace` and `container` labels stay empty under DRA because the exporter cannot see DRA allocations. **With a current exporter that is not true.**
+
+- In the example cluster, 8 of the 32 GPUs hold more than 10 GB of VRAM. All 8 carry a `pod` label: `count(count by (hostname,gpu_id)(gpu_used_vram{pod!=""}))` returns 8.
+- The 24 idle GPUs had empty labels, which is correct: nothing holds them.
+
+How it works: the exporter mounts the kubelet **pod-resources** socket (`/var/lib/kubelet/pod-resources`, set by `metricsExporter.podResourceAPISocketPath` in the DeviceConfig). Since exporter v1.4.1 it falls back to `gpu.amd.com` DRA claims when no device-plugin allocation exists (per the exporter's issue reports). Empty labels on idle GPUs, or on an older exporter, explain the belief.
+
+Limits that remain:
+
+- **Shared claims.** If two Pods share one ResourceClaim, only one Pod gets the labels, and which one can change between scrapes ([device-metrics-exporter #665](https://github.com/ROCm/device-metrics-exporter/issues/665)). One claim per Pod avoids it.
+- **No claim or device label.** You cannot join a series to a ResourceClaim directly. Go through the `pod` label, or through `hostname` + `gpu_id` + the BDF map in [GPU process ↔ Pod](/learn/gpu-process-to-pod/).
+- **Blank does not mean free.** The ResourceClaim is the allocation ledger; the label is a hint. A metric built from Kubernetes objects (claims and their devices) gives an exact workload-to-GPU map.
+
+## NVIDIA: dcgm-exporter
+
+On NVIDIA nodes, **dcgm-exporter** publishes DCGM fields. The default metric names changed in **4.9.0** (released 2026-11-06). Check which version you run before copying a query or dashboard:
+
+| Meaning | up to 4.8.x | 4.9.0 and later |
+| --- | --- | --- |
+| GPU utilization | `DCGM_FI_DEV_GPU_UTIL` (%) | `DCGM_FI_DEV_GPU_UTIL_RATIO` |
+| Memory used | `DCGM_FI_DEV_FB_USED` | `DCGM_FI_DEV_FB_USED_BYTES` |
+| GPU temperature | `DCGM_FI_DEV_GPU_TEMP` | `DCGM_FI_DEV_GPU_TEMP_CELSIUS` |
+| Power | `DCGM_FI_DEV_POWER_USAGE` | `DCGM_FI_DEV_BOARD_POWER_WATTS` |
+| Energy | `DCGM_FI_DEV_TOTAL_ENERGY_CONSUMPTION` | `DCGM_FI_DEV_GPU_ENERGY_JOULES_TOTAL` |
+| Last Xid | `DCGM_FI_DEV_XID_ERRORS` | `DCGM_FI_DEV_XID_ERROR` |
+| PCIe replays | `DCGM_FI_DEV_PCIE_REPLAY_COUNTER` | `DCGM_FI_DEV_PCIE_REPLAY_TOTAL` |
+| Row-remap failure | `DCGM_FI_DEV_ROW_REMAP_FAILURE` | `DCGM_FI_DEV_ROW_REMAP_FAILED` |
+
+In both versions the default counters file leaves the ECC totals, retired pages and NVLink error counters **commented out**. A health alert on DBE (double-bit errors) never fires until you enable those fields in the counters CSV. The Xid metric holds the *last* Xid value, not a count. dcgm-exporter can also add DRA labels (claim name, namespace, pool, device), per the exporter issue above; not verified here.
+
+## Exporters by platform
+
+| Platform | GPU metrics | Node health | Other exporters worth adding |
+| --- | --- | --- | --- |
+| AMD MI355X | device-metrics-exporter | node-problem-detector with AMD rules | IPMI, scale-out NIC |
+| NVIDIA DGX / HGX | dcgm-exporter | NVSentinel | IPMI, scale-out NIC |
+| AMD Helios | AMD exporter | — | scale-up and scale-out NIC, DPU NIC, switch (gNMI) |
+| NVIDIA NVL72 | dcgm-exporter | — | NVLink, ConnectX-8, BlueField-3 DPU, NVLink switch (gNMI) |
+
+## Dashboards
+
+- Both exporters come with vendor Grafana dashboards (AMD ships Compute Node, GPU, Job, Overview and System views). Ship them with the cluster's deploy, as code, so a fresh cluster gets them instead of relying on hand imports.
+- Make GPU nodes first-class in the cluster's existing node and workload dashboards, not only in separate GPU views.
+
+## Alerts: a starter set
+
+A new cluster often has **no alert rule that references any `gpu_` metric**: the only GPU-related paging comes from the workload's own alerts. A first set, each checked against the frozen-exporter failure above:
+
+| Proposed alert | Trigger | Catches a fatal event with a frozen exporter? |
+| --- | --- | --- |
+| GpuFatalError, GpuKernelCrash | NPD conditions | KernelCrash yes (kernel log); FatalError no (no CPER) |
+| GpuUncorrectableError | `increase(gpu_ecc_uncorrect_total[5m]) > 0` | no: no counter moved |
+| GpuNodeWedge | `count by (hostname)(gpu_health == 0) >= 2` | **no**: `gpu_health` stayed 1 |
+| GpuNodeDeviceCountLow | `count by (hostname)(gpu_health) < 8` | **no**: the frozen exporter still served 8 |
+| GpuDieTempCritical / GpuMemTempHigh | > 100 °C / > 95 °C | no |
+| GpuExporterDown | `up == 0` | no: `up` stayed 1 |
+| GpuTelemetryStale | no fresh samples | yes, if it uses the energy counter |
+
+So the freshness rule is not a nice-to-have: it is the only metric-side rule that sees a wedge. Decide the routing too: one clear "GPU hardware fault → page X" target.
+
+## Misconceptions
+
+- *"`up == 1` means the GPU data is good."* It means the HTTP scrape worked.
+- *"Pod labels are always empty under DRA."* Not with a current exporter: busy GPUs are labelled.
+- *"`gpu_health` covers all faults."* It covers what moves ECC counters.
+- *"Any Prometheus endpoint gives the full picture."* On a sharded Prometheus, use Thanos.
+
+## Further reading
+
+- [AMD Device Metrics Exporter](https://instinct.docs.amd.com/projects/device-metrics-exporter/en/latest/) · [metrics list](https://instinct.docs.amd.com/projects/device-metrics-exporter/en/latest/configuration/metricslist.html) · [exporter issue #665](https://github.com/ROCm/device-metrics-exporter/issues/665)
+- [dcgm-exporter](https://github.com/NVIDIA/dcgm-exporter) · [4.9.0 release](https://github.com/NVIDIA/dcgm-exporter/releases/tag/4.9.0) · [default counters](https://github.com/NVIDIA/dcgm-exporter/blob/main/etc/default-counters.csv) · [DCGM](https://docs.nvidia.com/datacenter/dcgm/latest/user-guide/feature-overview.html)
+- [PromQL `changes()`](https://prometheus.io/docs/prometheus/latest/querying/functions/#changes)

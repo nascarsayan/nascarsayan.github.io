@@ -1,0 +1,80 @@
+/* <Drilldown>: boxes that open into their inside diagram, panels below, dotted lens between. */
+.dd { position: relative; --dd-c: var(--color-primary); }
+.dd[data-depth='0'] { margin: 32px 0; }
+.dd > figure.dg { margin: 0; }
+
+/* Toolbar above the top level: hint, map of all levels, close all. */
+.dd-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; margin-bottom: 12px; font-size: 0.9rem; }
+.dd-hint { display: inline-flex; align-items: center; gap: 8px; color: var(--color-text); }
+.dd-hint svg { width: 22px; height: 22px; padding: 3px; border-radius: 50%; background: var(--color-primary); fill: none; stroke: white; stroke-width: 2.6; stroke-linecap: round; flex: none; }
+.dd-map { position: relative; margin-left: auto; }
+.dd-map > summary, .dd-closeall {
+  display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border: 1px solid color-mix(in srgb, var(--color-text) 20%, transparent); border-radius: 999px;
+  background: var(--color-background); color: var(--color-text); font: inherit; font-weight: 600; cursor: pointer; list-style: none;
+}
+.dd-map > summary::-webkit-details-marker { display: none; }
+.dd-map > summary::after { content: ''; width: 7px; height: 7px; margin-left: 2px; border: solid currentColor; border-width: 0 1.8px 1.8px 0; transform: translateY(-2px) rotate(45deg); transition: transform 160ms var(--ease-soft, ease); }
+.dd-map[open] > summary::after { transform: translateY(1px) rotate(-135deg); }
+.dd-map > summary:hover, .dd-closeall:hover { border-color: var(--color-primary); }
+.dd-map ol {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; min-width: 280px; max-height: 60vh; overflow: auto; margin: 0; padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--color-text) 20%, transparent); border-radius: 12px; background: var(--color-background); box-shadow: 0 10px 30px rgb(10 20 40 / 0.16); list-style: none;
+}
+.dd-map li { margin: 0; padding: 0 0 0 calc(var(--lvl) * 16px); }
+.dd-map li button { display: block; width: 100%; padding: 5px 8px; border: 0; border-radius: 7px; background: none; color: var(--color-text); font: inherit; text-align: left; cursor: pointer; }
+.dd-map li button:hover { background: var(--color-gray-100); }
+.dd-map li:not([style*='--lvl: 0']) button::before { content: '└ '; color: var(--color-gray-500); }
+
+/* Boxes that open. The badge is a magnifier on the top-right corner. */
+.dg .dg-node.dg-opens { cursor: zoom-in; outline: none; }
+.dg .dg-node.dg-opens.is-open { cursor: zoom-out; }
+.dg .dg-node.dg-opens:hover .dg-shape { stroke: var(--s); stroke-width: 2; }
+.dg .dg-node.dg-opens:focus-visible .dg-shape { stroke: var(--s); stroke-width: 3; }
+.dg .dg-node.dg-opens.is-open .dg-shape { stroke: var(--s); stroke-width: 2.4; stroke-dasharray: 6 4; fill: color-mix(in srgb, var(--s) 10%, var(--f)); }
+.dg-badge-bg { fill: var(--s); stroke: var(--dg-bg); stroke-width: 2; transition: transform 160ms var(--ease-soft, ease); transform-box: fill-box; transform-origin: center; }
+.dg-badge-ic { fill: none; stroke: var(--dg-bg); stroke-width: 1.7; stroke-linecap: round; }
+.dg .dg-node.dg-opens:is(.tone-neutral, .tone-muted) .dg-badge-bg { fill: var(--color-primary); }
+.dg .dg-node.dg-opens:hover .dg-badge-bg { transform: scale(1.18); }
+.dg .dg-node.dg-opens.is-open .dg-badge-bg { fill: var(--dg-ink); }
+
+/* The panel with the inside diagram: below its level, outlined in the opened box's colour. */
+.dd-panel {
+  position: relative; margin-top: 44px; padding: 10px 12px 2px; border: 1.5px dashed var(--dd-c); border-radius: 16px;
+  background: color-mix(in srgb, var(--dd-c) 4%, var(--color-background));
+  transform-origin: var(--dd-ox, 50%) 0; transition: opacity 260ms var(--ease-soft, ease), transform 320ms var(--ease-soft, ease);
+}
+.dd-panel:not(.is-in) { opacity: 0; transform: translateY(-10px) scale(0.94); }
+.dd-panel[hidden] { display: none; }
+.dd-panel > .dd { padding-bottom: 10px; }
+.dd-panel .dg-frame { background: var(--color-background); }
+
+.dd-head { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+.dd-crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 4px; font-size: 0.875rem; min-width: 0; }
+.dd-crumbs button { padding: 2px 6px; border: 0; border-radius: 6px; background: none; color: var(--color-primary); font: inherit; cursor: pointer; }
+.dd-crumbs button:hover { background: var(--color-gray-100); text-decoration: underline; }
+.dd-sep { color: var(--color-gray-500); }
+.dd-here { padding: 2px 6px; font-weight: 700; color: var(--color-text); }
+.dd-x { margin-left: auto; display: grid; place-items: center; width: 30px; height: 30px; flex: none; border: 1px solid var(--color-gray-200); border-radius: 50%; background: var(--color-background); cursor: pointer; }
+.dd-x:hover { border-color: var(--dd-c); }
+.dd-x svg { width: 14px; height: 14px; fill: none; stroke: var(--color-text); stroke-width: 2.2; stroke-linecap: round; }
+
+/* The lens: drawn over the level (pointer events pass through). */
+.dd-lens { position: absolute; inset: 0 auto auto 0; overflow: visible; pointer-events: none; z-index: 5; opacity: 0; transition: opacity 220ms ease; }
+.dd-lens.is-on { opacity: 1; }
+.dd-lens-fill { fill: var(--dd-c); fill-opacity: 0.06; }
+.dd-lens-line { stroke: var(--dd-c); stroke-width: 1.6; stroke-dasharray: 2 5; stroke-linecap: round; }
+
+@media (prefers-reduced-motion: reduce) {
+  .dd-panel, .dd-lens, .dg-badge-bg { transition: none; }
+}
+
+/* Inside a panel the breadcrumb already names the level: the diagram title is for screen readers only. */
+.dd-panel .dg-title { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+
+/* A level's note (Drill.about): above its diagram, prose width. */
+.dd-about { max-width: 72ch; margin: 0 0 12px; font-size: 0.95rem; line-height: 1.6; color: var(--color-text); }
+.dd-about > :first-child { margin-top: 0; }
+.dd-about > :last-child { margin-bottom: 0; }
+.dd-about p, .dd-about ul { margin: 0 0 8px; }
+.dd-about ul { padding-left: 1.2em; }
+.dd-panel > .dd > .dd-about { padding: 0 4px; }

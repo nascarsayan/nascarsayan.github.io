@@ -1,0 +1,170 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "Batching and scheduling: who runs in the next step"
+short: "Batching & scheduling"
+description: "How an inference server decides, every step, which requests run and how many tokens each gets: static versus continuous batching, the token budget, mixing prefill chunks with decodes, admission and preemption, priorities, and how disaggregation changes the problem. A step-by-step simulation, head-of-line blocking, and budget and Little's law calculators."
+updated: "2026-11-10"
+track: inference
+order: 7
+requires: [prefill-phase, decode-phase]
+eyebrow: "Learn · LLM inference"
+links:
+  - { label: "vLLM optimization guide", href: "https://docs.vllm.ai/en/latest/configuration/optimization.html" }
+  - { label: "vLLM engine arguments", href: "https://docs.vllm.ai/en/latest/configuration/engine_args.html" }
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Step from '@/components/content/Step.astro';
+import Callout from '@/components/content/Callout.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import loop from './_loop.diagram';
+import steps from './_steps.diagram';
+import Grid from './_Grid.astro';
+import BudgetCalc from './_BudgetCalc.astro';
+import * as ex from './_example';
+
+export const extra = [
+  'Nothing is decoding yet, so the whole budget goes to prompts. Both prompts finish in this one step, and each gets its first output token from it.',
+  'C arrived. A and B now decode: one token each, scheduled first. The tokens left go to C, whose 24-token prompt does not fit: it is cut into a chunk. That is chunked prefill.',
+  'C finishes its prompt beside two decodes. A has all its output tokens and leaves at once; its KV blocks are freed for others.',
+  'D joins in the step after it arrives: no waiting for a batch to end. C needed only 2 output tokens, so it is already gone.',
+  'E joins the same way. The step mixes two decodes and a whole prompt.',
+  'Only decodes are left. B and E finish together.',
+  'The last request runs alone. With no new arrivals the step is nearly empty: continuous batching cannot invent work.',
+];
+
+[Prefill](/learn/prefill-phase/) wants many tokens per step to keep the GPU's matrix units busy. [Decode](/learn/decode-phase/) produces one token per sequence per step and wants many sequences per step to share the weight read. Both are solved by **batching**. The part of the server that decides what goes into each step is the **scheduler**.
+
+## The idea
+
+A GPU runs the model in **steps** (also *iterations*): one forward pass over whatever tokens were chosen, every 1 to 100 ms. The scheduler's job is to fill each step well. Think of kube-scheduler with a millisecond cycle: every step it looks at the queue, the free KV memory and the **token budget**, and binds work to the next forward pass.
+
+**An everyday picture: a metro, not a tour bus.**
+
+| | Tour bus (static batching) | Metro (continuous batching) |
+| --- | --- | --- |
+| Leaves when | it is full | every step, full or not |
+| New passengers | wait for the next bus | board at the next stop |
+| A passenger who is done | stays on until the last one is done | gets off at the next stop |
+| Seats | one per passenger, sized for the longest trip | a fixed number of **tokens** per step, shared |
+
+**Where the analogy breaks.** A prompt is a big group that may not fit one train: it boards in **chunks** over several steps. A decoding request takes one seat per step, every step, until it ends. And each passenger carries luggage that grows every step (its KV cache); when the racks are full, someone is put off the train (**preemption**).
+
+**The questions each part answers:**
+
+- **Token budget** (`max_num_batched_tokens`): how much work fits in one step? Bigger means fewer steps for a prompt, but every step gets longer.
+- **Sequence cap** (`max_num_seqs`): how many requests may share one step?
+- **Free KV memory**: does this request's new KV fit? If not, it waits, or someone is evicted.
+- **Order**: who goes first? vLLM puts running decodes first, so a decoding user never waits behind a whole long prompt.
+
+<Diagram spec={loop} title="The scheduler loop" caption="One engine step. A request goes round this loop once per output token.">
+  <Step title="Arrive" path="client => queue">A request arrives with its prompt tokens and waits in the queue.</Step>
+  <Step title="Admit" path="queue => sched">Before every step the scheduler checks the three limits: token budget left, sequence cap, free KV memory.</Step>
+  <Step title="Run" path="sched => step => sample">Everything chosen runs in one forward pass: one token for each decoding request, a chunk of each prompt.</Step>
+  <Step title="Stream or loop" path="sample => user" focus="sample -> sched">Each request whose prompt is done gets one token, streamed to the user. If it is not finished, it is back in the next step as a decode.</Step>
+</Diagram>
+
+## Worked example: five requests, one step at a time
+
+Five made-up requests and a toy budget of **{ex.BUDGET} tokens per step** (real servers use thousands, such as 8,192). Each row shows arrival step, prompt and output length (`10p/3o` is 10 prompt tokens, 3 output tokens). The schedule is computed by a small simulator of vLLM's rule: running decodes first, then prompts in arrival order, chunking the one that does not fit.
+
+<Walkthrough title="Continuous batching, budget 16" caption="The step that finishes a prompt also samples that request's first output token (✓). Hover a cell for details.">
+  {ex.cont.notes.map((note, s) => (
+    <WStep title={("Step " + (s + 1))}>
+      <Grid sim={ex.cont} reqs={ex.reqs} budget={ex.BUDGET} at={s} upto={s} />
+      <p><strong>{note.charAt(0).toUpperCase() + note.slice(1)}</strong></p>
+      <p>{extra[s]}</p>
+    </WStep>
+  ))}
+  <WStep title="Same requests, static batching">
+    <Grid sim={ex.stat} reqs={ex.reqs} budget={ex.BUDGET} title="Static batching: groups of 3, prompts padded to the group's longest" />
+    <p>The static server waits for a full group of 3 (step 1 is empty), pads A's and B's prompts to C's 24 tokens, and holds every slot until the group's longest output ends. D and E, which arrived at steps 4 and 5, start only at step {ex.stat.grid[3].findIndex((c) => c.kind === 'prefill') + 1}.</p>
+    <Kpis items={[
+      { label: 'Steps to finish all', value: ("" + (ex.compare[0].steps) + " vs " + (ex.compare[1].steps)), detail: 'continuous vs static', tone: 'primary' },
+      { label: 'Mean latency', value: ("" + (ex.compare[0].meanLatency) + " vs " + (ex.compare[1].meanLatency)), detail: 'steps, arrival to last token', tone: 'good' },
+      { label: 'Padding tokens', value: ("0 vs " + (ex.compare[1].padding)), detail: 'computed for nothing', tone: 'warn' },
+      { label: 'Idle slot-steps', value: ("0 vs " + (ex.compare[1].idle)), detail: 'finished, still holding a slot', tone: 'risk' },
+    ]} />
+  </WStep>
+</Walkthrough>
+
+Both servers did the same useful work ({ex.totalWork} tokens: every prompt token, plus every output token after the first). Continuous batching packs it into fewer steps because nobody waits for a batch boundary. This is the **Orca** idea (*iteration-level scheduling*, OSDI 2022), now standard in vLLM, SGLang and TensorRT-LLM. It depends on [paged KV memory](/learn/kv-cache-management/): requests of very different lengths share a step because each has its own block table, with no padding.
+
+## The rule, and the budget trade
+
+vLLM treats every request the same way: it knows $$N$$ tokens and has computed KV for $$C$$ of them. A step gives it some of the remaining $$N - C$$: one token for a request in decode, as many as fit for a prompt. Each step is limited by:
+
+1. **Token budget**: `max_num_batched_tokens`, for example 8,192 tokens.
+2. **Sequence limit**: `max_num_seqs`.
+3. **KV memory**: new tokens must fit in free (or evictable) KV blocks.
+
+With chunked prefill on, vLLM fills a step with all **running decodes** first, then **prefills** with the leftover budget ([optimization guide](https://docs.vllm.ai/en/latest/configuration/optimization.html)). The same rule at production scale:
+
+<Diagram spec={steps} title="Three consecutive steps in an aggregated server" caption="Budget 8,192 tokens. Decodes go first; a 20,000-token prompt is spread over three steps; a new request joins as soon as there is budget." mode="build">
+  <Step title="Step n" focus="s1, d1, p1">60 decodes take 60 tokens. The remaining 8,132 go to the first chunk of prompt X.</Step>
+  <Step title="Step n+1" focus="s2, d2, p2">One decoding request finished and left. 59 decodes, and 8,133 more tokens of X.</Step>
+  <Step title="Step n+2" focus="s3, d3, p3, p4">X's last 3,735 tokens finish. Prompt Y (600 tokens) arrived and fits in the leftover budget, so it runs whole, at once.</Step>
+</Diagram>
+
+The budget sets the trade-off between the two kinds of user. A small budget (the guide's example is 2,048) keeps steps short, so decoding users get a better **ITL** (inter-token latency); a large one finishes prompts in fewer steps, so new users get a better **TTFT** (time to first token) and the GPU better throughput. The guide recommends budgets above 8,192 for throughput on large GPUs. Try it:
+
+<BudgetCalc />
+
+## Head-of-line blocking: three requests, one queue
+
+Take a prefill-only server with an 8,192-token budget. A 30,000-token prompt arrives; about 50 ms later two short prompts (200 and 800 tokens) arrive behind it.
+
+1. **The long prompt takes whole steps.** It needs four chunks: three full 8,192-token steps and a remainder of 5,424. First come, first served gives it the whole budget in steps 1–3.
+2. **The short prompts wait.** They need only a few milliseconds of compute, but there is no budget left for them until step 4.
+3. **All three share the last step.** Step 4 holds 5,424 + 200 + 800 = 6,424 tokens. The short requests' forward passes end together with the long one's.
+
+The short requests wait for three full steps, a few hundred milliseconds, for work that alone needs a few tens. Chunking bounded each step, but it did not let them jump the queue. Mitigations are policy: a smaller budget, `--long-prefill-token-threshold` (caps a long prompt's share of each step; off by default), `--scheduling-policy priority`, or separate replicas for long prompts. The same effect from the prefill side: [Prefill](/learn/prefill-phase/#head-of-line-blocking).
+
+## Admission, waiting and preemption
+
+- **Queueing.** Requests that do not fit wait. The default order is first-come-first-served; `--scheduling-policy priority` lets each request carry a priority.
+- **Preemption.** If running sequences grow and KV blocks run out, the scheduler evicts some (by default it frees their KV and later recomputes it). Victims see a pause; `vllm:num_preemptions` counts them.
+- **Load signals.** `vllm:num_requests_running`, `vllm:num_requests_waiting` and `vllm:num_requests_waiting_by_reason` show the queue; `vllm:request_queue_time_seconds` shows how long requests waited.
+
+## Sizing with Little's law
+
+**Little's law** links three long-run averages: $$\text{requests in the system} = \text{arrival rate} \times \text{time in the system}$$. A replica receiving 10 requests per second that spends 50 ms on each has on average **0.5 requests in flight**: busy about half the time, and most engine steps run a single request. Try other rates in the second calculator box above.
+
+Averages hide bursts: the head-of-line example above can happen on a replica that is idle most of the time. Size for peak arrival rate and the latency target, not for the average.
+
+## Disaggregation is a scheduling decision
+
+In an aggregated server every step mixes prefill chunks and decodes, and each hurts the other: a big chunk lengthens the step every decoding user waits for (the calculator's ITL), and a big decode batch takes budget from prefills (its TTFT). [DistServe](https://arxiv.org/abs/2401.09670) and [Splitwise](https://arxiv.org/abs/2311.18677) showed that putting the two phases on **separate** machines removes that interference and lets each side be sized for its own target: TTFT for prefill, ITL for decode.
+
+In a disaggregated server, prefill workers run no decodes, so their scheduler only fits prompts into the token budget, and the decode workers batch decodes on their own. A router picks a prefill worker and a decode worker per request; there need not be a fixed 1:1 mapping between them.
+
+## Routing across replicas
+
+With many replicas, *which* replica gets a request matters as much as how each schedules:
+
+- **Least-loaded**: spread queue depth evenly.
+- **Cache-aware**: send a request where its prefix is already cached. When a large share of prompt tokens comes from cache, a routing change that breaks affinity multiplies prefill compute.
+- **Length-aware**: keep very long prompts away from replicas serving latency-sensitive short ones (the cure for the head-of-line example).
+
+<Callout tone="note" title="How this shows up when operating a server">
+- A replica that is "up" but receives no work shows flat request counters: look at routing, not the GPU.
+- Queue time rising while GPU utilization is low points at a scheduler limit (budget, KV, sequence cap) or head-of-line blocking, not a lack of hardware.
+- Adding replicas lowers queueing but also spreads the prefix cache thinner unless routing is cache-aware.
+</Callout>
+
+## Common misconceptions
+
+- **"Batch size is a fixed setting."** With continuous batching it changes every step; the settings are upper limits.
+- **"Bigger batches are always better."** They raise throughput but lengthen each step, which every user in it feels as ITL.
+- **"Chunked prefill fixes long prompts blocking short ones."** It stops one giant step; short requests can still wait behind the chunks, as in the example above.
+
+## Further reading
+
+- [vLLM optimization and tuning](https://docs.vllm.ai/en/latest/configuration/optimization.html) (chunked prefill, preemption)
+- [vLLM engine arguments](https://docs.vllm.ai/en/latest/configuration/engine_args.html) (`max_num_batched_tokens`, `max_num_seqs`, `scheduling_policy`, `long_prefill_token_threshold`)
+- [Sarathi-Serve](https://arxiv.org/abs/2403.02310) (chunked prefill and stall-free batching)
+- [DistServe](https://arxiv.org/abs/2401.09670) · [Splitwise](https://arxiv.org/abs/2311.18677) (prefill/decode disaggregation)
+- [PagedAttention / vLLM](https://arxiv.org/abs/2309.06180)
+- [vLLM metrics](https://docs.vllm.ai/en/latest/usage/metrics.html)
+- [Little's law](https://en.wikipedia.org/wiki/Little%27s_law)

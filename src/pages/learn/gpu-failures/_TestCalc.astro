@@ -1,0 +1,42 @@
+---
+/** Chance that an intermittent fault shows up during a diagnostic run, if faults arrive at random at the observed rate. */
+/** Example rate: one fault every ~3 days (7 in 21 days). */
+const MTBF_H = (21 * 24) / 7;
+---
+
+<figure class="tc" data-testcalc={String(MTBF_H)}>
+  <figcaption class="tc-title">Will a diagnostic run catch an intermittent fault?</figcaption>
+  <label class="tc-in">Test length <input type="range" min="0" max="7" value="2" /> <output></output></label>
+  <div class="tc-bar" aria-hidden="true"><span></span></div>
+  <p class="tc-note"></p>
+  <p class="tc-src">Assumes faults arrive at random (a Poisson process) at an example rate of 7 events in 21 days, one per {(MTBF_H / 24).toFixed(1)} days. P(at least one during the test) = 1 − e<sup>−t / {MTBF_H.toFixed(0)} h</sup>.</p>
+</figure>
+
+<style>
+  .tc { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .tc-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
+  .tc-in { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 0.875rem; }
+  .tc-in input { accent-color: var(--color-primary); }
+  .tc-in output { font-weight: 700; }
+  .tc-bar { height: 16px; margin-top: 12px; border-radius: 999px; background: var(--color-gray-100); overflow: hidden; }
+  .tc-bar span { display: block; height: 100%; background: var(--color-primary); }
+  .tc-note { margin-top: 6px; font-size: 0.9rem; }
+  .tc-src { margin-top: 2px; font-size: 0.75rem; color: var(--color-muted); }
+</style>
+
+<script>
+  const TESTS = [[0.1, 'AGFHC single_pass (~6 min)'], [1, '1 hour'], [2, '2 hours'], [6, 'AGFHC burn-in (~6 h)'], [24, '1 day'], [72, '3 days'], [168, '1 week'], [336, '2 weeks']] as const;
+  for (const fig of document.querySelectorAll<HTMLElement>('[data-testcalc]')) {
+    const mtbf = Number(fig.dataset.testcalc);
+    const input = fig.querySelector('input')!, out = fig.querySelector('output')!, bar = fig.querySelector<HTMLElement>('.tc-bar span')!, note = fig.querySelector('.tc-note')!;
+    const update = () => {
+      const [t, label] = TESTS[Number(input.value)];
+      const p = 1 - Math.exp(-t / mtbf);
+      out.textContent = label;
+      bar.style.width = `${100 * p}%`;
+      note.textContent = `${(100 * p).toFixed(p < 0.1 ? 1 : 0)} % chance the fault appears during the test. ${p < 0.5 ? 'A clean pass says little about intermittent hardware; production logs from the fault are stronger evidence.' : 'Long enough to have a fair chance, but the node is out of service the whole time.'}`;
+    };
+    input.addEventListener('input', update);
+    update();
+  }
+</script>

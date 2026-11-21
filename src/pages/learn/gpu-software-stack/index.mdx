@@ -1,0 +1,229 @@
+---
+layout: ../../../layouts/ArticleLayout.astro
+title: "The GPU software stack"
+short: "Software stack"
+description: "Firmware, kernel driver (amdgpu/KFD, NVIDIA open modules, DKMS), device files, runtime (ROCr/HIP, libcuda/CUDA runtime), libraries and frameworks. Which layer is on the host and which in the container, how versions must match (ROCm matrix, CUDA minor and forward compatibility), and what an 8-GPU MI355X server typically has installed (example versions)."
+updated: "2026-11-10"
+track: fundamentals
+order: 6
+requires: [what-is-a-gpu, gpu-isa-ptx, gpu-boot-and-firmware]
+eyebrow: "Learn · GPU fundamentals"
+---
+import Diagram from '@/components/content/Diagram.astro';
+import Callout from '@/components/content/Callout.astro';
+import Walkthrough from '@/components/content/Walkthrough.astro';
+import WStep from '@/components/content/WStep.astro';
+import Matrix from '@/components/content/Matrix.astro';
+import Kpis from '@/components/content/Kpis.astro';
+import Explorer from '@/components/content/Explorer.astro';
+import Variant from '@/components/content/Variant.astro';
+import stack from './_stack.diagram';
+import launch from './_launch.diagram';
+import * as vendors from './_stacks';
+import Aql from './_Aql.astro';
+import LaunchCalc from './_LaunchCalc.astro';
+import * as L from './_launch';
+
+A call like `torch.matmul` on a GPU passes through six layers of software before the hardware does anything. For operations, one split decides almost everything: **the lower three layers live on the host and are shared by every Pod; the upper three ship inside each container image.** The first group changes only in a maintenance window that stops all GPU work on the node. The second changes with every image rollout.
+
+## The idea first
+
+Picture a restaurant. The **dining room** (the container image) is redecorated whenever the owner likes: menu, waiters, recipes. The **kitchen equipment and gas line** (the host's driver and firmware) is shared by every table and only changes when the restaurant closes for maintenance.
+
+| Layer | Restaurant picture | The question it answers |
+| --- | --- | --- |
+| Framework (PyTorch, vLLM) | the customer's order | "What maths does the model need?" |
+| Libraries (hipBLASLt, RCCL) | the recipe book | "Which GPU program does this maths fastest, for this shape?" |
+| Runtime (HIP, ROCr) | the waiter who writes the ticket | "How do I hand the GPU a program and its inputs?" |
+| Device files | the kitchen door | "Who may talk to the GPU at all?" |
+| Kernel driver | the kitchen manager | "Who owns which memory and which queue?" |
+| Firmware | the stove's own controls | "Is the hardware powered, trusted, and working?" |
+
+Where the picture breaks: after the first order, the waiter does not walk through the manager any more. The runtime pins a **ticket rail** (a queue in memory that the GPU reads) and a **bell** (a doorbell) once, then drops every order straight onto the rail. The driver is needed to set things up, not for each launch.
+
+<Diagram spec={stack} title="Layers, top to bottom" caption="AMD names first, NVIDIA second." />
+
+Pick a vendor to see which layer comes from where. The one real difference is NVIDIA's `libcuda.so`, the user-space half of the driver: it must come from the host.
+
+<Explorer id="stack-vendor" options={[{ key: 'vendor', label: 'Vendor', default: 'amd', values: [{ value: 'amd', label: 'AMD (MI355X)' }, { value: 'nvidia', label: 'NVIDIA (GB300)' }] }]} variants={[{ match: { vendor: 'amd' }, id: 'stack-amd' }, { match: { vendor: 'nvidia' }, id: 'stack-nvidia' }]}>
+  <Variant id="stack-amd">
+    <Diagram spec={vendors.amd} title="AMD: everything above the device files is in the image" />
+  </Variant>
+  <Variant id="stack-nvidia">
+    <Diagram spec={vendors.nvidia} title="NVIDIA: the image, plus host libraries mounted in" />
+  </Variant>
+</Explorer>
+
+## Worked example: one matrix multiply, from PyTorch to the doorbell
+
+Follow one real-sized call: the query projection of gpt-oss-120b over a 4,085-token prompt (hidden size 2,880 in, 64 heads × 64 = 4,096 out), in BF16, on one MI355X in SPX mode. The tile size (256 × 256) and 256 threads per workgroup are **illustrative**: the library picks its own kernel. Every number below is computed from the shape.
+
+<Diagram spec={launch} title="One launch, message by message" autoSteps caption="The queue was created once when the process started (ioctl calls to the driver). Nothing in this sequence enters the Linux kernel." />
+
+<Walkthrough title="q = x @ W_q on one MI355X" caption={("M = " + (L.M) + ", K = " + (L.K) + ", N = " + (L.N) + ", BF16; tile " + (L.tile) + " × " + (L.tile) + " and " + (L.threads) + " threads per workgroup are assumptions for illustration.")}>
+  <WStep title="1 · PyTorch: a matrix multiply on a GPU tensor">
+    <Kpis items={[
+      { label: 'x (activations)', value: L.bytes.A, detail: ("" + (L.M) + " × " + (L.K) + " BF16") },
+      { label: 'W_q (weights)', value: L.bytes.B, detail: ("" + (L.K) + " × " + (L.N) + " BF16") },
+      { label: 'q (output)', value: L.bytes.C, detail: ("" + (L.M) + " × " + (L.N) + " BF16") },
+      { label: 'Work', value: ("" + (L.gflop) + " GFLOP"), detail: '2 × M × N × K', tone: 'primary' },
+    ]} />
+    PyTorch sees two tensors that live in GPU memory (the ROCm build reuses the `torch.cuda` names, so the device is `cuda:0`) and dispatches the multiply to its GPU implementation, which calls the BLAS library. Python never touches the numbers; it only decides *what* to run.
+  </WStep>
+  <WStep title={("2 · hipBLASLt: split the output into " + (L.wgs) + " tiles")}>
+    <Matrix title={("Output q cut into " + (L.tilesM) + " × " + (L.tilesN) + " tiles: one workgroup each (number = workgroup ID)")} rows={Array.from({ length: L.tilesM }, (_, r) => ("rows " + (r * L.tile) + "–" + (Math.min(L.M, (r + 1) * L.tile) - 1)))} data={Array.from({ length: L.tilesM }, (_, r) => Array.from({ length: L.tilesN }, (_, c) => r * L.tilesN + c))} scale="none" digits={0} highlight={{ rows: [L.tilesM - 1] }} note={("The last tile row covers only " + (L.lastRows) + " of " + (L.tile) + " rows: " + (L.fillPct) + "% of the tile area is useful work.")} />
+    The library picks a kernel (a compiled GPU function in the image, built for `gfx950`) that suits this shape. Each **workgroup** (a team of threads that share fast LDS memory) computes one 256 × 256 tile of the output, reading a 256-row strip of x and a 256-column strip of W<sub>q</sub>. {L.tilesM} × {L.tilesN} = **{L.wgs} workgroups**: on MI355X, exactly one per compute unit.
+  </WStep>
+  <WStep title="3 · HIP: pack the arguments, point at the code">
+    <Aql highlight={['kernel_object', 'kernarg_address']} notes={false} />
+    The HIP runtime copies the kernel's arguments (the GPU addresses of x, W<sub>q</sub> and q, and M, N, K) into a small **kernarg buffer** in memory the GPU can read, and looks up the **kernel object**: the address of the compiled code's descriptor. Two pointers in the packet carry them.
+  </WStep>
+  <WStep title="4 · ROCr: write a 64-byte AQL packet into the ring">
+    <Aql highlight={['header', 'setup', 'workgroup_size_x', 'grid_size_x', 'group_segment_size']} />
+    The runtime fills the next free slot of the process's **user-mode queue**, a ring buffer of 64-byte packets in memory. `grid_size_x` counts **threads**, not workgroups: {L.wgs} × {L.threads} = {L.gridX.toLocaleString('en-US')}. `group_segment_size` is the LDS each workgroup needs (64 KiB here, of the CU's 160 KB; also illustrative). The `header` is written last, so the GPU never reads a half-written packet.
+  </WStep>
+  <WStep title="5 · Ring the doorbell: no system call">
+    <Kpis items={[
+      { label: 'System calls', value: '0', tone: 'good' },
+      { label: 'Packet', value: '64 bytes', detail: 'one ring slot' },
+      { label: 'Doorbell', value: '1 store', detail: 'the new write index' },
+    ]} />
+    The runtime writes the queue's new write index to the **doorbell**, a memory-mapped register on the GPU that the driver mapped into the process when the queue was created. This is an ordinary store instruction. The Linux kernel and the `amdgpu` driver do not see this launch at all, which is why a launch costs microseconds and why a hung kernel shows up only as a queue that stops moving.
+  </WStep>
+  <WStep title={("6 · Command processor: " + (L.wgs) + " workgroups over " + (L.xcds) + " XCDs")}>
+    <Matrix title="Workgroup IDs in the order each XCD receives them (SPX, round-robin)" rows={L.xcdRows} cols={L.rrCols} data={L.rr} scale="none" digits={0} highlight={{ cols: [0] }} note={("…and so on: each XCD gets " + (L.perXcd) + " workgroups, one per CU (" + (L.cusPerXcd) + " CUs per XCD) in an even spread.")} />
+    The GPU's command processor reads the packet and hands workgroups out **round-robin over the 8 XCDs** (AMD documents this for SPX mode): workgroup 0 to XCD 0, 1 to XCD 1, … 8 back to XCD 0. Inside each XCD, a workgroup's {L.threads} threads run as {L.wavesPerWg} **wavefronts** of 64 on one CU, on its matrix cores. Neighbouring tiles land on different XCDs, so they do not share an L2 cache: one reason kernels for MI355X care about workgroup order.
+  </WStep>
+  <WStep title="7 · Done: the completion signal">
+    <Kpis items={[
+      { label: 'Floor at BF16 peak', value: ("" + (L.peakUs) + " µs"), detail: ("" + (L.gflop) + " GFLOP at ~2.5 PFLOPS"), tone: 'primary' },
+      { label: 'Workgroups', value: String(L.wgs), detail: ("" + (L.perCu) + " per CU") },
+      { label: 'Wavefronts', value: String(L.wgs * L.wavesPerWg), detail: ("" + (L.wavesPerWg) + " per workgroup") },
+    ]} />
+    When the last workgroup finishes, the command processor decrements the packet's **completion signal**, a value in memory. The host thread (or the next packet, through a barrier bit) waits on it. Even at the vendor's peak rate this multiply takes at least {L.peakUs} µs; real kernels reach a fraction of peak. One forward pass of a model is many such launches (several per layer), which is why serving engines such as vLLM can capture them into graphs (CUDA graphs, HIP graphs on ROCm) and replay them with less launch overhead.
+  </WStep>
+</Walkthrough>
+
+Change the shape and see how the launch changes. Short prompts or narrow outputs leave most of the 256 CUs idle: one reason a single prefill uses the GPU badly and batching helps.
+
+<LaunchCalc />
+
+## The layers on an 8-GPU MI355X server
+
+An illustrative example node (Ubuntu 24.04, kernel `6.8.0-example`); every version below is a made-up example:
+
+| Layer | AMD, as installed | NVIDIA equivalent | Where | Changed by |
+| --- | --- | --- | --- | --- |
+| Firmware on the card | IFWI `113-EXAMPLE-0001`, PLDM bundle `01.00.00.00` | VBIOS, HGX/NVL72 firmware bundle | GPU flash | flashing via BMC, then a cold power cycle |
+| Firmware loaded by the driver | `amdgpu-dkms-firmware` 30.10.0 (several hundred microcode files in `/lib/firmware/updates/amdgpu/`) | GSP firmware `gsp_*.bin`, part of the driver release | host disk | package update, then driver reload |
+| Kernel driver | `amdgpu` `6.14.0.30100000` = AMD GPU Driver 30.10.0, built by DKMS | `nvidia`, `nvidia-uvm`, `nvidia-modeset`, `nvidia-drm`, `nvidia-peermem` (open modules) | host kernel | package + rebuild, module reload or reboot |
+| Device files | `/dev/kfd`, `/dev/dri/renderD*` | `/dev/nvidiactl`, `/dev/nvidia0…`, `/dev/nvidia-uvm`, `/dev/nvidia-caps/*` | host, passed into containers | driver |
+| Runtime | ROCr (HSA runtime) + HIP runtime | `libcuda.so` (driver API) + `libcudart` (CUDA runtime) | container (AMD); NVIDIA `libcuda` comes from the **host** | image |
+| Libraries | hipBLASLt, rocBLAS, RCCL, MIOpen, Composable Kernel | cuBLAS(Lt), cuDNN, NCCL, CUTLASS | container | image |
+| Frameworks | PyTorch (ROCm build), vLLM | PyTorch (CUDA build), vLLM, TensorRT-LLM | container | image |
+
+The host also has ROCm **7.0.0** installed as packages (for example `amd-smi`, RCCL and RVS). Those serve host tools like `amd-smi` and `rocminfo`; Pods do not use them. `amd-smi version` prints the whole chain in one line:
+
+```text
+AMDSMI Tool: 26.0.0+example | AMDSMI Library version: 26.0.0 | ROCm version: 7.0.0 | amdgpu version: 6.14.0.30100000
+```
+
+## Firmware
+
+Covered in depth in [boot and firmware](/learn/gpu-boot-and-firmware/). The key point for the stack: AMD "firmware" is two artefacts. The **IFWI/PLDM bundle** lives on the card and the PSP boots from it. The **microcode package** lives on the host and the driver hands it to the PSP at every driver load. Both appear in the ROCm compatibility matrix. On NVIDIA, the GSP firmware ships with each driver release and must match the kernel modules exactly.
+
+## Kernel driver
+
+**AMD.** One module, `amdgpu`, drives the hardware. Inside it, **KFD** (the kernel fusion driver) is the compute interface ROCm uses: `/dev/kfd`, user-mode queues, the topology in `/sys/class/kfd`. On a typical install `amdgpu` comes from AMD's `amdgpu-dkms` package, not from the distribution kernel, so the GPU driver can be newer than the distribution kernel. `lsmod` shows the package brings its own copies of shared graphics helpers (`amdttm`, `amddrm_buddy`, `amd_sched`, `amdxcp`, and `amdkcl`, a compatibility layer for older kernels).
+
+**DKMS** (Dynamic Kernel Module Support) compiles out-of-tree modules for each installed kernel. `dkms status` on the example node:
+
+```text
+amdgpu/6.14.0-example, 6.8.0-example-generic, x86_64: installed (Original modules exist) ...
+mlnx-ofa_kernel/24.10.example, 6.8.0-example-generic, x86_64: installed ...
+```
+
+The NVIDIA ConnectX stack (`mlnx-ofa_kernel`, `xpmem`, `srp`, `iser`) is built the same way. The consequence: **a kernel update must rebuild every DKMS module** before the next boot, or the node comes up without a GPU or RDMA driver. (`dkms status` also prints "Differences between built and installed modules" for these modules.)
+
+Driver behaviour is tuned by module parameters and the kernel command line. A typical MI355X host carries `amdgpu.noretry=1` (GPU page faults are not retried), `iommu=pt` (IOMMU in pass-through for host devices), `numa_balancing=disable` and `pcie_aspm=off` (no PCIe link power saving). Current values are in `/sys/module/amdgpu/parameters/`.
+
+**NVIDIA.** The driver is several modules: `nvidia.ko` (core), `nvidia-uvm.ko` (unified memory), `nvidia-modeset.ko` and `nvidia-drm.ko` (display, also used for some memory sharing), and `nvidia-peermem.ko` (lets RDMA NICs access GPU memory). NVIDIA now ships **open** kernel modules (MIT/GPLv2). Blackwell requires them: "the proprietary drivers are unsupported on these platforms". On Ubuntu and RHEL the package is `nvidia-open`, installed through DKMS or as precompiled modules.
+
+## Device files and the container boundary
+
+User space reaches the driver only through character devices (listed in [boot and firmware](/learn/gpu-boot-and-firmware/)). A container sees a GPU only if its device files are added to the container. On current Kubernetes that typically happens with **CDI** (Container Device Interface): when a Pod starts, the DRA driver writes a small spec under `/var/run/cdi/` naming the device files (and, on NVIDIA, host libraries) to inject; containerd reads it when it creates the container. After that the container uses the GPU directly; the DRA driver is not on the data path. See [DRA on the node](/learn/dra-on-the-node/).
+
+On the host, `/dev/kfd` is `crw-rw-rw-` and group `render`; the render nodes are group `render` too. Inside a container, the process must be allowed to open them (device cgroup and group membership), which CDI takes care of.
+
+**The big AMD/NVIDIA difference at this boundary** (the [vendor explorer](#the-idea-first) above): on AMD everything above the device files is in the image, and the host contributes only the kernel driver and device files. On NVIDIA, `libcuda.so` must match the kernel module **exactly**, so the NVIDIA Container Toolkit (or the CDI spec it generates) mounts the host's `libcuda.so`, `nvidia-smi` and related libraries into each container; the image brings the CUDA runtime (`libcudart`) and libraries.
+
+## Runtime, libraries, frameworks
+
+- **ROCr** is AMD's implementation of the HSA runtime. It opens `/dev/kfd`, enumerates agents (the CPUs and GPUs that `rocminfo` prints), allocates memory and creates queues.
+- **HIP** is the CUDA-like programming interface on top. `hipMalloc`, `hipMemcpy` and kernel launches go through it. Code is compiled for a specific GPU target (`gfx950` for MI355X); an image without `gfx950` code objects will not run on an MI355X. See [PTX and AMDGCN ISA](/learn/gpu-isa-ptx/).
+- **CUDA** has two user-space APIs: the **driver API** in `libcuda` (from the host) and the **runtime API** in `libcudart` (from the image). NVIDIA code usually ships PTX as well as compiled machine code, so the driver can compile for newer GPUs at load time.
+- **Libraries** do the heavy lifting: BLAS for matrix multiplies (hipBLASLt, cuBLASLt), collectives for multi-GPU communication (RCCL, NCCL), attention kernels.
+- **Frameworks**: PyTorch has separate ROCm and CUDA builds; vLLM runs on both.
+
+## Compatibility: which versions may meet
+
+### AMD: the ROCm compatibility matrix
+
+Each ROCm release publishes a matrix of supported GPUs, OS kernels, **AMD GPU Driver** versions and **PLDM firmware** versions. An entry for the MI350 series has this shape (illustrative values for the example ROCm 7.0.0):
+
+- a range of drivers, for example `30.10.0` (newest) back to `30.0.0`;
+- a minimum PLDM bundle, for example `01.00.00.00` or later;
+- the supported OS releases and kernels, for example Ubuntu 24.04.
+
+The example node runs driver 30.10.0, PLDM 01.00.00.00 and Ubuntu 24.04: on the matrix. The driver version appears twice in different forms: `30.10.0` in AMD's documents and `6.14.0.30100000` in `modinfo`, package names and the DRA attribute `driverVersionFull`. The suffix `30100000` encodes 30.10.0.
+
+The rule for containers: the **ROCm version inside the image** must be supported with the **driver on the host**. Several ROCm versions can run side by side in different Pods as long as each one lists the host driver. Newer ROCm releases list newer drivers, so an image upgrade to a much newer ROCm may need a host driver upgrade first.
+
+### NVIDIA: minor version and forward compatibility
+
+NVIDIA defines three ways a CUDA application meets a driver:
+
+1. **Backward compatibility**: an application built with an older CUDA toolkit runs on a newer driver. Always.
+2. **Minor version compatibility** (since CUDA 11): an application built with any CUDA 13.x runs on any driver of release 580 or later, "with limited feature-set". NVIDIA's example runs a CUDA 13.4 application on driver 580.65.06, which shipped with CUDA 13.0.
+3. **Forward compatibility** (data center GPUs only): the `cuda-compat-<major>-<minor>` package contains a newer `libcuda.so` that works with an older kernel module, so an application built for a newer CUDA major release runs on an older driver. You put it on `LD_LIBRARY_PATH`. For example, `cuda-compat-13-5` contains the 620 driver libraries.
+
+A system that pins a 580-series driver with CUDA 13.0, for example, still runs CUDA 13.x images through minor version compatibility. Two more NVIDIA rules: the open kernel modules must be used with GSP firmware and user-space libraries from the **same** driver release, and for drivers before 620 the **Fabric Manager** version must match the driver version.
+
+## Who installs what
+
+- **Host layers.** Firmware, OS, kernel, `amdgpu-dkms`, ROCm host tools and the NIC stack are usually installed by the provisioning system, not by Kubernetes. The AMD GPU Operator can manage the driver through KMM, but it can also run with driver management turned off (`driver.enable: false`), so the operator never loads or replaces the kernel module.
+- **What Kubernetes adds.** The operator's DRA driver, node labeller and metrics exporter, all running as Pods, all user space.
+- **NVIDIA differs.** NVIDIA's GPU Operator can install the driver as a container on the node, or use a driver preinstalled on the host (for example DGX OS).
+
+## What an upgrade disrupts
+
+Least to most disruptive:
+
+| Component | Disrupts running GPU work? | Reach |
+| --- | --- | --- |
+| DRA driver | no for running work | new claims on one node at a time |
+| GPU operator | normally no | — |
+| ROCm / user space on the host | host tools only; Pods bring their own | one node |
+| GPU kernel driver | yes, module reload or reboot | every GPU on the node |
+| GPU firmware | yes, reboot plus a full power cycle | every GPU on the node |
+| Host kernel, NIC, OS | yes, reboot | every GPU on the node |
+
+A kernel module cannot be unloaded while any process holds the GPU, and an AMD driver reload resets every GPU in the hive. So every row from the driver down means: drain the node's GPU workloads first.
+
+<Callout tone="warn" title="Read-only">`dpkg -l`, `modinfo`, `dkms status`, `amd-smi version` and reading `/sys` are safe on production nodes. `modprobe -r amdgpu`, `apt upgrade` of GPU packages or a DKMS rebuild are maintenance-window actions.</Callout>
+
+## Common misconceptions
+
+- "**The container brings its own driver.**" It brings user space only. The kernel module is shared and must be compatible with every image on the node.
+- "**`nvidia-smi` shows the CUDA version installed.**" It shows the newest CUDA version the **driver** supports, not the toolkit in any image.
+- "**ROCm version equals driver version.**" They are separate products with a support matrix between them (ROCm 7.0.0 and driver 30.10.0 in the example).
+- "**Upgrading the image is always safe.**" Not if the new ROCm or CUDA needs a newer host driver than the node has.
+
+## Further reading
+
+- [ROCm compatibility matrix](https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html)
+- [AMD GPU driver (amdgpu) documentation](https://instinct.docs.amd.com/projects/amdgpu-docs/en/latest/) · [HIP](https://rocm.docs.amd.com/projects/HIP/en/latest/) · [amdgpu driver core (kernel docs)](https://docs.kernel.org/gpu/amdgpu/driver-core.html)
+- [CUDA compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/) · [minor version compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html) · [forward compatibility](https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html)
+- [NVIDIA driver kernel modules](https://docs.nvidia.com/datacenter/tesla/driver-installation-guide/kernel-modules.html) · [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/)
+- [Container Device Interface](https://github.com/cncf-tags/container-device-interface)
+- [ROCR-Runtime `hsa.h`: `hsa_kernel_dispatch_packet_t`](https://github.com/ROCm/ROCR-Runtime/blob/amd-staging/runtime/hsa-runtime/inc/hsa.h) (the AQL packet fields)

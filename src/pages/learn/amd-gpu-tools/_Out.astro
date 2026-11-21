@@ -1,0 +1,64 @@
+---
+/**
+ * Example command output with the lines that matter highlighted and numbered,
+ * then a numbered legend saying what each one means. Server-rendered, no JS.
+ * Used by the operations-track pages (import from '../amd-gpu-tools/_Out.astro').
+ *
+ *   <Out host="gpu-node-1" cmd="amd-smi list -e -g 4" out={text}
+ *        marks={[{ at: 'BDF:', note: 'PCI address…' }, { at: 'OAM_ID', note: '…', tone: 'warn' }]} />
+ *
+ * `at` is a substring; the first line containing it (after the previous mark's line) is marked.
+ */
+type Tone = 'note' | 'good' | 'warn' | 'risk';
+interface Mark { at: string; note: string; tone?: Tone }
+interface Props { host?: string; cmd: string; out: string; marks?: Mark[]; caption?: string }
+const { host, cmd, out, marks = [], caption } = Astro.props;
+const lines = out.replace(/\n$/, '').split('\n');
+const byLine = new Map<number, { n: number; tone: Tone }>();
+let from = 0;
+marks.forEach((m, i) => {
+  const at = lines.findIndex((l, k) => k >= from && l.includes(m.at));
+  if (at < 0) throw new Error(`_Out: mark "${m.at}" not found in output of ${cmd}`);
+  byLine.set(at, { n: i + 1, tone: m.tone ?? 'note' });
+  from = at + 1;
+});
+---
+
+<figure class="ao">
+  <div class="ao-term">
+    <div class="ao-bar">{host ?? 'shell'}</div>
+    <pre><code><span class="ao-cmd"><span class="ao-p">$ </span>{cmd}</span>{lines.map((l, k) => {
+      const m = byLine.get(k);
+      return m ? <span class:list={['ao-l', 'is-on', `t-${m.tone}`]}>{l}<span class="ao-n" aria-label={`note ${m.n}`}>{m.n}</span></span> : <span class="ao-l">{l}</span>;
+    })}</code></pre>
+  </div>
+  {marks.length > 0 && (
+    <ol class="ao-notes">
+      {marks.map((m) => <li class={`t-${m.tone ?? 'note'}`} set:html={m.note} />)}
+    </ol>
+  )}
+  {caption && <figcaption>{caption}</figcaption>}
+</figure>
+
+<style>
+  .ao { margin: 16px 0; }
+  .ao-term { border-radius: 10px; overflow: hidden; background: var(--code-bg); color: var(--code-fg); box-shadow: 0 0 0 1px var(--code-border); }
+  .ao-bar { padding: 6px 12px; background: var(--code-bar); font-size: 0.75rem; color: var(--code-muted); }
+  .ao pre { margin: 0; padding: 10px 14px; overflow-x: auto; font-family: var(--font-family-mono); font-size: 0.8125rem; line-height: 1.55; }
+  .ao-cmd, .ao-l { display: block; white-space: pre; }
+  .ao-cmd { color: var(--code-bright); }
+  .ao-p { color: var(--code-prompt); user-select: none; }
+  .ao-l { color: var(--code-muted); }
+  .ao-l.is-on { margin: 0 -14px; padding: 0 14px; color: var(--code-bright); background: rgb(128 159 255 / 0.16); box-shadow: inset 3px 0 0 rgb(128 159 255); }
+  .ao-l.t-good { background: rgb(39 201 63 / 0.14); box-shadow: inset 3px 0 0 rgb(39 201 63); }
+  .ao-l.t-warn { background: rgb(255 189 46 / 0.16); box-shadow: inset 3px 0 0 rgb(255 189 46); }
+  .ao-l.t-risk { background: rgb(255 95 86 / 0.18); box-shadow: inset 3px 0 0 rgb(255 95 86); }
+  .ao-n { display: inline-block; min-width: 18px; margin-left: 10px; padding: 0 5px; border-radius: 999px; background: rgb(128 159 255); color: rgb(13 15 18); font-size: 0.6875rem; font-weight: 700; text-align: center; line-height: 1.5; }
+  .ao-l.t-good .ao-n { background: rgb(39 201 63); }
+  .ao-l.t-warn .ao-n { background: rgb(255 189 46); }
+  .ao-l.t-risk .ao-n { background: rgb(255 95 86); }
+  .ao-notes { margin: 10px 0 0; padding-left: 26px; font-size: 0.9rem; }
+  .ao-notes li { margin: 4px 0; }
+  .ao-notes li::marker { font-weight: 700; color: var(--color-primary); }
+  .ao figcaption { margin-top: 6px; font-size: 0.8125rem; color: var(--color-muted); }
+</style>
