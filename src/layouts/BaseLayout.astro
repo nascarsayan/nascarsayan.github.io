@@ -8,7 +8,7 @@ import { SITE } from '@/config/site';
 /** toc: the page has a contents rail; the header shows its toggle (left of the name). */
 interface Props { title?: string; description?: string; htmlClass?: string; toc?: boolean }
 const { title, description = SITE.description, htmlClass, toc = false } = Astro.props;
-const fullTitle = title ? `${title} • ${SITE.title}` : SITE.title;
+const fullTitle = title && title !== SITE.title ? `${title} • ${SITE.title}` : SITE.title;
 ---
 
 <!doctype html>

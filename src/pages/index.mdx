@@ -28,7 +28,7 @@ Cluster platform at Cerebras, lately GPUs. Use AI effectively to constantly swit
 <Badge>k8s</Badge> <Badge>Helm</Badge> <Badge>Argo CD</Badge> <Badge>Go</Badge> <Badge>Rust</Badge> <Badge>Ceph</Badge> <Badge>Akeyless</Badge> <Badge>Envoy Gateway</Badge> <Badge>NVIDIA GPU Operator</Badge>
 
 - Owned **Akeyless secrets management** end to end: automated install, injector delivery, safe across blue-green upgrades and domain changes. Scale-tested to **2,000 pods**; on-call runbooks.
-- Moved core services off imperative installs to **Helm + Argo** (the cluster's control-plane service, the workload operator, a network health-check mesh, an admission webhook → Kyverno). Built a **Kubernetes state-diff tool** (Go) + parity harness proving both installs match.
+- Moved core services off imperative installs to **Helm + Argo** (control-plane service, workload operator, network health-check mesh, admission webhook → Kyverno). Built a **Kubernetes state-diff tool** (Go) + parity harness proving both installs match.
 - **Blue-green upgrades**: per-batch node groups, clear failure states, safe cancel, no duplicate runs.
 - Built the **node readiness controller** + coordinated containerd/kubelet restarts; fixed Ceph restarts corrupting CephFS mounts; NGINX → Envoy Gateway; registry health checks via HAProxy.
 - **GPU bring-up for disaggregated inference**: NVIDIA GPU Operator as a platform app, ARM64 ports for DGX Spark, simulated NVL72 racks to test without hardware, AMD MI355X node onboarding.
@@ -92,11 +92,11 @@ Single Rust CLI (~50k lines, 230+ commits) replacing my pile of shell and Python
 
 Built in a week to explain clusters: typed specs, auto layout, animated step-through flows. 150 diagrams: reviews, incidents, GPU explainers; teammates cloned it.
 
-<Badge tone="primary">Astro</Badge> <Badge tone="primary">TypeScript</Badge> <Badge tone="primary">Go (TALA layout)</Badge> <Badge tone="primary">Bun</Badge>
+<Badge tone="primary">Astro</Badge> <Badge tone="primary">TypeScript</Badge> <Badge tone="primary">Custom layouts + lint</Badge> <Badge tone="primary">Bun</Badge>
 
 <Fold summary="More detail">
 
-- Diagrams are typed TypeScript specs; a Go tool (TALA) lays them out with real font metrics, and the build fails on dangling references or diagrams that would need scrolling.
+- Diagrams are typed TypeScript specs. TALA gave the first layouts; our own column, sequence and nested layouts, components and validators took over, sized with real font metrics. The build fails on short or crossing arrows, overlapping labels, dangling references or diagrams that would need scrolling.
 - Step-through walkthroughs with play/next, packets colored by response (2xx, 4xx, 5xx, hang), speed control and narration.
 - 30+ components: explorers, decision trees, matrices, scrollytelling, terminal replays. Plus a comments server, search, glossary with shareable links, light/dark, and wiki export.
 - Used for a before/after flow atlas of the control-plane service, Helm → Argo reviews, an incident write-up, GPU operator comparisons and simulated NVL72 racks.
@@ -163,4 +163,4 @@ Cisco CCNA Routing & Switching, CCENT
 </Card>
 </Cards>
 
-The [PDF](/about/resume.pdf) is a printable copy of this page. Last updated Nov 2026.
+The [PDF](/about/resume.pdf) is the one-page version of this page. Last updated Nov 2026.

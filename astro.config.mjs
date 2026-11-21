@@ -16,6 +16,8 @@ export default defineConfig({
   outDir: 'dist',
   // Every page is <slug>/index.html; GitHub Pages serves /slug/ directly and redirects /slug to /slug/.
   trailingSlash: 'always',
+  // About is the home page; keep old /about/ links working (static meta-refresh page).
+  redirects: { '/about/': '/' },
   build: { format: 'directory' },
   // Fetch a page while its link is hovered (or focused), so the click opens it at once.
   prefetch: { prefetchAll: true, defaultStrategy: 'hover' },

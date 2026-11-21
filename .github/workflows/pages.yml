@@ -34,6 +34,12 @@ jobs:
         with:
           bun-version: 1.4.4
       - run: bun install --frozen-lockfile
+      # Resume PDF lint (scripts/build-pdf.ts --check): one A4 page, fill, margins, line fill, scale,
+      # metadata, web overflow. Uses the runner's Chrome and poppler's pdfinfo/pdftotext.
+      - run: sudo apt-get install -y --no-install-recommends poppler-utils
+      - run: bun run resume:check
+        env:
+          CHROME: /usr/bin/google-chrome
       - run: bun run build
       - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
         with:

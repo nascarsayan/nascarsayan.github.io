@@ -12,11 +12,11 @@ export const prerender = true;
 interface Heading { depth: number; slug: string; text: string }
 interface Entry { u: string; t: string; s: string; x: string }
 
-const mods = import.meta.glob<{ frontmatter: { title: string }; getHeadings: () => Heading[] }>(['/src/pages/*/index.mdx', '/src/pages/learn/*/index.mdx', '/src/pages/about.mdx'], { eager: true });
-const raws = import.meta.glob<string>(['/src/pages/*/index.mdx', '/src/pages/learn/*/index.mdx', '/src/pages/about.mdx'], { eager: true, query: '?raw', import: 'default' });
+const mods = import.meta.glob<{ frontmatter: { title: string }; getHeadings: () => Heading[] }>(['/src/pages/*/index.mdx', '/src/pages/learn/*/index.mdx', '/src/pages/index.mdx'], { eager: true });
+const raws = import.meta.glob<string>(['/src/pages/*/index.mdx', '/src/pages/learn/*/index.mdx', '/src/pages/index.mdx'], { eager: true, query: '?raw', import: 'default' });
 const diagrams = import.meta.glob<Record<string, unknown>>(['/src/pages/*/_*.diagram.ts', '/src/pages/learn/*/_*.diagram.ts'], { eager: true });
 
-const urlOf = (path: string) => (path.endsWith('/about.mdx') ? '/about/' : path.startsWith('/src/pages/learn/') ? `/learn/${path.split('/').at(-2)}/` : `/${path.split('/').at(-2)}/`);
+const urlOf = (path: string) => (path === '/src/pages/index.mdx' ? '/' : path.startsWith('/src/pages/learn/') ? `/learn/${path.split('/').at(-2)}/` : `/${path.split('/').at(-2)}/`);
 
 /** MDX/Markdown source -> plain text, keeping component string props like title="…". */
 function plain(src: string): string {

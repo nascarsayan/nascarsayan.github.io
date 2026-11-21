@@ -7,7 +7,9 @@
     "dev": "node scripts/lint-diagram-css.mjs && node scripts/build-tala.mjs && astro dev",
     "build": "node scripts/lint-diagram-css.mjs && node scripts/build-tala.mjs && astro build && node scripts/lint-rendered.mjs dist",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "resume": "bun scripts/build-pdf.ts",
+    "resume:check": "bun scripts/build-pdf.ts --check"
   },
   "dependencies": {
     "@astrojs/mdx": "8.1.2",

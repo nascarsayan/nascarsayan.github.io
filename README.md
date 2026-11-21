@@ -37,10 +37,25 @@ One-time repository setting: **Settings > Pages > Build and deployment > Source:
 This is a user site served from the domain root, so `astro.config.mjs` keeps `base: '/'`. Pages are built as
 `<slug>/index.html` with `trailingSlash: 'always'`; GitHub Pages serves `/slug/` and redirects `/slug` to it.
 
+## Resume PDF
+
+`/about/resume.pdf` is the one-page, ATS-friendly CV. Source: `resume/index.html` (its print stylesheet);
+keep its wording in sync with the About page (`src/pages/index.mdx`). After editing it:
+
+```bash
+bun run resume        # picks the largest text scale that fits one A4 page, writes public/about/resume.pdf, lints
+bun run resume:check  # lint only (CI runs this)
+```
+
+Needs Chrome (`CHROME=/path/to/chrome` if not found) and poppler (`pdfinfo`, `pdftotext`). Rules: exactly one
+page, text fills >= 97% of the page, nothing crosses the margins, no stub lines (< 85% of the width) in wrapped
+text, scale stays in 0.9–1.2 (trim content instead), only a Title in the PDF metadata, and the HTML does not
+overflow at 360 / 768 / 1280 px. Commit the PDF and `resume/pdf-scale.txt`.
+
 ## Add a page
 
 See [docs/adding-pages.md](docs/adding-pages.md) for the page templates in `templates/` (article, diagram
-page, simple page, Learn page, standalone app). Articles need nothing else: the home page and search pick them
+page, simple page, Learn page, standalone app). Articles need nothing else: search picks them
 up from frontmatter. Folders under `src/pages/` whose name starts with `_` are not built or listed.
 
 Components (`src/components/content/`): `Diagram` + `Step`, `Explorer` + `Variant`, `Kpis`, `Callout`,

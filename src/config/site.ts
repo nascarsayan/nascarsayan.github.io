@@ -20,10 +20,9 @@ export const SITE = {
 export type NavLink = { label: string; href: string; description?: string };
 
 export const NAV: NavLink[] = [
-  { label: 'Pages', href: '/' },
+  { label: 'About', href: '/' },
   { label: 'Learn', href: '/learn/' },
   { label: 'Glossary', href: '/glossary/' },
-  { label: 'About', href: '/about/' },
 ];
 
 export const SOCIALS = [

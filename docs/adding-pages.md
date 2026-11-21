@@ -15,7 +15,7 @@ cp -r templates/article src/pages/my-slug
 
 - Edit the frontmatter in `index.mdx`: `title`, `description`, `updated` (`YYYY-MM-DD`), optional `eyebrow` and `links`.
 - Replace the body. Edit or delete `_flow.diagram.ts`.
-- Listed on the home page and in search automatically, from the frontmatter. The build fails if `title`, `description` or `updated` is missing.
+- Picked up by search automatically, from the frontmatter. The home page is the About page and lists nothing: link new pages from it, or add a `NAV` entry in `src/config/site.ts`. The build fails if `title`, `description` or `updated` is missing.
 
 ### Diagram page
 
@@ -41,7 +41,7 @@ cp -r templates/standalone-app src/pages/my-app
 - Edit the title, the markup, the `<style>` and the `<script>` in `index.astro`.
 - Keep `BaseLayout`, so the header, footer and theme still apply.
 - Write untrusted text with `textContent`, never `innerHTML`.
-- Not listed on the home page or in search. Link to it from another page.
+- Not picked up by search. Link to it from another page.
 
 ### Simple page
 
@@ -52,7 +52,7 @@ cp -r templates/simple src/pages/my-page
 ```
 
 - Edit `title`, `description` and the body in `index.md`.
-- Not listed on the home page or in search (both read `index.mdx` only). Link to it from another page.
+- Not picked up by search (it reads `index.mdx` only). Link to it from another page.
 
 ### Learn topic
 
