@@ -1,0 +1,27 @@
+# Builds resume.pdf from index.html and lints the layout. The site stays fully static:
+# the "Download PDF" button just links to the committed resume.pdf.
+name: Resume PDF
+on:
+  push:
+    branches: [gh-pages]
+    paths: [index.html, scripts/**, .github/workflows/pdf.yml]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  pdf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: sudo apt-get install -y poppler-utils
+      - run: bun scripts/build-pdf.ts   # fails the build if any layout rule breaks
+        env: { CHROME: /usr/bin/google-chrome }
+      - name: Commit PDF
+        if: github.event_name != 'pull_request'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add resume.pdf scripts/pdf-scale.txt
+          git diff --cached --quiet || { git commit -m "Rebuild resume.pdf" && git push; }
