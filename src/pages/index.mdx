@@ -72,7 +72,7 @@ Cluster platform at Cerebras, lately GPUs. Use AI effectively to constantly swit
 
 ### Personal developer CLI
 
-Single Rust CLI (~50k lines, 230+ commits) replacing my pile of shell and Python scripts: worktree per branch, ssh picker carrying my shell to any cluster node, CI results fed back to agents, Claude Code ↔ chat bridge, agent guardrail hooks, prompt archive with secret redaction.
+Single Rust CLI (~50k lines, 230+ commits) replacing my shell and Python scripts: worktree per branch, ssh picker carrying my shell to any node, CI results fed back to agents, Claude Code ↔ chat bridge, agent guardrail hooks, redacted prompt archive. Code: [github.com/nascarsayan/valet](https://github.com/nascarsayan/valet).
 
 <Badge tone="primary">Rust</Badge> <Badge tone="primary">systemd</Badge> <Badge tone="primary">chat bot API</Badge> <Badge tone="primary">Claude Code hooks</Badge>
 
@@ -90,7 +90,7 @@ Single Rust CLI (~50k lines, 230+ commits) replacing my pile of shell and Python
 
 ### Docs site + diagram framework
 
-Built in a week to explain clusters: typed specs, auto layout, animated step-through flows. 150 diagrams: reviews, incidents, GPU explainers; teammates cloned it.
+Built in a week to explain clusters: typed specs, auto layout, animated walkthroughs. 150 diagrams: reviews, incidents, GPUs; teammates cloned it. Code: [github.com/nascarsayan/nascarsayan.github.io](https://github.com/nascarsayan/nascarsayan.github.io) (this site).
 
 <Badge tone="primary">Astro</Badge> <Badge tone="primary">TypeScript</Badge> <Badge tone="primary">Custom layouts + lint</Badge> <Badge tone="primary">Bun</Badge>
 
@@ -105,16 +105,16 @@ Built in a week to explain clusters: typed specs, auto layout, animated step-thr
 
 ### Smaller tools
 
-VSCode extensions easing review of agent diffs and large core refactors, zero-dependency Raycast-style Chrome launcher, Rust live-dataviz server, a few apps for friends.
+VSCode extensions easing review of agent diffs and large core refactors, zero-dependency Raycast-style [Chrome launcher](https://github.com/nascarsayan/chrome-launcher), Rust live-dataviz server, a few apps for friends.
 
 <Badge tone="primary">TypeScript</Badge> <Badge tone="primary">JavaScript</Badge> <Badge tone="primary">Rust</Badge>
 
 <Fold summary="More detail">
 
 - **idiff**: groups a refactor's diff into sections and exports review bundles pinned to commits. **worktree-diff**: review any git worktree in VSCode's multi-file diff and leave comments for agents.
-- **Chrome launcher**: fuzzy search over tabs, history and bookmarks; `>pr`, `>ticket`, `>wiki` commands over a pre-built index; plain JS, no build step.
-- **dataviz**: server-rendered tables and charts over a WebSocket, one tiny client script, strict schema checks. **box**: rootless dev sandbox on nix.
-- For friends: a [driving-test trainer](https://github.com/nascarsayan/driving-mcqs) (431 questions), a peer-to-peer word duel, a hotel-catalogue → map pipeline.
+- **[Chrome launcher](https://github.com/nascarsayan/chrome-launcher)**: fuzzy search over tabs, history and bookmarks; `>pr`, `>ticket`, `>wiki` commands over a pre-built index; plain JS, no build step.
+- **dataviz**: server-rendered tables and charts over a WebSocket, one tiny client script, strict schema checks. **[box](https://github.com/nascarsayan/box)**: rootless dev sandbox on nix.
+- For friends: a [driving-test trainer](https://github.com/nascarsayan/driving-mcqs) (431 questions), a [peer-to-peer word duel](https://nascarsayan.github.io/char-replace-game/), a hotel-catalogue → map pipeline.
 
 </Fold>
 

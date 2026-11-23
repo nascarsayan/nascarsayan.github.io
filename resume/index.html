@@ -159,6 +159,7 @@
     .build h3 { font-size: 17px; }
     .build p { margin: 4px 0 0; }
     .build .stack { margin-top: 2px; }
+    .build h3 .repo { font-size: 13px; font-weight: 400; margin-left: 6px; }
 
     .grid { display: grid; grid-template-columns: 140px 1fr; gap: 10px 20px; }
     .grid dt { color: var(--muted); font-size: 15px; }
@@ -220,6 +221,7 @@
       .grid { grid-template-columns: 88px 1fr; gap: 1px 10px; margin: 0; }
       .grid dt { font-size: inherit; color: #333; font-weight: 600; }
       a { color: inherit; }
+      .build h3 .repo { font-size: 8.4pt; font-weight: 400; color: #444; margin-left: 3px; }
       footer { display: none; }
       /* secondary sections print smaller */
       ul.earlier, .grid { font-size: 0.9em; }
@@ -327,8 +329,8 @@
   <h2>Things I built</h2>
   <div class="builds">
     <div class="build" data-reveal>
-      <h3>Personal developer CLI</h3>
-      <p>Single Rust CLI (~50k lines, 230+ commits) replacing my pile of shell and Python scripts: worktree per branch, ssh picker carrying my shell to any cluster node, CI results fed back to agents, Claude Code ↔ chat bridge, agent guardrail hooks, prompt archive with secret redaction.</p>
+      <h3>Personal developer CLI <a class="repo" href="https://github.com/nascarsayan/valet">github.com/nascarsayan/valet</a></h3>
+      <p>Single Rust CLI (~50k lines, 230+ commits) replacing my shell and Python scripts: worktree per branch, ssh picker carrying my shell to any node, CI results fed back to agents, Claude Code ↔ chat bridge, agent guardrail hooks, redacted prompt archive.</p>
       <p class="stack">Rust · systemd · chat bot API · Claude Code hooks</p>
       <details class="more web-only">
         <summary>More detail</summary>
@@ -344,8 +346,8 @@
       </details>
     </div>
     <div class="build" data-reveal>
-      <h3>Docs site + diagram framework</h3>
-      <p>Built in a week to explain clusters: typed specs, auto layout, animated step-through flows. 150 diagrams: reviews, incidents, GPU explainers; teammates cloned it.</p>
+      <h3>Docs site + diagram framework <a class="repo" href="https://github.com/nascarsayan/nascarsayan.github.io">nascarsayan.github.io</a></h3>
+      <p>Built in a week to explain clusters: typed specs, auto layout, animated walkthroughs. 150 diagrams: reviews, incidents, GPUs; teammates cloned it.</p>
       <p class="stack">Astro · TypeScript · Custom layouts + lint · Bun</p>
       <details class="more web-only">
         <summary>More detail</summary>
@@ -359,15 +361,15 @@
     </div>
     <div class="build" data-reveal>
       <h3>Smaller tools</h3>
-      <p>VSCode extensions easing review of agent diffs and large core refactors, zero-dependency Raycast-style Chrome launcher, Rust live-dataviz server, a few apps for friends.</p>
+      <p>VSCode extensions easing review of agent diffs and large core refactors, zero-dependency Raycast-style <a href="https://github.com/nascarsayan/chrome-launcher">Chrome launcher</a>, Rust live-dataviz server, a few apps for friends.</p>
       <p class="stack">TypeScript · JavaScript · Rust</p>
       <details class="more web-only">
         <summary>More detail</summary>
         <ul class="deep">
           <li><b>idiff</b>: groups a refactor's diff into sections and exports review bundles pinned to commits. <b>worktree-diff</b>: review any git worktree in VSCode's multi-file diff and leave comments for agents.</li>
-          <li><b>Chrome launcher</b>: fuzzy search over tabs, history and bookmarks; <code>&gt;pr</code>, <code>&gt;ticket</code>, <code>&gt;wiki</code> commands over a pre-built index; plain JS, no build step.</li>
-          <li><b>dataviz</b>: server-rendered tables and charts over a WebSocket, one tiny client script, strict schema checks. <b>box</b>: rootless dev sandbox on nix.</li>
-          <li>For friends: a <a href="https://github.com/nascarsayan/driving-mcqs">driving-test trainer</a> (431 questions), a peer-to-peer word duel, a hotel-catalogue → map pipeline.</li>
+          <li><b><a href="https://github.com/nascarsayan/chrome-launcher">Chrome launcher</a></b>: fuzzy search over tabs, history and bookmarks; <code>&gt;pr</code>, <code>&gt;ticket</code>, <code>&gt;wiki</code> commands over a pre-built index; plain JS, no build step.</li>
+          <li><b>dataviz</b>: server-rendered tables and charts over a WebSocket, one tiny client script, strict schema checks. <b><a href="https://github.com/nascarsayan/box">box</a></b>: rootless dev sandbox on nix.</li>
+          <li>For friends: a <a href="https://github.com/nascarsayan/driving-mcqs">driving-test trainer</a> (431 questions), a <a href="https://nascarsayan.github.io/char-replace-game/">peer-to-peer word duel</a>, a hotel-catalogue → map pipeline.</li>
         </ul>
       </details>
     </div>
