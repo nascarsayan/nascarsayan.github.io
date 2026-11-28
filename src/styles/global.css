@@ -15,9 +15,13 @@
   --font-weight-bold: 600;
 
   --viewport-padding: 32px;
-  --content-width: 1036px;
-  --header-height: 64px;
-  --radius: 8px;
+  /* Page width (WidthToggle): medium by default; html[data-width='wide'] widens it. */
+  /* One column: text, code, tables and callouts share both edges. Medium = a reading-width column. */
+  --page-max: 880px;
+  --measure: 100%;
+  --content-width: max(var(--page-max), 1036px); /* index pages (home, apps, learn) keep their grid width */
+  --header-height: 0px; /* no top bar: chrome lives in the left Sidebar; sticky offsets start at the top */
+  --radius: 0px; /* square corners everywhere: no rounded rectangles */
 
   /* Stacking order, lowest to highest. Page content (diagrams included) stays
      at auto/0; only these layers float. Expanded diagrams and the skip link
@@ -44,7 +48,7 @@
   --color-background: rgb(255 255 255);
   --color-blurred-background: rgb(246 246 246 / 0.94);
   --color-muted-background: rgb(166 203 221 / 0.85);
-  --color-primary: rgb(66 66 250);
+  --color-primary: rgb(64 90 140); /* accent, default slate (accents.css, /settings/): links, active states, term underlines */
   --color-secondary: rgb(230 0 103);
   --color-tertiary: rgb(44 11 142);
   --color-decorative: rgb(99 188 233);
@@ -66,15 +70,16 @@
   --color-sky-to: rgb(125 196 232);
   --color-footer-muted: rgb(41 78 96);
 
-  --color-info: rgb(68 51 255);
-  --color-info-background: rgb(0 85 204 / 0.1);
-  --color-success: rgb(0 138 57);
-  --color-success-background: rgb(0 204 85 / 0.1);
-  --color-alert: rgb(255 157 0);
-  --color-alert-background: rgb(255 221 0 / 0.25);
-  --color-error: rgb(194 5 68);
-  --color-error-background: rgb(214 5 75 / 0.1);
-  --color-code-bg: rgb(232 241 252);
+  --color-info: rgb(64 90 140);
+  --color-info-background: rgb(64 90 140 / 0.08);
+  /* Status colours: dark, muted pastels (callouts, cards, KPIs, badges). */
+  --color-success: rgb(62 118 84);
+  --color-success-background: rgb(62 118 84 / 0.1);
+  --color-alert: rgb(184 136 60);
+  --color-alert-background: rgb(190 150 80 / 0.14);
+  --color-error: rgb(160 70 86);
+  --color-error-background: rgb(160 70 86 / 0.1);
+  --color-code-bg: rgb(236 240 247);
   /* Code blocks, terminals and logs: a light theme here, a dark one in dark mode (Shiki: github-light-default /
      github-dark-default, astro.config.mjs). */
   --code-bg: rgb(246 248 250);
@@ -90,12 +95,12 @@
   --code-err: rgb(207 34 46);
   --code-warn: rgb(154 103 0);
   --code-caret: rgb(154 103 0);
-  --color-inline-code-bg: rgb(208 221 247);
-  --color-info-100: rgb(232 241 252);
-  --color-warning-100: rgb(251 244 208);
-  --color-success-100: rgb(236 248 244);
-  --color-error-100: rgb(252 232 239);
-  --color-warning-700: rgb(204 112 0);
+  --color-inline-code-bg: rgb(228 233 242);
+  --color-info-100: rgb(237 241 247);
+  --color-warning-100: rgb(248 243 232);
+  --color-success-100: rgb(237 244 239);
+  --color-error-100: rgb(248 237 239);
+  --color-warning-700: rgb(146 104 42);
   --color-sky-subtle: rgb(197 234 252);
   --color-card-bg: rgb(255 255 255);
   --shadow-card: 0.3px 0.5px 0.7px rgb(155 174 187 / 0.28), 0.8px 1.6px 2px -0.8px rgb(155 174 187 / 0.28),
@@ -120,7 +125,7 @@ html[data-color-mode="dark"] {
   --color-background: rgb(13 15 18);
   --color-blurred-background: rgb(13 15 18 / 0.94);
   --color-muted-background: rgb(24 38 53 / 0.85);
-  --color-primary: rgb(128 159 255);
+  --color-primary: rgb(156 176 214); /* default slate accent, dark mode */
   --color-secondary: rgb(255 26 129);
   --color-tertiary: rgb(230 179 255);
   --color-decorative: rgb(102 170 204);
@@ -142,14 +147,14 @@ html[data-color-mode="dark"] {
   --color-sky-to: rgb(38 89 115);
   --color-footer-muted: rgb(175 207 222);
 
-  --color-info: rgb(153 179 255);
-  --color-info-background: rgb(153 179 255 / 0.1);
-  --color-success: rgb(0 204 136);
-  --color-success-background: rgb(0 204 136 / 0.1);
-  --color-alert: rgb(255 170 0);
-  --color-alert-background: rgb(255 170 0 / 0.1);
-  --color-error: rgb(250 56 121);
-  --color-error-background: rgb(214 5 75 / 0.1);
+  --color-info: rgb(156 176 214);
+  --color-info-background: rgb(156 176 214 / 0.18);
+  --color-success: rgb(140 192 158);
+  --color-success-background: rgb(140 192 158 / 0.1);
+  --color-alert: rgb(214 178 116);
+  --color-alert-background: rgb(214 178 116 / 0.1);
+  --color-error: rgb(214 142 156);
+  --color-error-background: rgb(214 142 156 / 0.1);
   --color-code-bg: rgb(26 31 35);
   --code-bg: rgb(13 15 18);
   --code-fg: rgb(227 230 232);
@@ -165,11 +170,11 @@ html[data-color-mode="dark"] {
   --code-warn: rgb(250 205 90);
   --code-caret: rgb(245 197 66);
   --color-inline-code-bg: rgb(35 47 67);
-  --color-info-100: rgb(23 36 54);
-  --color-warning-100: rgb(35 28 21);
-  --color-success-100: rgb(17 34 33);
-  --color-error-100: rgb(34 17 23);
-  --color-warning-700: rgb(255 215 112);
+  --color-info-100: rgb(28 34 44);
+  --color-warning-100: rgb(38 33 26);
+  --color-success-100: rgb(26 36 31);
+  --color-error-100: rgb(40 28 31);
+  --color-warning-700: rgb(222 192 136);
   --color-sky-subtle: rgb(24 41 57);
   --color-card-bg: rgb(27 37 50);
   --shadow-card: 0 0 0 1px rgb(69 77 84 / 0.4);
@@ -190,6 +195,7 @@ html[data-color-mode="dark"] {
    ========================================================================== */
 *, *::before, *::after { box-sizing: border-box; }
 * { margin: 0; }
+html[data-width='wide'] { --page-max: 1640px; }
 html { -webkit-text-size-adjust: none; text-size-adjust: none; scroll-padding-top: calc(var(--header-height) + 16px); }
 @media (prefers-reduced-motion: no-preference) {
   html { interpolate-size: allow-keywords; scroll-behavior: smooth; }
@@ -226,7 +232,7 @@ code { font-family: var(--font-family-mono); font-size: 0.9em; font-weight: 700;
   padding-inline: var(--viewport-padding);
 }
 
-:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 3px; border-radius: 2px; }
+:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 3px; border-radius: 0; }
 /* A mouse click on a focusable figure (tabindex, for its keys) gets no ring; keyboard focus keeps the one above. */
 :focus:not(:focus-visible) { outline: none; }
 
@@ -250,9 +256,9 @@ code { font-family: var(--font-family-mono); font-size: 0.9em; font-weight: 700;
 }
 
 /* Theme switch (ThemeToggle): the old view shrinks into the click point on top
-   of the new one, in both directions. During it the header joins the root
+   of the new one, in both directions. During it the Sidebar joins the root
    snapshot and no colour transition runs. */
-html.theme-vt .header-wrapper { view-transition-name: none !important; backdrop-filter: none !important; background: var(--color-background) !important; }
+html.theme-vt .sb { backdrop-filter: none !important; background: var(--color-background) !important; }
 html.theme-vt, html.theme-vt *, html.theme-vt *::before, html.theme-vt *::after { transition: none !important; }
 html.theme-vt::view-transition-old(root),
 html.theme-vt::view-transition-new(root) { animation: none; mix-blend-mode: normal; }
@@ -264,14 +270,14 @@ html.theme-vt::view-transition-new(root) { z-index: 1; }
 span.term {
   text-decoration: underline dotted color-mix(in srgb, var(--color-primary) 70%, transparent);
   text-decoration-thickness: 2px; text-underline-offset: 3px;
-  cursor: help; border-radius: 2px;
+  cursor: help; border-radius: 0;
 }
 span.term:hover, span.term:focus-visible { text-decoration-style: solid; outline: none; background: var(--color-info-background); }
 .term-card {
   position: absolute; z-index: var(--z-toc);
   padding: 10px 12px;
   background: var(--color-background);
-  border: 1px solid var(--color-gray-100); border-radius: var(--radius);
+  border: 1px solid var(--color-gray-100); border-radius: 0;
   box-shadow: var(--shadow-card);
   font-size: 0.875rem; line-height: 1.5;
   opacity: 0; translate: 0 4px; transition: opacity 150ms ease, translate 200ms var(--ease-out);
@@ -286,12 +292,4 @@ span.term:hover, span.term:focus-visible { text-decoration-style: solid; outline
 .term-card-more { font-size: 0.8125rem; font-weight: var(--font-weight-medium); color: var(--color-link); text-decoration: none; }
 .term-card-more:hover { text-decoration: underline; }
 
-/* Shiki dual themes (astro.config.mjs shikiConfig.themes): light colours inline, dark ones as --shiki-dark*. */
-html[data-color-mode='dark'] .astro-code,
-html[data-color-mode='dark'] .astro-code span {
-  color: var(--shiki-dark) !important;
-  background-color: var(--shiki-dark-bg) !important;
-  font-style: var(--shiki-dark-font-style) !important;
-  font-weight: var(--shiki-dark-font-weight) !important;
-  text-decoration: var(--shiki-dark-text-decoration) !important;
-}
+/* Shiki code themes: see code-themes.css (imported by BaseLayout). */

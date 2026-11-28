@@ -33,14 +33,10 @@ import { SITE, NAV, SOCIALS } from '@/config/site';
   .inner { position: relative; display: flex; justify-content: space-between; align-items: flex-end; gap: 32px; padding-bottom: 24px; }
   .tagline { margin-top: 4px; font-weight: var(--font-weight-medium); }
   .copyright { margin-top: 8px; font-size: 0.75rem; color: var(--color-gray-500); }
-  .links { display: flex; align-items: center; gap: 20px; }
+  .links { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; }
+  @media (max-width: 640px) { .inner { flex-wrap: wrap; } }
   .links a { display: inline-flex; text-decoration: none; }
   .links a:hover { color: var(--color-primary); }
-  /* Narrow screens: links go under the name and wrap. */
-  @media (max-width: 720px) {
-    .inner { flex-direction: column; align-items: flex-start; gap: 16px; }
-    .links { flex-wrap: wrap; gap: 12px 20px; }
-  }
 </style>
 
 <script>

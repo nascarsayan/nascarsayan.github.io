@@ -61,7 +61,7 @@ const tip = (c: Sim['grid'][number][number]) =>
   th[scope='row'] { text-align: right; }
   .sg-meta { font-weight: 400; color: var(--color-muted); }
   .sg th, .sg td { height: 24px; line-height: 16px; vertical-align: middle; font-size: 0.75rem; }
-  .sg td { min-width: 44px; padding: 4px 4px; border: 0; border-radius: 4px; text-align: center; white-space: nowrap; background: transparent; }
+  .sg td { min-width: 44px; padding: 4px 4px; border: 0; border-radius: 0; text-align: center; white-space: nowrap; background: transparent; }
   .k-future { background: var(--color-cloud-100) !important; opacity: 0.5; }
   .k-wait { color: var(--color-gray-600); background: repeating-linear-gradient(45deg, var(--color-gray-100), var(--color-gray-100) 4px, transparent 4px, transparent 8px) !important; }
   .k-prefill, .k-first { background: color-mix(in srgb, #ec4899 28%, transparent) !important; }
@@ -69,9 +69,9 @@ const tip = (c: Sim['grid'][number][number]) =>
   .k-idle { color: #b45309; background: color-mix(in srgb, #f59e0b 22%, transparent) !important; }
   .k-done { background: var(--color-gray-100) !important; }
   .sg td.sg-at, .sg th.sg-at { outline: 2px solid var(--color-primary); outline-offset: -1px; }
-  .sg th.sg-at { color: var(--color-primary); border-radius: 4px; }
+  .sg th.sg-at { color: var(--color-primary); border-radius: 0; }
   .sg-used td { position: relative; color: var(--color-gray-800); }
-  .sg-used .bar { position: absolute; left: 0; bottom: 0; height: 3px; width: calc(var(--u) * 100%); background: var(--color-primary); border-radius: 2px; }
+  .sg-used .bar { position: absolute; left: 0; bottom: 0; height: 3px; width: calc(var(--u) * 100%); background: var(--color-primary); border-radius: 0; }
   .sg-legend { margin-top: 4px; font-size: 0.75rem; color: var(--color-muted); line-height: 1.9; }
-  .sg-legend span { padding: 1px 5px; border-radius: 4px; font-family: var(--font-mono, ui-monospace, monospace); color: var(--color-text); }
+  .sg-legend span { padding: 1px 5px; border-radius: 0; font-family: var(--font-mono, ui-monospace, monospace); color: var(--color-text); }
 </style>

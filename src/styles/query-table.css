@@ -18,7 +18,7 @@
   gap: 8px;
   align-items: center;
   padding: 10px 12px;
-  border-radius: var(--radius);
+  border-radius: 0;
   background: var(--color-cloud-100);
 }
 html[data-color-mode='dark'] .qt-bar { background: var(--color-card-bg); }
@@ -76,7 +76,7 @@ html[data-color-mode='dark'] .qt-bar { background: var(--color-card-bg); }
   padding: 8px 12px;
   max-height: 8.6em;
   overflow: auto;
-  border-radius: var(--radius);
+  border-radius: 0;
   background: var(--code-bg);
   color: var(--code-fg);
   font-family: var(--font-mono);
@@ -95,7 +95,7 @@ html[data-color-mode='dark'] .qt-bar { background: var(--color-card-bg); }
   overflow: auto;
   padding: 6px;
   border: 1px solid var(--color-gray-300);
-  border-radius: calc(var(--radius) + 2px);
+  border-radius: 0;
   background: var(--color-background);
   box-shadow: 0 12px 32px rgb(0 0 0 / 0.18);
   font-family: var(--font-family);
@@ -107,7 +107,7 @@ html[data-color-mode='dark'] .qt-bar { background: var(--color-card-bg); }
   column-gap: 6px;
   padding: 6px 10px 6px 6px;
   border: 0;
-  border-radius: var(--radius);
+  border-radius: 0;
   background: none;
   color: var(--color-text);
   font: inherit;
@@ -131,7 +131,7 @@ html[data-color-mode='dark'] :is(.qt-opt:hover, .qt-opt:focus-visible) { backgro
   min-height: 0;
   overflow: auto;
   border: 1px solid var(--color-gray-100);
-  border-radius: var(--radius);
+  border-radius: 0;
 }
 .qt-table { min-width: 100%; border-collapse: separate; border-spacing: 0; font-size: 0.8rem; }
 .qt-table th, .qt-table td { padding: 5px 10px; border-bottom: 1px solid var(--color-gray-100); text-align: left; vertical-align: top; }

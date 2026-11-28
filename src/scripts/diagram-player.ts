@@ -173,7 +173,7 @@ function setupHover(fig: HTMLElement) {
   });
   card.addEventListener('pointerenter', () => clearTimeout(hideT));
   card.addEventListener('pointerleave', (e) => { if (open?.startsWith('n:')) return; if (keyOf(e.relatedTarget as Element | null) !== open) { clearTimeout(hideT); hideT = window.setTimeout(hide, GRACE); } });
-  fig.addEventListener('keydown', (e) => { if (e.key === 'Escape' && open) { hide(); e.stopPropagation(); } });
+  fig.addEventListener('keydown', (e) => { if (e.key === 'Escape' && open && !e.defaultPrevented) { hide(); e.preventDefault(); e.stopPropagation(); } });
   document.addEventListener('click', (e) => { if (open && !fig.contains(e.target as Node)) hide(); });
 }
 
@@ -224,6 +224,11 @@ function setupTrace(fig: HTMLElement) {
   svg.addEventListener('focusout', () => trace(null));
 }
 
+/** An info card in this figure, or the glossary card, is open. */
+function hasOpenPopover(fig: HTMLElement): boolean {
+  return !!(fig.querySelector('.dg-card:not([hidden])') || document.querySelector('.term-card:not([hidden])'));
+}
+
 function setupExpand(fig: HTMLElement) {
   const btn = fig.querySelector<HTMLButtonElement>('[data-act=expand]');
   const toggle = (on = !fig.classList.contains('is-expanded')) => {
@@ -233,7 +238,12 @@ function setupExpand(fig: HTMLElement) {
   };
   btn?.addEventListener('click', () => toggle());
   fig.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && fig.classList.contains('is-expanded')) { toggle(false); e.preventDefault(); }
+    // Escape closes the topmost layer only: an open info card or glossary card first (their own handlers), then
+    // the full window. This listener runs before the card's, so it checks for open cards itself.
+    if (e.key === 'Escape' && fig.classList.contains('is-expanded')) {
+      if (e.defaultPrevented || hasOpenPopover(fig)) return;
+      toggle(false); e.preventDefault();
+    }
     else if (e.key === 'f' && !e.metaKey && !e.ctrlKey) { toggle(); e.preventDefault(); }
   });
 }

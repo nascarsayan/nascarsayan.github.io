@@ -42,17 +42,17 @@ marks.forEach((m, i) => {
 
 <style>
   .ao { margin: 16px 0; }
-  .ao-term { border-radius: 10px; overflow: hidden; background: var(--code-bg); color: var(--code-fg); box-shadow: 0 0 0 1px var(--code-border); }
+  .ao-term { border-radius: 0; overflow: hidden; background: var(--code-bg); color: var(--code-fg); box-shadow: 0 0 0 1px var(--code-border); }
   .ao-bar { padding: 6px 12px; background: var(--code-bar); font-size: 0.75rem; color: var(--code-muted); }
   .ao pre { margin: 0; padding: 10px 14px; overflow-x: auto; font-family: var(--font-family-mono); font-size: 0.8125rem; line-height: 1.55; }
   .ao-cmd, .ao-l { display: block; white-space: pre; }
   .ao-cmd { color: var(--code-bright); }
   .ao-p { color: var(--code-prompt); user-select: none; }
   .ao-l { color: var(--code-muted); }
-  .ao-l.is-on { margin: 0 -14px; padding: 0 14px; color: var(--code-bright); background: rgb(128 159 255 / 0.16); box-shadow: inset 3px 0 0 rgb(128 159 255); }
-  .ao-l.t-good { background: rgb(39 201 63 / 0.14); box-shadow: inset 3px 0 0 rgb(39 201 63); }
-  .ao-l.t-warn { background: rgb(255 189 46 / 0.16); box-shadow: inset 3px 0 0 rgb(255 189 46); }
-  .ao-l.t-risk { background: rgb(255 95 86 / 0.18); box-shadow: inset 3px 0 0 rgb(255 95 86); }
+  .ao-l.is-on { margin: 0 -14px; padding: 0 14px; color: var(--code-bright); background: rgb(128 159 255 / 0.16); }
+  .ao-l.t-good { background: rgb(39 201 63 / 0.14); }
+  .ao-l.t-warn { background: rgb(255 189 46 / 0.16); }
+  .ao-l.t-risk { background: rgb(255 95 86 / 0.18); }
   .ao-n { display: inline-block; min-width: 18px; margin-left: 10px; padding: 0 5px; border-radius: 999px; background: rgb(128 159 255); color: rgb(13 15 18); font-size: 0.6875rem; font-weight: 700; text-align: center; line-height: 1.5; }
   .ao-l.t-good .ao-n { background: rgb(39 201 63); }
   .ao-l.t-warn .ao-n { background: rgb(255 189 46); }

@@ -38,27 +38,27 @@ for (const c of Object.keys(compute) as CMode[]) for (const m of Object.keys(mem
 </figure>
 
 <style>
-  .px { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .px { margin: 20px 0; padding: 16px 18px; border: 1px solid var(--color-gray-100); border-radius: 0; }
   .px-title { margin-bottom: 10px; font-weight: var(--font-weight-bold); }
   .px-ctl { display: flex; flex-wrap: wrap; gap: 10px 28px; font-size: 0.875rem; }
   .px-ctl div { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .px-ctl span { min-width: 64px; color: var(--color-muted); }
   .px-ctl button { padding: 4px 12px; border-radius: 999px; background: var(--color-cloud-100); color: var(--color-gray-800); font-weight: 600; }
   .px-ctl button[aria-pressed='true'] { background: var(--color-primary); color: #fff; }
-  .px-card { position: relative; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; padding: 10px; border-radius: 12px; background: var(--color-gray-100); }
-  .px-iod { padding: 8px; border-radius: 10px; border: 1px dashed var(--color-gray-500); }
+  .px-card { position: relative; display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 14px; padding: 10px; border-radius: 0; background: var(--color-gray-100); }
+  .px-iod { padding: 8px; border-radius: 0; border: 1px dashed var(--color-gray-500); }
   .px-lab { font-size: 0.75rem; color: var(--color-muted); }
   .px-xcds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 4px; }
-  .px-xcd { display: flex; flex-direction: column; align-items: center; padding: 8px 2px; border-radius: 8px; color: #0f172a; font-size: 0.75rem; background: var(--pc, #cbd5e1); }
+  .px-xcd { display: flex; flex-direction: column; align-items: center; padding: 8px 2px; border-radius: 0; color: #0f172a; font-size: 0.75rem; background: var(--pc, #cbd5e1); }
   .px-xcd i { font-style: normal; font-size: 0.6875rem; }
   .px-hbm { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; margin-top: 6px; }
-  .px-hbm span { padding: 2px 0; border-radius: 4px; text-align: center; font-size: 0.625rem; color: var(--color-muted); background: var(--color-background); }
+  .px-hbm span { padding: 2px 0; border-radius: 0; text-align: center; font-size: 0.625rem; color: var(--color-muted); background: var(--color-background); }
   .px-pools { grid-column: 1 / -1; display: grid; gap: 10px; }
-  .px-pools :global(span) { padding: 4px 8px; border-radius: 6px; text-align: center; font-size: 0.75rem; font-weight: 600; color: #0f172a; background: #fde68a; }
+  .px-pools :global(span) { padding: 4px 8px; border-radius: 0; text-align: center; font-size: 0.75rem; font-weight: 600; color: #0f172a; background: #fde68a; }
   .px-msg { margin-top: 8px; font-size: 0.875rem; font-weight: 600; }
   .px-msg.bad { color: var(--color-risk, #dc2626); }
   .px-out { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px 16px; margin-top: 10px; }
-  .px-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; background: var(--color-cloud-100); }
+  .px-out div { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 0; background: var(--color-cloud-100); }
   .px-out .k { font-size: 0.75rem; color: var(--color-muted); }
   .px-out .v { font-size: 1.125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
   .px-out.off { opacity: 0.35; }

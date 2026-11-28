@@ -56,32 +56,32 @@ const off = new Set([8, 17, 26, 35]);
 <style>
   .cz { margin: 4px 0 12px; font-size: 0.8125rem; }
   .cz small { display: block; font-size: 0.6875rem; opacity: 0.8; }
-  .cz-pkg { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 10px; border: 2px solid #94a3b8; border-radius: 12px; max-width: 760px; }
+  .cz-pkg { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding: 10px; border: 2px solid #94a3b8; border-radius: 0; max-width: 760px; }
   .cz-side { display: flex; flex-direction: column; gap: 6px; }
   .cz-hbm { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; }
-  .cz-hbm span { padding: 4px; border-radius: 6px; text-align: center; font-size: 0.6875rem; background: color-mix(in srgb, #16a34a 18%, transparent); }
-  .cz-iod { padding: 6px; border-radius: 8px; background: color-mix(in srgb, #3b82f6 14%, transparent); }
+  .cz-hbm span { padding: 4px; border-radius: 0; text-align: center; font-size: 0.6875rem; background: color-mix(in srgb, #16a34a 18%, transparent); }
+  .cz-iod { padding: 6px; border-radius: 0; background: color-mix(in srgb, #3b82f6 14%, transparent); }
   .cz-xcds { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; }
-  .cz-xcd { padding: 8px 4px; border-radius: 6px; text-align: center; font-weight: 600; background: var(--color-background); border: 1px solid var(--color-gray-300); }
+  .cz-xcd { padding: 8px 4px; border-radius: 0; text-align: center; font-weight: 600; background: var(--color-background); border: 1px solid var(--color-gray-300); }
   .cz-iodlab { margin-top: 6px; font-size: 0.6875rem; color: var(--color-gray-700); }
   .on { outline: 3px solid var(--color-primary); outline-offset: -1px; }
   .cz-xcdview, .cz-cuview, .cz-simdview { max-width: 760px; }
-  .cz-cugrid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px; padding: 8px; border: 2px solid var(--color-gray-300); border-radius: 10px 10px 0 0; }
-  .cz-cu { display: inline-block; padding: 6px 2px; border-radius: 5px; text-align: center; font-size: 0.6875rem; background: color-mix(in srgb, #3b82f6 18%, transparent); }
+  .cz-cugrid { display: grid; grid-template-columns: repeat(9, 1fr); gap: 4px; padding: 8px; border: 2px solid var(--color-gray-300); border-radius: 0; }
+  .cz-cu { display: inline-block; padding: 6px 2px; border-radius: 0; text-align: center; font-size: 0.6875rem; background: color-mix(in srgb, #3b82f6 18%, transparent); }
   .cz-cu.off { background: var(--color-gray-100); color: var(--color-gray-500); }
   .cz-legend .cz-cu { padding: 1px 6px; }
   .cz-bar { padding: 6px 10px; border: 2px solid var(--color-gray-300); border-top: 0; background: var(--color-cloud-100); }
-  .cz-cuview .cz-bar:last-child { border-radius: 0 0 10px 10px; }
-  .cz-xcdview .cz-bar { border-radius: 0 0 10px 10px; }
+  .cz-cuview .cz-bar:last-child { border-radius: 0; }
+  .cz-xcdview .cz-bar { border-radius: 0; }
   .cz-lds { background: color-mix(in srgb, #f59e0b 16%, transparent); }
-  .cz-simds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 8px; border: 2px solid var(--color-gray-300); border-radius: 10px 10px 0 0; }
-  .cz-simdpair { display: flex; flex-direction: column; gap: 4px; padding: 4px; border-radius: 8px; }
-  .cz-simd { padding: 10px 4px; border-radius: 6px; text-align: center; font-weight: 600; background: color-mix(in srgb, #3b82f6 18%, transparent); }
-  .cz-mc { padding: 6px 4px; border-radius: 6px; text-align: center; background: color-mix(in srgb, #a855f7 20%, transparent); }
+  .cz-simds { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; padding: 8px; border: 2px solid var(--color-gray-300); border-radius: 0; }
+  .cz-simdpair { display: flex; flex-direction: column; gap: 4px; padding: 4px; border-radius: 0; }
+  .cz-simd { padding: 10px 4px; border-radius: 0; text-align: center; font-weight: 600; background: color-mix(in srgb, #3b82f6 18%, transparent); }
+  .cz-mc { padding: 6px 4px; border-radius: 0; text-align: center; background: color-mix(in srgb, #a855f7 20%, transparent); }
   .cz-lanehead, .cz-lanerow { display: grid; grid-template-columns: 56px repeat(16, 1fr); gap: 3px; margin-bottom: 3px; }
   .cz-lanehead span { text-align: center; font-size: 0.6875rem; color: var(--color-muted); }
   .cz-cyc { font-size: 0.6875rem; color: var(--color-muted); align-self: center; }
-  .cz-thr { padding: 4px 0; border-radius: 4px; text-align: center; font-family: var(--font-family-mono); font-size: 0.6875rem; }
+  .cz-thr { padding: 4px 0; border-radius: 0; text-align: center; font-family: var(--font-family-mono); font-size: 0.6875rem; }
   .cz-thr.p0 { background: color-mix(in srgb, #3b82f6 40%, transparent); }
   .cz-thr.p1 { background: color-mix(in srgb, #3b82f6 28%, transparent); }
   .cz-thr.p2 { background: color-mix(in srgb, #3b82f6 18%, transparent); }

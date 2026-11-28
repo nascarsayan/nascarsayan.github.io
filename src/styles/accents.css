@@ -1,0 +1,18 @@
+/*
+ * Accent colours (src/config/accents.ts): html[data-accent] set before first
+ * paint from /settings/. No attribute = slate (global.css). Dark-mode rules are
+ * more specific, so they win over the light ones in dark mode.
+ */
+html[data-accent='indigo'] { --color-primary: rgb(84 82 152); --color-info: rgb(84 82 152); --color-info-background: rgb(84 82 152 / 0.08); }
+html[data-accent='teal'] { --color-primary: rgb(36 110 112); --color-info: rgb(36 110 112); --color-info-background: rgb(36 110 112 / 0.08); }
+html[data-accent='sage'] { --color-primary: rgb(76 110 72); --color-info: rgb(76 110 72); --color-info-background: rgb(76 110 72 / 0.08); }
+html[data-accent='plum'] { --color-primary: rgb(112 70 120); --color-info: rgb(112 70 120); --color-info-background: rgb(112 70 120 / 0.08); }
+html[data-accent='terracotta'] { --color-primary: rgb(152 82 60); --color-info: rgb(152 82 60); --color-info-background: rgb(152 82 60 / 0.08); }
+html[data-accent='ochre'] { --color-primary: rgb(132 98 28); --color-info: rgb(132 98 28); --color-info-background: rgb(132 98 28 / 0.08); }
+
+html[data-color-mode='dark'][data-accent='indigo'] { --color-primary: rgb(170 168 222); --color-info: rgb(170 168 222); --color-info-background: rgb(170 168 222 / 0.18); }
+html[data-color-mode='dark'][data-accent='teal'] { --color-primary: rgb(122 190 188); --color-info: rgb(122 190 188); --color-info-background: rgb(122 190 188 / 0.18); }
+html[data-color-mode='dark'][data-accent='sage'] { --color-primary: rgb(158 192 150); --color-info: rgb(158 192 150); --color-info-background: rgb(158 192 150 / 0.18); }
+html[data-color-mode='dark'][data-accent='plum'] { --color-primary: rgb(198 162 206); --color-info: rgb(198 162 206); --color-info-background: rgb(198 162 206 / 0.18); }
+html[data-color-mode='dark'][data-accent='terracotta'] { --color-primary: rgb(222 162 140); --color-info: rgb(222 162 140); --color-info-background: rgb(222 162 140 / 0.18); }
+html[data-color-mode='dark'][data-accent='ochre'] { --color-primary: rgb(214 182 114); --color-info: rgb(214 182 114); --color-info-background: rgb(214 182 114 / 0.18); }

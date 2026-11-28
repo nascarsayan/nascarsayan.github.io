@@ -23,6 +23,7 @@ import '@/styles/chronicle-themes.css';
 import { CH_THEMES } from '@/diagrams/chronicle-themes';
 import { artLang, checkChronicle, type Chronicle } from '@/diagrams/chronicle';
 import { Code } from 'astro:components';
+import { CODE_THEMES } from '@/config/code-themes.mjs';
 import { lintChronicleLayout, lintChronicleWindows } from '@/diagrams/chronicle-model';
 import Md from './Md.astro';
 
@@ -89,7 +90,7 @@ const payload = JSON.stringify(spec).replace(/</g, '\\u003c');
   {/* Data pieces' code, highlighted at build time (Shiki, the site's light/dark pair); the viewer clones it into
       the details panel by data-ch-code (scripts/chronicle.ts codeBlock). */}
   {spec.arts.flatMap((a) => (['brief', 'body'] as const).filter((k) => a[k]).map((k) => (
-    <template data-ch-code={`${a.id}|${k}`}><Code code={a[k]!} lang={artLang(a) as any} themes={{ light: 'github-light-default', dark: 'github-dark-default' }} /></template>
+    <template data-ch-code={`${a.id}|${k}`}><Code code={a[k]!} lang={artLang(a) as any} themes={CODE_THEMES} /></template>
   )))}
 </figure>
 

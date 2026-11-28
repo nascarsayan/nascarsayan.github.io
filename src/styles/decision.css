@@ -18,7 +18,7 @@
   margin: 24px 0;
   padding: 8px;
   border: 1px solid var(--dt-soft);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--dt-bg);
   color: var(--dt-ink);
   font-size: 0.875rem;
@@ -123,27 +123,27 @@
 .dt-tag rect { fill: var(--dt-bg); stroke: var(--dt-muted); stroke-width: 1.2; }
 .dt-tag text { fill: var(--dt-ink); font-size: 11px; font-weight: var(--font-weight-bold); }
 .dt-mkey { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; font-size: 0.75rem; font-weight: var(--font-weight-bold); }
-.dt-mkey i { width: 22px; height: 0; border-top: 3px solid var(--dt-muted); border-radius: 2px; }
+.dt-mkey i { width: 22px; height: 0; border-top: 3px solid var(--dt-muted); border-radius: 0; }
 .dt-lvtitle { flex: 1; display: flex; flex-direction: column; }
 .dt-lvtitle strong { font-size: 1rem; }
 .dt-opts { margin: 8px 0 0; }
 .dt-opts dt { margin-top: 10px; font-weight: var(--font-weight-bold); }
 .dt-opts dd { margin: 2px 0 0; padding-left: 10px; border-left: 2px solid var(--dt-soft); }
 .dt-opts .dt-md p { margin: 3px 0; }
-.dt-markpill { margin: 8px 0 0; padding: 6px 10px; border-left: 3px solid var(--dt-muted); border-radius: 4px; background: var(--dt-soft); }
+.dt-markpill { margin: 8px 0 0; padding: 6px 10px; border: 1px solid var(--dt-muted); border-radius: 0; background: var(--dt-soft); }
 
 /* Detail pane. --------------------------------------------------------------------------------------------- */
 /* A drawer over the left columns, level with the selected road (scripts/decision.ts sets top). */
-.dt-detail { position: absolute; z-index: 2; left: 6px; top: 0; width: min(380px, calc(100% - 12px)); max-height: min(72vh, 680px); overflow: auto; padding: 10px 12px; border: 1px solid var(--dt-line); border-radius: 8px; background: var(--dt-bg); box-shadow: 0 8px 28px rgb(0 0 0 / 0.18); }
+.dt-detail { position: absolute; z-index: 2; left: 6px; top: 0; width: min(380px, calc(100% - 12px)); max-height: min(72vh, 680px); overflow: auto; padding: 10px 12px; border: 1px solid var(--dt-line); border-radius: 0; background: var(--dt-bg); box-shadow: 0 8px 28px rgb(0 0 0 / 0.18); }
 .dt-dhead { display: flex; align-items: flex-start; gap: 8px; }
 .dt-crumbs { flex: 1; display: flex; flex-wrap: wrap; gap: 4px; }
-.dt-crumb { display: inline-flex; flex-direction: column; align-items: flex-start; padding: 2px 8px; border: 1px solid var(--dt-line); border-radius: 6px; background: var(--dt-soft); line-height: 1.2; }
+.dt-crumb { display: inline-flex; flex-direction: column; align-items: flex-start; padding: 2px 8px; border: 1px solid var(--dt-line); border-radius: 0; background: var(--dt-soft); line-height: 1.2; }
 .dt-crumb-k { color: var(--dt-muted); font-size: 0.625rem; text-transform: uppercase; letter-spacing: 0.04em; }
 .dt-crumb-v { font-size: 0.8125rem; font-weight: var(--font-weight-bold); }
 .dt-crumb:hover { border-color: var(--dt-accent); }
 .dt-dnote { margin: 8px 0 0; color: var(--dt-muted); }
 .dt-md p { margin: 6px 0; line-height: 1.5; }
-.dt-md code { padding: 1px 4px; border-radius: 4px; background: var(--color-inline-code-bg); }
+.dt-md code { font-family: var(--font-family-mono); font-size: 0.9em; }
 .dt-pill { display: inline-block; margin: 8px 0; padding: 2px 10px; border-radius: 999px; background: var(--dt-soft); }
 .dt-sw { display: inline-block; width: 9px; height: 9px; margin-right: 6px; border-radius: 50%; background: var(--o); vertical-align: 0; }
 .dt-sw.is-untested { background: none; border: 1.5px dashed var(--o); }
@@ -153,14 +153,14 @@
 .dt-sum tr:first-child th { color: var(--dt-muted); font-size: 0.75rem; }
 .dt-sum td { text-align: right; font-variant-numeric: tabular-nums; }
 .dt-lensrun h4 { margin: 12px 0 4px; font-size: 0.875rem; }
-.dt-run { margin: 6px 0; padding: 6px 8px; border-left: 3px solid var(--o); border-radius: 4px; background: var(--dt-soft); }
+.dt-run { margin: 6px 0; padding: 6px 8px; border: 1px solid color-mix(in srgb, var(--o) 50%, transparent); border-radius: 0; background: var(--dt-soft); }
 .dt-run-top { display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: baseline; }
 .dt-run-id { font-weight: var(--font-weight-bold); }
 .dt-run-title { flex: 1 1 160px; min-width: 0; overflow-wrap: anywhere; }
 .dt-extra { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.dt-extra code { padding: 1px 4px; border-radius: 4px; background: var(--dt-bg); font-size: 0.6875rem; word-break: break-all; }
+.dt-extra code { padding: 1px 4px; border-radius: 0; background: var(--dt-bg); font-size: 0.6875rem; word-break: break-all; }
 .dt-checks { display: flex; flex-wrap: wrap; gap: 4px; margin: 6px 0 2px; padding: 0; list-style: none; }
-.dt-check { display: inline-flex; overflow: hidden; border: 1px solid var(--c, var(--dt-line)); border-radius: 4px; font-size: 0.6875rem; }
+.dt-check { display: inline-flex; overflow: hidden; border: 1px solid var(--c, var(--dt-line)); border-radius: 0; font-size: 0.6875rem; }
 .dt-check-k { padding: 1px 5px; background: var(--dt-bg); }
 .dt-check-v { padding: 1px 5px; background: color-mix(in srgb, var(--c) 18%, var(--dt-bg)); font-weight: var(--font-weight-bold); }
 .dt-check.is-pass { --c: var(--o-works); }
@@ -174,7 +174,7 @@
 .dt-finding.is-real .dt-scope { background: var(--o-limited); }
 .dt-finding.is-sim .dt-scope { background: var(--o-sim-limited); }
 .dt-finding.is-expected .dt-scope { background: var(--o-expected); }
-.dt-log pre { max-height: 220px; overflow: auto; margin: 4px 0 0; padding: 6px 8px; border-radius: 4px; background: var(--dt-bg); font-size: 0.6875rem; line-height: 1.45; }
+.dt-log pre { max-height: 220px; overflow: auto; margin: 4px 0 0; padding: 6px 8px; border-radius: 0; background: var(--dt-bg); font-size: 0.6875rem; line-height: 1.45; }
 .dt-x { flex: 0 0 auto; }
 .dt-caption { margin-top: 6px; color: var(--dt-muted); font-size: 0.8125rem; }
 

@@ -2,8 +2,8 @@
  * Zoom and pan for <Diagram zoom>: the SVG sits in a scrollable viewport and is
  * drawn at `--z` times its natural size. Buttons (bottom right): out, in, fit
  * to width, 1:1. Drag to pan; Ctrl/⌘ + wheel zooms around the pointer; keys
- * + − 0 1 while the viewport has focus. Starts at fit-to-width, clamped to
- * 80–100% so text is never smaller than readable nor blown up.
+ * + − 0 1 while the viewport has focus. Starts at fit-to-width (never above 1:1),
+ * so it never scrolls sideways at first; zoom in for detail.
  */
 const MIN = 0.2, MAX = 3, STEP = 1.25;
 
@@ -28,7 +28,7 @@ export function initZoom() {
       vp.scrollTop = py * z - cy;
       if (val) val.textContent = `${Math.round(z * 100)}%`;
     };
-    set(Math.min(1, Math.max(0.8, fitZ())));
+    set(Math.min(1, fitZ()));
     vp.scrollTo({ left: (vp.scrollWidth - vp.clientWidth) / 2, top: 0 });
     wrap.querySelectorAll<HTMLButtonElement>('[data-zoom-act]').forEach((b) => b.addEventListener('click', () => {
       const a = b.dataset.zoomAct;

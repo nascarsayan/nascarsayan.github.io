@@ -7,11 +7,11 @@
  *   export default defineDecision({
  *     title: 'Chart version, API, labels, gates',
  *     levels: [{ key: 'version', title: 'Chart version' }, { key: 'api', title: 'Operator API' }],
- *     lenses: [{ id: 'hw', label: 'Real hardware' }, { id: 'sim', label: 'Simulator' }],
+ *     lenses: [{ id: 'spark', label: 'DGX Spark' }, { id: 'sim', label: 'pb002 sim' }],
  *     root: { id: 'app', label: 'NVIDIA GPU app', children: [
- *       { id: 'v1', label: 'v1.0', children: [
- *         { id: 'v1-gc', label: 'GPUCluster', blocked: 'needs v2.0' },
- *         { id: 'v1-cp', label: 'ClusterPolicy', runs: [{ id: 's0', lens: 'hw', outcome: 'works', title: '...' }] },
+ *       { id: 'v1', label: 'v26.3.3', children: [
+ *         { id: 'v1-gc', label: 'GPUCluster', blocked: 'needs v26.7.2' },
+ *         { id: 'v1-cp', label: 'ClusterPolicy', runs: [{ id: 's0', lens: 'spark', outcome: 'works', title: '...' }] },
  *       ] },
  *     ] },
  *   });

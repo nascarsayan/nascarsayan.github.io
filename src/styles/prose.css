@@ -67,6 +67,17 @@
   transition-delay: 0s;
 }
 
+/* Copy-link icon after a fold's summary (ArticleLayout): shown on hover or focus, green for a moment once copied. */
+.prose .fold-anchor {
+  display: inline-grid; place-content: center; width: 24px; height: 24px; margin-left: 2px; border-radius: 0;
+  box-shadow: none; color: var(--color-muted); opacity: 0; transition: opacity 200ms, color 150ms;
+}
+.prose .fold-anchor::after { display: none; }
+.prose summary:hover .fold-anchor, .prose .fold-anchor:focus-visible, .prose .fold-anchor.is-copied { opacity: 1; }
+.prose .fold-anchor:hover { color: var(--color-primary); }
+.prose .fold-anchor.is-copied { color: var(--color-success); }
+@media (hover: none) { .prose .fold-anchor { opacity: 0.6; } }
+
 /* Lists */
 :is(.prose, .prose *) > :is(ol, ul):not([class]) { margin: 0 0 24px; padding: 0; list-style: none; }
 :is(.prose, .prose *) > ol:not([class]) { counter-reset: prose-ol; }
@@ -91,13 +102,10 @@
           mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M5 12h14M12 5l7 7-7 7'/%3E%3C/svg%3E") center / contain no-repeat;
 }
 
-/* Inline code chips */
+/* Inline code: monospace only, no chip background. */
 .prose :not(pre) > code {
-  margin: 1px -1px;
-  padding: 2px 6px;
-  border-radius: 3px;
-  background: var(--color-inline-code-bg);
   font-family: var(--font-family-mono);
+  color: var(--color-gray-900);
   font-size: 0.85em;
   font-weight: 400;
   letter-spacing: -0.5px;
@@ -106,16 +114,32 @@
 }
 
 /* Static code blocks (Shiki) */
+/* In line with the text (no bleed), compact padding; a copy button sits top right (scripts/code-copy.ts). */
 .prose pre.astro-code {
-  margin: 32px -32px 48px;
-  padding: 32px;
-  border-radius: 6px;
+  margin: 20px 0 28px;
+  padding: 14px 16px;
+  border-radius: 0;
   box-shadow: 0 0 0 1px var(--code-border);
   font-family: var(--font-family-mono);
-  font-size: 0.9375rem;
-  line-height: 1.6;
+  font-size: 0.875rem;
+  line-height: 1.55;
   overflow-x: auto;
 }
+.code-wrap { position: relative; }
+.prose .code-wrap > pre.astro-code { margin: 0; }
+.prose .code-wrap { margin: 20px 0 28px; }
+.code-copy {
+  position: absolute; top: 6px; right: 6px; z-index: 1;
+  display: grid; place-content: center; width: 30px; height: 30px; border-radius: 0;
+  color: var(--code-muted); background: transparent; border: 0;
+  opacity: 0; transition: opacity 150ms, color 150ms;
+}
+.code-wrap:hover .code-copy, .code-copy:focus-visible, .code-copy.is-done { opacity: 1; }
+.code-copy:hover { color: var(--color-primary); }
+.code-copy svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.code-copy .i-done, .code-copy.is-done .i-copy { display: none; }
+.code-copy.is-done .i-done { display: block; color: var(--color-success); }
+@media (hover: none) { .code-copy { opacity: 1; } }
 .prose pre.astro-code code { font-weight: 400; }
 html[data-color-mode='dark'] .prose pre.astro-code { box-shadow: 0 0 0 1px rgb(69 77 84 / 0.6); }
 /* The panel colour is the site's (--code-bg), not the Shiki theme's: white on a white page in light mode. */
@@ -132,7 +156,7 @@ html[data-color-mode='dark'] .prose pre.astro-code { box-shadow: 0 0 0 1px rgb(6
 
 .prose hr { margin: 64px auto; width: 80px; border: none; border-top: 2px dashed var(--color-gray-300); }
 
-.prose img { border-radius: 6px; margin: 32px auto; }
+.prose img { border-radius: 0; margin: 32px auto; }
 
 /* Tables */
 .prose table { display: block; max-width: 100%; margin: 24px 0 32px; overflow-x: auto; border-collapse: collapse; font-size: 0.9375rem; }
@@ -149,14 +173,14 @@ html[data-color-mode='dark'] .prose tbody tr:hover { background: var(--color-car
 .prose .pros-cons td:first-child { font-weight: var(--font-weight-bold); white-space: nowrap; }
 
 /* Collapsible detail */
-.prose details { margin: 20px 0; border: 1px solid var(--color-gray-100); border-radius: var(--radius); }
-.prose summary { padding: 10px 16px; cursor: pointer; font-weight: var(--font-weight-medium); }
-.prose details[open] summary { border-bottom: 1px solid var(--color-gray-100); }
-.prose details > :not(summary) { margin-inline: 16px; }
-.prose details > :not(summary):first-of-type { margin-top: 12px; }
+/* No box or lines, as <Fold>: the summary, then the body indented under it. */
+.prose details { margin: 8px 0 16px; }
+.prose summary { padding: 6px 0; cursor: pointer; font-weight: var(--font-weight-medium); }
+.prose summary:hover { color: var(--color-primary); }
+.prose details > :not(summary) { margin-inline: 18px 0; }
+.prose details > :not(summary):first-of-type { margin-top: 4px; }
 
 @media (max-width: 800px) {
-  .prose pre.astro-code { margin-inline: calc(var(--viewport-padding) * -1); border-radius: 0; }
   .prose .heading-anchor { display: none; }
 }
 

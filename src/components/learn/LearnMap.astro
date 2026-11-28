@@ -68,16 +68,16 @@ for (let pass = 0; pass < 6; pass++) {
 }
 
 // Geometry (px at 100%).
-const BW = 176, BH = 50, GAP_X = 22, GAP_Y = 92, PAD = 24;
+const BW = 176, BH = 50, GX = 22, GY = 92, PAD = 24;
 const widest = Math.max(...rows.map((r) => r.length));
-const W = PAD * 2 + widest * BW + (widest - 1) * GAP_X;
-const H = PAD * 2 + rows.length * BH + (rows.length - 1) * GAP_Y;
+const W = PAD * 2 + widest * BW + (widest - 1) * GX;
+const H = PAD * 2 + rows.length * BH + (rows.length - 1) * GY;
 const xy = new Map<string, { x: number; y: number }>();
 rows.forEach((r, l) => {
-  const rowW = r.length * BW + (r.length - 1) * GAP_X;
+  const rowW = r.length * BW + (r.length - 1) * GX;
   const x0 = (W - rowW) / 2;
-  const y = PAD + (top - l) * (BH + GAP_Y);
-  r.forEach((p, i) => xy.set(p.slug, { x: x0 + i * (BW + GAP_X), y }));
+  const y = PAD + (top - l) * (BH + GY);
+  r.forEach((p, i) => xy.set(p.slug, { x: x0 + i * (BW + GX), y }));
 });
 const tone = (t: string) => TRACKS.find((x) => x.id === t)?.tone ?? 'neutral';
 // Draw only the transitive reduction: skip p -> c when p reaches c through another child.
@@ -140,7 +140,7 @@ const tracksUsed = TRACKS.filter((t) => scope.some((p) => p.track === t.id));
   .lm-e { fill: none; stroke-width: 1.6; opacity: 0.45; transition: opacity 150ms, stroke-width 150ms; }
   .lm-n {
     position: absolute; display: flex; flex-direction: column; justify-content: center; gap: 1px;
-    padding: 4px 10px; border-radius: 10px; border: 1.5px solid transparent;
+    padding: 4px 10px; border-radius: 0; border: 1.5px solid transparent;
     text-decoration: none; color: var(--color-text); background: var(--lm-bg);
     box-shadow: 0 1px 2px rgb(0 0 0 / 0.08); transition: opacity 150ms, box-shadow 150ms;
   }

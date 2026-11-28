@@ -56,10 +56,14 @@ const [cw, ch, cvb, carve, rule] = type === 'warning' ? SLANT : ROUND;
     --tint: var(--color-info-100);
     --link-underline: var(--color-primary);
     position: relative;
-    margin: 32px -32px 64px;
-    padding: 24px 32px 24px 29px;
-    border-left: 3px solid transparent;
-    border-radius: 0 4px 4px 0;
+    /* Same edges as the text: the icon sits inside, in its own column; title and text beside it. */
+    display: grid;
+    grid-template-columns: 22px minmax(0, 1fr);
+    column-gap: 14px;
+    margin: 28px 0 36px;
+    padding: 16px 20px;
+    border: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+    border-radius: 0;
     background: var(--tint);
     font-size: 1rem;
     line-height: 1.5;
@@ -73,26 +77,20 @@ const [cw, ch, cvb, carve, rule] = type === 'warning' ? SLANT : ROUND;
   .success { --accent: var(--color-success); --tint: var(--color-success-100); --link-underline: var(--color-success); }
   .error { --accent: var(--color-error); --tint: var(--color-error-100); --link-underline: var(--color-error); }
 
-  /* The rule: corner piece on top, then a 3px bar to the bottom, over the transparent left border. */
-  .rule { position: absolute; top: 0; left: 0; bottom: 0; display: flex; flex-direction: column; transform: translateX(-3px); pointer-events: none; }
+  /* No side stripe: a thin border all round (above); the corner rule is not drawn. */
+  .rule { display: none; position: absolute; top: 0; left: 0; bottom: 0; transform: translateX(-3px); pointer-events: none; }
   .corner { display: block; overflow: visible; margin-top: -0.5px; }
   .corner.slant { margin-top: -1.5px; }
   .carve { fill: var(--color-background); transition: fill 350ms; }
   .stroke { fill: var(--accent); }
-  .line { flex: 1 1; width: 3px; margin-top: -1px; border-radius: 0 0 100px 100px; background: var(--accent); }
+  .line { flex: 1 1; width: 3px; margin-top: -1px; border-radius: 0; background: var(--accent); }
 
-  /* The icon is centred on the box's top-left corner. */
-  .icon {
-    position: absolute;
-    top: 0;
-    left: 0;
-    transform: translate(calc(-50% - 1.5px), -50%);
-    padding: 8px;
-    color: var(--accent);
-  }
-  .icon svg { display: block; }
+  /* The icon: first column, level with the first line, in the accent colour. */
+  .icon { grid-column: 1; grid-row: 1 / span 2; padding-top: 2px; color: var(--accent); }
+  .icon svg { display: block; width: 22px; height: 22px; }
+  .title, .body { grid-column: 2; }
 
-  .title { display: block; margin-bottom: 8px; font-size: 1.125rem; font-weight: var(--font-weight-bold); line-height: 1.5; }
+  .title { display: block; margin-bottom: 4px; font-size: 1.0625rem; font-weight: var(--font-weight-bold); line-height: 1.5; }
   .body > :global(*:last-child) { margin-bottom: 0; }
   .body :global(p) { font-size: 1rem; line-height: 1.5; margin-bottom: 20px; }
   .body :global(a) { box-shadow: 0 1.5px 0 0 var(--link-underline); }

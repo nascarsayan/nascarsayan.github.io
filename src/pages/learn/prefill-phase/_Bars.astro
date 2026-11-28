@@ -47,8 +47,8 @@ const pct = (v: number) => `${Math.max(0, Math.min(100, (v / max) * 100))}%`;
   .bars-title { margin-bottom: 6px; font-size: 0.8125rem; font-weight: var(--font-weight-bold); color: var(--color-gray-800); }
   .bars-grid { display: grid; grid-template-columns: max-content 1fr; gap: 5px 10px; align-items: center; }
   .bars-label { font-size: 0.75rem; font-weight: 600; color: var(--color-gray-700); text-align: right; white-space: nowrap; }
-  .bars-track { position: relative; height: 24px; border-radius: 6px; background: var(--color-gray-100); }
-  .bars-seg { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 5px; overflow: visible; transition: opacity 150ms; }
+  .bars-track { position: relative; height: 24px; border-radius: 0; background: var(--color-gray-100); }
+  .bars-seg { position: absolute; top: 0; bottom: 0; min-width: 3px; border-radius: 0; overflow: visible; transition: opacity 150ms; }
   .bars-text { position: absolute; left: 6px; top: 50%; transform: translateY(-50%); font-size: 0.75rem; font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; color: var(--color-text); pointer-events: none; }
   .bars-dim .bars-seg:not(.is-hi) { opacity: 0.35; }
   .bars-seg.is-hi { outline: 2px solid var(--color-primary); outline-offset: 0; }

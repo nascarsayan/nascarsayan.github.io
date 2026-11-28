@@ -1,0 +1,373 @@
+---
+/**
+ * Reader settings, kept in this browser (localStorage) and applied before first
+ * paint by BaseLayout:
+ *   theme       auto (default) | light | dark  -> html[data-theme], html[data-color-mode]
+ *   width       medium (default) | wide        -> html[data-width] (--page-max, --measure)
+ *   sound       on | off (default)              -> html[data-sound] (scripts/sound.ts)
+ *   sound-volume 1–100, unset = 50              -> setVolume() output gain (scripts/sound.ts)
+ *     (one Sound row: speaker button mutes/unmutes, slider sets volume, 0 = off)
+ *   accent      an ACCENTS id (default slate)   -> html[data-accent] (accents.css)
+ *   code-light  a LIGHT_CODE id                 -> html[data-code-light]
+ *   code-dark   a DARK_CODE id                  -> html[data-code-dark]
+ * Layout: one row per setting (label and hint left, control right), thin
+ * dividers, no boxes. Every control applies at once, on this page too.
+ */
+import '@/styles/prose.css';
+import BaseLayout from '@/layouts/BaseLayout.astro';
+import { Code } from 'astro:components';
+import { CODE_THEMES, LIGHT_CODE, DARK_CODE } from '@/config/code-themes.mjs';
+import { ACCENTS } from '@/config/accents';
+
+// Lucide-style 24px stroke icons.
+const I = {
+  auto: '<circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 1 0 16Z" fill="currentColor"/>',
+  light: '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>',
+  dark: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5Z"/>',
+  medium: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/>',
+  wide: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 9h10M7 13h10M7 17h6"/>',
+};
+const rows = [
+  { name: 'theme', title: 'Theme', hint: 'Auto follows your system. The button at the top of the sidebar cycles it too.',
+    opts: [{ v: 'auto', label: 'Auto' }, { v: 'light', label: 'Light' }, { v: 'dark', label: 'Dark' }] },
+  { name: 'width', title: 'Page width', hint: 'Medium for reading; wide for big tables and diagrams.',
+    opts: [{ v: 'medium', label: 'Medium' }, { v: 'wide', label: 'Wide' }] },
+] as const;
+
+// Keyboard shortcuts, read only. Keep in step with the handlers they name:
+// search.ts, Sidebar.astro, this page, diagram-player.ts, diagram-zoom.ts, decision.ts, chronicle.ts.
+// 'Mod' renders as Ctrl, or ⌘ on a Mac (script below).
+type Keys = string[][]; // alternatives, each a chord: [['Mod', 'K'], ['/']]
+const SHORTCUTS: { group: string; where?: string; rows: { keys: Keys; does: string }[] }[] = [
+  { group: 'Anywhere', rows: [
+    { keys: [['Mod', 'K'], ['/']], does: 'Search' },
+    { keys: [['↑'], ['↓'], ['Enter']], does: 'In search: move, open the result' },
+    { keys: [['Mod', 'Shift', 'S']], does: 'Show or hide the sidebar' },
+    { keys: [['Mod', ',']], does: 'Open or close Settings' },
+    { keys: [['Esc']], does: 'Close search, a popup, the sidebar drawer or Settings' },
+  ] },
+  { group: 'Diagrams', where: 'click a diagram first', rows: [
+    { keys: [['←'], ['→']], does: 'Previous or next step' },
+    { keys: [['Space'], ['K']], does: 'Play or pause' },
+    { keys: [['Home'], ['R']], does: 'Back to the whole diagram' },
+    { keys: [['End']], does: 'Last step' },
+    { keys: [['F']], does: 'Expand; Esc to leave' },
+    { keys: [['+'], ['−'], ['0'], ['1']], does: 'Zoom in, out, to fit, to 100% (zoomable diagrams)' },
+  ] },
+  { group: 'Decision trees', where: 'click a node first', rows: [
+    { keys: [['↑'], ['↓']], does: 'Previous or next node' },
+    { keys: [['→'], ['←']], does: 'Open or close a branch, or go to its child or parent' },
+    { keys: [['Enter']], does: 'Select the node' },
+    { keys: [['Space']], does: 'Open or close the branch (select a leaf)' },
+    { keys: [['F']], does: 'Full screen; Esc to leave' },
+  ] },
+  { group: 'Step-by-step replays', where: 'click the replay first', rows: [
+    { keys: [['←'], ['→']], does: 'Previous or next step' },
+    { keys: [['Shift', '←'], ['Shift', '→']], does: 'Previous or next stage' },
+    { keys: [['F']], does: 'Full screen; Esc to leave' },
+  ] },
+];
+
+const sample = `# Build the static site
+bun run build
+
+# Preview it locally
+bun run preview`;
+---
+
+<BaseLayout title="Settings" description="Reader settings for this site, kept in your browser.">
+  <div class="body">
+    <header class="head">
+      <button type="button" class="back" data-settings-close aria-label="Back" title="Back (Esc)">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 12H5M11 6l-6 6 6 6" /></svg>
+      </button>
+      <div>
+        <h1>Settings</h1>
+        <p class="lede">Kept in this browser only. Changes apply at once.</p>
+      </div>
+    </header>
+    <ul class="list" role="list">
+      {rows.map((r) => (
+        <li class="row">
+          <div class="text"><p class="title" id={`l-${r.name}`}>{r.title}</p><p class="hint">{r.hint}</p></div>
+          <div class="seg" role="radiogroup" aria-labelledby={`l-${r.name}`}>
+            {r.opts.map((o) => (
+              <label title={o.label}>
+                <input type="radio" name={r.name} value={o.v} />
+                <svg viewBox="0 0 24 24" aria-hidden="true" set:html={I[o.v as keyof typeof I]} />
+                <span>{o.label}</span>
+              </label>
+            ))}
+          </div>
+        </li>
+      ))}
+
+      <li class="row">
+        <div class="text"><p class="title" id="l-sound">Sound</p><p class="hint">Small click sounds on buttons and diagrams. Click the speaker to mute.</p></div>
+        <div class="vol" data-level="0">
+          <button type="button" class="spk" data-mute aria-pressed="true" aria-label="Sound off" title="Sound off">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M11 5 6 9H3v6h3l5 4Z" />
+              <path class="w w1" d="M14.5 10a2.5 2.5 0 0 1 0 4" />
+              <path class="w w2" d="M16.8 7.6a6 6 0 0 1 0 8.8" />
+              <path class="w w3" d="M19.2 5.2a9.5 9.5 0 0 1 0 13.6" />
+              <path class="x" d="m16 9.5 5 5M21 9.5l-5 5" />
+            </svg>
+          </button>
+          <input type="range" min="0" max="100" step="5" data-volume aria-labelledby="l-sound" />
+        </div>
+      </li>
+
+      <li class="row">
+        <div class="text"><p class="title" id="l-accent">Accent colour</p><p class="hint">Links, the active section and highlights.</p></div>
+        <div class="dots" role="radiogroup" aria-labelledby="l-accent">
+          {ACCENTS.map((a) => (
+            <label title={a.label} style={`--sw-l: ${a.light}; --sw-d: ${a.dark}`}>
+              <input type="radio" name="accent" value={a.id} aria-label={a.label} />
+              <span class="dot" aria-hidden="true"></span>
+            </label>
+          ))}
+        </div>
+      </li>
+
+      <li class="row row-block">
+        <div class="text"><p class="title">Code snippets</p><p class="hint">One theme for light mode, one for dark. The preview follows the current mode.</p></div>
+        <div class="selects">
+          <label><span>Light</span><select data-code="light">{LIGHT_CODE.map((t) => <option value={t.id}>{t.label}</option>)}</select></label>
+          <label><span>Dark</span><select data-code="dark">{DARK_CODE.map((t) => <option value={t.id}>{t.label}</option>)}</select></label>
+        </div>
+        <div class="preview prose"><Code code={sample} lang="bash" themes={CODE_THEMES} /></div>
+      </li>
+
+      <li class="row row-block keys">
+        <div class="text"><p class="title" id="l-keys">Keyboard shortcuts</p><p class="hint">Fixed; they cannot be changed.</p></div>
+        <div class="key-groups" aria-labelledby="l-keys">
+          {SHORTCUTS.map((g) => (
+            <section class="key-group">
+              <p class="key-head">{g.group}{g.where && <span> · {g.where}</span>}</p>
+              <dl>
+                {g.rows.map((r) => (
+                  <div class="key-row">
+                    <dt>
+                      {r.keys.map((chord, i) => (
+                        <>
+                          {i > 0 && <span class="or">/</span>}
+                          <span class="chord">{chord.map((k) => <kbd data-mod={k === 'Mod' ? '' : undefined}>{k === 'Mod' ? 'Ctrl' : k}</kbd>)}</span>
+                        </>
+                      ))}
+                    </dt>
+                    <dd>{r.does}</dd>
+                  </div>
+                ))}
+              </dl>
+            </section>
+          ))}
+        </div>
+      </li>
+    </ul>
+  </div>
+</BaseLayout>
+
+<style>
+  /* One fixed column (the Page width setting does not apply here), centred in the space
+     beside the sidebar whether it is open or closed. */
+  .body { box-sizing: content-box; max-width: 760px; margin-inline: auto; padding: 40px var(--viewport-padding) 48px; }
+  /* Sidebar closed: the page column starts 48px in (room for the open button), so
+     shift by half of that to sit in the middle of the window. */
+  @media (min-width: 961px) { :global(html[data-sidebar='collapsed']) .body { translate: -24px 0; } }
+  /* Back sits in the left margin, its centre in line with the title. */
+  .head { position: relative; margin-bottom: 18px; }
+  .head h1 { font-size: 2.25rem; font-weight: var(--font-weight-medium); line-height: 1.3; }
+  .lede { margin-top: 4px; font-size: 1.125rem; color: var(--color-gray-800); }
+  .back { position: absolute; right: calc(100% + 16px); top: 5px; display: grid; place-items: center; width: 38px; height: 38px; border-radius: 0; color: var(--color-gray-700); transition: color 120ms, background 120ms; }
+  .back:hover { color: var(--color-primary); background: var(--color-cloud-100); }
+  .back:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .back svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
+  /* No room in the margin: back sits above the title, so the title keeps the rows' left edge. */
+  @media (max-width: 1100px) {
+    .back { position: static; margin: -14px 0 2px -9px; }
+  }
+  .list { border-top: 1px solid var(--color-gray-100); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 24px; padding: 16px 0; border-bottom: 1px solid var(--color-gray-100); }
+  .row-block { display: grid; grid-template-columns: 1fr auto; align-items: center; }
+  .row-block .preview { grid-column: 1 / -1; }
+  .title { font-weight: var(--font-weight-medium); }
+  .hint { margin-top: 2px; font-size: 0.85rem; color: var(--color-muted); }
+
+  /* Segmented control: icon + label, one pill track. */
+  /* Selected = accent tint + accent text + accent outline, so it stands out in light and dark. */
+  .seg { display: inline-flex; flex: none; padding: 3px; gap: 2px; border-radius: 0; border: 1px solid var(--color-gray-100); }
+  .seg label { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 0; font-size: 0.85rem; color: var(--color-muted); cursor: pointer; transition: color 120ms, background 120ms; }
+  .seg label:hover { color: var(--color-text); background: var(--color-cloud-100); }
+  .seg label:has(input:checked) { background: color-mix(in srgb, var(--color-primary) 18%, transparent); color: var(--color-primary); font-weight: var(--font-weight-medium); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--color-primary) 55%, transparent); }
+  .seg label:has(input:focus-visible), .dots label:has(input:focus-visible) { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .seg svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+  input[type='radio'] { position: absolute; opacity: 0; pointer-events: none; }
+
+  /* Accent: colour dots, a ring on the chosen one. */
+  .dots { display: flex; flex: none; gap: 8px; }
+  .dots label { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; cursor: pointer; box-shadow: 0 0 0 2px transparent; transition: box-shadow 120ms; }
+  .dots label:has(input:checked) { box-shadow: 0 0 0 2px var(--color-text); }
+  .dot { width: 20px; height: 20px; border-radius: 50%; background: var(--sw-l); }
+  :global(html[data-color-mode='dark']) .dot { background: var(--sw-d); }
+
+  /* Sound: speaker button (waves show the level, X when muted) + slider. */
+  .vol { display: inline-flex; flex: none; align-items: center; gap: 8px; }
+  .vol input { width: 180px; accent-color: var(--color-primary); cursor: pointer; }
+  .vol[data-level='0'] input { opacity: 0.5; }
+  .spk { display: grid; place-items: center; width: 34px; height: 34px; padding: 0; border: 0; border-radius: 0; background: none; color: var(--color-primary); cursor: pointer; transition: background 120ms, color 120ms; }
+  .spk:hover { background: var(--color-cloud-100); }
+  .spk:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
+  .vol[data-level='0'] .spk { color: var(--color-muted); }
+  .spk svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; overflow: visible; }
+  /* Each wave fades and slides in from the speaker as the level passes it. */
+  .spk .w, .spk .x { transform-box: view-box; transform-origin: 11px 12px; transition: opacity 160ms ease, transform 200ms cubic-bezier(0.3, 1.4, 0.6, 1); }
+  .spk .w { opacity: 0; transform: scale(0.6); }
+  .vol[data-level='1'] .w1, .vol[data-level='2'] :is(.w1, .w2), .vol[data-level='3'] .w { opacity: 1; transform: none; }
+  .spk .x { opacity: 0; transform: scale(0.4) rotate(-45deg); transform-origin: 18.5px 12px; }
+  .vol[data-level='0'] .x { opacity: 1; transform: none; }
+  @media (prefers-reduced-motion: reduce) { .spk .w, .spk .x { transition: none; } }
+
+  .selects { display: flex; gap: 12px; }
+  .selects label { display: inline-flex; align-items: center; gap: 6px; font-size: 0.85rem; color: var(--color-muted); }
+  select { padding: 5px 8px; border: 1px solid var(--color-gray-300); border-radius: 0; background: var(--color-background); color: var(--color-text); font: inherit; font-size: 0.875rem; }
+  .preview { margin-top: 12px; }
+
+  /* Keyboard shortcuts: groups in two columns, keys as small caps-like keycaps. */
+  .key-groups { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px 28px; margin-top: 10px; }
+  .key-head { margin-bottom: 4px; font-size: 0.75rem; letter-spacing: 0.4px; text-transform: uppercase; color: var(--color-muted); }
+  .key-head span { text-transform: none; letter-spacing: 0; }
+  .key-group dl { margin: 0; }
+  .key-row { display: grid; grid-template-columns: 9.5rem 1fr; gap: 10px; align-items: baseline; padding: 3px 0; font-size: 0.85rem; }
+  .key-row dt { display: flex; flex-wrap: wrap; align-items: center; gap: 3px; }
+  .key-row dd { margin: 0; color: var(--color-gray-800); }
+  .chord { display: inline-flex; gap: 2px; }
+  .or { color: var(--color-muted); font-size: 0.75rem; padding: 0 1px; }
+  kbd { display: inline-block; min-width: 1.5em; padding: 0 5px; border: 1px solid var(--color-gray-300); border-bottom-width: 2px; border-radius: 0; background: var(--color-background); font-family: var(--font-family-mono); font-size: 0.72rem; line-height: 1.5; text-align: center; color: var(--color-text); }
+  .preview :global(.code-wrap), .preview :global(pre) { margin: 0 !important; }
+  /* The sample scrolls inside its box instead of widening the page. */
+  .preview, .key-groups { min-width: 0; }
+  .preview :global(pre) { overflow-x: auto; }
+
+  @media (max-width: 640px) {
+    .row, .row-block { flex-direction: column; align-items: flex-start; display: flex; }
+    .dots { flex-wrap: wrap; }
+    .preview, .key-groups { align-self: stretch; }
+    .key-groups { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+
+<script>
+  import { setSoundEnabled, playSound, setVolume, DEFAULT_VOLUME } from '@/scripts/sound';
+  import { url } from '@/lib/base';
+  const root = document.documentElement;
+  const mq = matchMedia('(prefers-color-scheme: dark)');
+  const store = (k: string, v: string | null) => { try { v === null ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch { /* storage off */ } };
+  const apply: Record<string, (v: string) => void> = {
+    theme: (v) => {
+      root.dataset.theme = v;
+      root.dataset.colorMode = v === 'auto' ? (mq.matches ? 'dark' : 'light') : v;
+      store('theme', v === 'auto' ? null : v);
+    },
+    width: (v) => { root.dataset.width = v === 'wide' ? 'wide' : ''; store('width', v); },
+    accent: (v) => {
+      if (v === 'slate') { delete root.dataset.accent; store('accent', null); }
+      else { root.dataset.accent = v; store('accent', v); }
+    },
+  };
+  const current = (): Record<string, string> => ({
+    theme: root.dataset.theme === 'light' || root.dataset.theme === 'dark' ? root.dataset.theme : 'auto',
+    width: root.dataset.width === 'wide' ? 'wide' : 'medium',
+    accent: root.dataset.accent || 'slate',
+  });
+
+  // Sound: one control. Slider = volume (0 = off); speaker button mutes/unmutes
+  // back to the last level. Waves on the speaker track the level (0–3).
+  const volBox = document.querySelector<HTMLElement>('.vol')!;
+  const vol = volBox.querySelector<HTMLInputElement>('input[data-volume]')!;
+  const spk = volBox.querySelector<HTMLButtonElement>('button[data-mute]')!;
+  let level = DEFAULT_VOLUME; // last non-zero volume, restored on unmute
+  {
+    let saved: string | null = null;
+    try { saved = localStorage.getItem('sound-volume'); } catch { /* storage off */ }
+    const n = saved === null ? NaN : Number(saved);
+    if (Number.isFinite(n) && n > 0) level = Math.min(100, n);
+  }
+  const isOn = () => root.dataset.sound === 'on';
+  function paint() {
+    const v = Number(vol.value);
+    const on = isOn() && v > 0;
+    volBox.dataset.level = String(on ? (v <= 33 ? 1 : v <= 66 ? 2 : 3) : 0);
+    const label = on ? `Mute (volume ${v}%)` : 'Sound off — click to unmute';
+    spk.setAttribute('aria-pressed', String(!on));
+    spk.setAttribute('aria-label', label);
+    spk.title = label;
+    vol.setAttribute('aria-valuetext', on ? `${v}%` : 'Off');
+  }
+  function turn(on: boolean) {
+    setSoundEnabled(on);
+    store('sound', on ? 'on' : null);
+  }
+  vol.value = String(isOn() ? level : 0);
+  paint();
+  vol.addEventListener('input', () => {
+    const v = Number(vol.value);
+    if (v > 0) { setVolume(v); if (!isOn()) turn(true); }
+    else if (isOn()) turn(false);
+    paint();
+  });
+  vol.addEventListener('change', () => {
+    const v = Number(vol.value);
+    if (v > 0) { level = v; store('sound-volume', v === DEFAULT_VOLUME ? null : String(v)); playSound('popUpOn'); }
+  });
+  spk.addEventListener('click', () => {
+    if (isOn()) { turn(false); vol.value = '0'; }
+    else { setVolume(level); vol.value = String(level); turn(true); playSound('soundOn'); }
+    paint();
+  });
+
+  // Shortcut list: the modifier is ⌘ on a Mac.
+  if (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) {
+    document.querySelectorAll('kbd[data-mod]').forEach((k) => { k.textContent = '⌘'; });
+  }
+
+  // Close: back to the page Settings was opened from. History back when that page is
+  // the previous entry (keeps its scroll), else open it, else the home page.
+  const closeSettings = () => {
+    let ret: string | null = null;
+    try { ret = sessionStorage.getItem('settings-return'); } catch { /* storage off */ }
+    const same = (u: string) => { try { return new URL(u).origin === location.origin; } catch { return false; } };
+    if (ret && !same(ret)) ret = null;
+    const prev = document.referrer && same(document.referrer) ? document.referrer : null;
+    if (prev && history.length > 1 && (!ret || prev === ret)) history.back();
+    else location.href = ret ?? prev ?? url('/');
+  };
+  document.querySelector('[data-settings-close]')?.addEventListener('click', closeSettings);
+  addEventListener('keydown', (e) => {
+    const typing = e.target instanceof Element && e.target.closest('select, input[type="text"], textarea');
+    // Esc closes an open dialog (search) first; only a bare Esc closes Settings.
+    const overlay = document.querySelector('dialog[open]');
+    if (e.key === 'Escape' && !typing && !overlay && !e.defaultPrevented) closeSettings();
+    else if ((e.metaKey || e.ctrlKey) && !e.shiftKey && !e.altKey && e.key === ',') { e.preventDefault(); closeSettings(); }
+  });
+
+  const radios = [...document.querySelectorAll<HTMLInputElement>('input[type="radio"]')];
+  const sync = () => { const c = current(); radios.forEach((r) => { r.checked = c[r.name] === r.value; }); };
+  sync();
+  radios.forEach((r) => r.addEventListener('change', () => {
+    if (!r.checked) return;
+    apply[r.name]?.(r.value);
+    playSound('popUpOn');
+  }));
+  // The sidebar theme button changes html[data-theme]; keep the radios in step.
+  new MutationObserver(sync).observe(root, { attributes: true, attributeFilter: ['data-theme'] });
+  document.querySelectorAll<HTMLSelectElement>('select[data-code]').forEach((s) => {
+    const mode = s.dataset.code as 'light' | 'dark';
+    const key = mode === 'light' ? 'codeLight' : 'codeDark';
+    s.value = root.dataset[key] || 'github';
+    s.addEventListener('change', () => {
+      if (s.value === 'github') { delete root.dataset[key]; store(`code-${mode}`, null); }
+      else { root.dataset[key] = s.value; store(`code-${mode}`, s.value); }
+    });
+  });
+</script>

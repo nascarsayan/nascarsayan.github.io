@@ -27,19 +27,19 @@ import IconButton from './IconButton.astro';
   /* Template "boop": a springy tilt on hover. */
   :global(.search-trigger) svg { transition: transform 400ms var(--spring-easing); }
   @media (hover: hover) { :global(.search-trigger:hover) svg { transform: rotate(-15deg) scale(1.1); } }
-  kbd { padding: 0 6px; border-radius: 4px; border: 1px solid var(--color-gray-300); font-family: var(--font-family-mono); font-size: 0.75rem; color: var(--color-muted); }
-  .search { width: min(640px, 94vw); max-height: 80vh; margin: 10vh auto auto; padding: 0; border: 0; border-radius: 12px; background: var(--color-background); color: var(--color-text); box-shadow: var(--shadow-elevation-medium); }
+  kbd { padding: 0 6px; border-radius: 0; border: 1px solid var(--color-gray-300); font-family: var(--font-family-mono); font-size: 0.75rem; color: var(--color-muted); }
+  .search { width: min(640px, 94vw); max-height: 80vh; margin: 10vh auto auto; padding: 0; border: 0; border-radius: 0; background: var(--color-background); color: var(--color-text); box-shadow: var(--shadow-elevation-medium); }
   .search::backdrop { background: rgb(10 12 16 / 0.45); backdrop-filter: blur(2px); }
   .field { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border-bottom: 1px solid var(--color-gray-100); color: var(--color-muted); }
   input { flex: 1; border: 0; outline: 0; background: transparent; font-size: 1.0625rem; color: var(--color-text); }
   .results { list-style: none; margin: 0; padding: 6px; max-height: calc(80vh - 60px); overflow: auto; }
-  .results :global(a) { display: block; padding: 10px 12px; border-radius: 8px; text-decoration: none; color: inherit; }
+  .results :global(a) { display: block; padding: 10px 12px; border-radius: 0; text-decoration: none; color: inherit; }
   .results :global(a[aria-selected='true']), .results :global(a:hover) { background: var(--color-cloud-100); }
   :global(html[data-color-mode='dark']) .results :global(a[aria-selected='true']), :global(html[data-color-mode='dark']) .results :global(a:hover) { background: var(--color-card-bg); }
   .results :global(.r-title) { display: block; font-weight: var(--font-weight-bold); }
   .results :global(.r-section) { color: var(--color-primary); font-weight: var(--font-weight-medium); }
   .results :global(.r-snippet) { display: block; margin-top: 2px; font-size: 0.875rem; color: var(--color-gray-700); }
-  .results :global(mark) { background: var(--color-alert-background); color: inherit; border-radius: 2px; }
+  .results :global(mark) { background: var(--color-alert-background); color: inherit; border-radius: 0; }
   .empty { padding: 16px; color: var(--color-muted); }
 </style>
 

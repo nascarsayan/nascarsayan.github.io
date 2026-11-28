@@ -23,10 +23,10 @@ const word: Record<S, string> = { ok: 'serving', hit: 'fault here', down: 'proce
 
 <style>
   .hv { margin: 12px 0; }
-  .hv-board { padding: 10px 12px 12px; border: 2px dashed var(--color-gray-300); border-radius: 14px; }
+  .hv-board { padding: 10px 12px 12px; border: 2px dashed var(--color-gray-300); border-radius: 0; }
   .hv-name { display: block; margin-bottom: 8px; font-size: 0.75rem; color: var(--color-muted); }
   .hv-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
-  .hv-gpu { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 10px; border: 1px solid var(--color-gray-100); background: var(--color-success-100); font-size: 0.8125rem; }
+  .hv-gpu { display: flex; flex-direction: column; padding: 8px 10px; border-radius: 0; border: 1px solid var(--color-gray-100); background: var(--color-success-100); font-size: 0.8125rem; }
   .hv-gpu b { font-size: 0.875rem; }
   .hv-gpu.s-hit { background: var(--color-error); color: white; border-color: var(--color-error); }
   .hv-gpu.s-down { background: var(--color-error-100); border-color: var(--color-error); }

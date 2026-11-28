@@ -256,7 +256,7 @@ class Tree {
     const title = sv('title');
     title.textContent = label;
     g.append(title);
-    g.append(sv('rect', { class: 'dt-box', width: p.w, height: p.h, rx: 7 }));
+    g.append(sv('rect', { class: 'dt-box', width: p.w, height: p.h }));
     const tx = sv('text', { class: 'dt-label', x: PAD_X, y: n.note ? 17 : p.h / 2 + 4.5 });
     tx.textContent = n.label;
     g.append(tx);
@@ -282,7 +282,7 @@ class Tree {
       const fold = sv('g', { class: 'dt-fold', role: 'button', 'aria-label': `${folded ? 'Unfold' : 'Fold'} ${n.label}` });
       const ft = sv('title');
       ft.textContent = folded ? 'Unfold' : 'Fold';
-      fold.append(ft, sv('rect', { class: 'dt-fold-hit', x: p.w - FOLD_W, y: 1, width: FOLD_W - 1, height: p.h - 2, rx: 6 }),
+      fold.append(ft, sv('rect', { class: 'dt-fold-hit', x: p.w - FOLD_W, y: 1, width: FOLD_W - 1, height: p.h - 2 }),
         sv('path', { class: 'dt-chev', d: folded ? `M${p.w - 15},${p.h / 2 - 4} l4,4 -4,4` : `M${p.w - 17},${p.h / 2 - 2} l4,4 4,-4` }));
       g.append(fold);
       const c = this.counts(n), total = Object.values(c).reduce((a, b) => a + b, 0);
@@ -606,8 +606,9 @@ class Tree {
     });
     r.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
-        if (r.classList.contains('is-full')) this.full(false);
-        else if (this.selected || this.selLevel != null) this.select(undefined);
+        // Topmost layer first: the open selection (its detail), then the full window.
+        if (this.selected || this.selLevel != null) this.select(undefined);
+        else if (r.classList.contains('is-full')) this.full(false);
       } else if ((e.key === 'f' || e.key === 'F') && !e.ctrlKey && !e.metaKey && !(e.target as HTMLElement).closest('input,textarea')) {
         e.preventDefault();
         this.full();

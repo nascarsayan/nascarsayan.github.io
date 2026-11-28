@@ -74,7 +74,7 @@ const fmt = (v: number | null) => (v === null ? '−∞' : v.toFixed(digits).rep
   table { border-collapse: separate; border-spacing: 2px; font-variant-numeric: tabular-nums; font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.8125rem; }
   .mx th { padding: 2px 8px; font-weight: 600; font-size: 0.75rem; text-transform: none; letter-spacing: 0; border: 0; color: var(--color-gray-700); text-align: center; white-space: nowrap; }
   th[scope='row'] { text-align: right; }
-  .mx td { min-width: 46px; border: 0; padding: 4px 6px; text-align: right; border-radius: 4px; color: var(--color-text); background: var(--color-gray-100); transition: opacity 150ms; }
+  .mx td { min-width: 46px; border: 0; padding: 4px 6px; text-align: right; border-radius: 0; color: var(--color-text); background: var(--color-gray-100); transition: opacity 150ms; }
   td.mx-mask { color: var(--color-gray-500); background: repeating-linear-gradient(45deg, var(--color-gray-100), var(--color-gray-100) 4px, transparent 4px, transparent 8px); text-align: center; }
   .mx-dim td:not(.mx-hi) { opacity: 0.45; }
   td.mx-hi { outline: 2px solid var(--color-primary); outline-offset: -1px; font-weight: 700; }

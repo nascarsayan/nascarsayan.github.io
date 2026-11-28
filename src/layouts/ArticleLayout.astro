@@ -14,6 +14,7 @@ import '@/styles/explorer.css';
 import BaseLayout from './BaseLayout.astro';
 import LearnPath from '@/components/learn/LearnPath.astro';
 import { readMinutes } from '@/lib/read-time'; // not @/config/routes: that imports every page (cycle)
+import { unbase } from '@/lib/base';
 
 interface Frontmatter {
   title: string;
@@ -28,10 +29,10 @@ interface Frontmatter {
 interface Props { frontmatter: Frontmatter; headings?: { depth: number; slug: string; text: string }[] }
 const { frontmatter: fm, headings = [] } = Astro.props;
 const links = fm.links ?? [];
-const learnSlug = Astro.url.pathname.match(/^\/learn\/([^/]+)\/?$/)?.[1];
+const learnSlug = unbase(Astro.url.pathname).match(/^\/learn\/([^/]+)\/?$/)?.[1];
 // Header meta line: created, updated, reading time (prose words, as in the page lists).
 const sources = import.meta.glob<string>('/src/pages/**/index.mdx', { query: '?raw', import: 'default', eager: true });
-const src = sources[`/src/pages${Astro.url.pathname.replace(/\/?$/, '/')}index.mdx`];
+const src = sources[`/src/pages${unbase(Astro.url.pathname).replace(/\/?$/, '/')}index.mdx`];
 const fmtDate = (d: string) => new Date(`${d}T00:00:00Z`).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric', timeZone: 'UTC' });
 const metaBits = [
   fm.created && `Created ${fmtDate(fm.created)}`,
@@ -40,38 +41,66 @@ const metaBits = [
 ].filter(Boolean) as string[];
 const toc = headings.filter((h) => h.depth === 2 || h.depth === 3);
 const hasToc = headings.filter((h) => h.depth === 2).length >= 2;
+// Collapsed-sidebar rail: at most MAX_TICKS ticks. One per heading if they fit; else one
+// per ## section (its ### folded in); else neighbouring sections merged evenly.
+// Each tick covers toc[from..to].
+const MAX_TICKS = 24;
+type Tick = { from: number; to: number; depth: number };
+let ticks: Tick[] = toc.map((h, i) => ({ from: i, to: i, depth: h.depth }));
+if (ticks.length > MAX_TICKS) {
+  const starts = toc.flatMap((h, i) => (h.depth === 2 ? [i] : []));
+  let secs: Tick[] = starts.map((s, k) => ({ from: k === 0 ? 0 : s, to: (starts[k + 1] ?? toc.length) - 1, depth: 2 }));
+  if (secs.length > MAX_TICKS) {
+    const per = secs.length / MAX_TICKS;
+    secs = Array.from({ length: MAX_TICKS }, (_, j) => ({
+      from: secs[Math.floor(j * per)].from, to: secs[Math.floor((j + 1) * per) - 1].to, depth: 2,
+    }));
+  }
+  ticks = secs;
+}
 ---
 
-<BaseLayout title={fm.title} description={fm.description} toc={hasToc}>
-  <div class="article max-width-wrapper" class:list={[{ 'has-toc': hasToc }]}>
-    {hasToc && (
-      <aside class="toc-wrap">
-        <div class="toc-sticky">
-          <nav class="toc" id="toc" aria-label="Contents">
-            <p class="toc-title">Contents</p>
-            <ol role="list" data-toc-list>
-              <span class="rail-fill" aria-hidden="true"></span>
-              <span class="rail-dot" aria-hidden="true"></span>
-              {toc.map((h) => (
-                <li class={`d${h.depth}`}><a href={`#${h.slug}`} data-toc={h.slug}><span class="dash" aria-hidden="true"></span><span class="label">{h.text}</span></a></li>
-              ))}
-            </ol>
-          </nav>
-        </div>
-      </aside>
-    )}
+<BaseLayout title={fm.title} description={fm.description}>
+  {hasToc && (
+    <nav class="toc" id="toc" aria-label="Contents" slot="sidebar">
+      <ol role="list" data-toc-list>
+        <span class="rail-fill" aria-hidden="true"></span>
+        <span class="rail-dot" aria-hidden="true"></span>
+        {toc.map((h) => (
+          <li class={`d${h.depth}`}><a href={`#${h.slug}`} data-toc={h.slug}><span class="label">{h.text}</span></a></li>
+        ))}
+      </ol>
+    </nav>
+  )}
+  {hasToc && (
+    /* Sidebar collapsed: ticks at the left centre show where you are; hover for the section list. */
+    <nav class="mini" aria-label="Jump to section">
+      <ol class="mini-ticks" role="list" aria-hidden="true">
+        {ticks.map((t) => <li class={`d${t.depth}`} data-mini-tick data-from={t.from} data-to={t.to} />)}
+      </ol>
+      <div class="mini-panel" data-mini-panel>
+        <ol role="list">
+          {toc.map((h) => (
+            <li class={`d${h.depth}`}><a href={`#${h.slug}`} data-mini-link>{h.text}</a></li>
+          ))}
+        </ol>
+      </div>
+    </nav>
+  )}
+  <div class="article max-width-wrapper">
     <article>
       <header class="head">
-        {fm.eyebrow && <p class="eyebrow">{fm.eyebrow}</p>}
+        <p class="meta">
+          {fm.eyebrow && <span class="eyebrow">{fm.eyebrow}</span>}
+          {metaBits.map((b) => <span>{b}</span>)}
+        </p>
         <h1>{fm.title}</h1>
         {fm.subtitle && <p class="subtitle">{fm.subtitle}</p>}
-        {metaBits.length > 0 && <p class="meta">{metaBits.join(' · ')}</p>}
         {links.length > 0 && (
-          <div class="head-row">
-            <ul role="list" class="links">
-              {links.map((l) => <li><a href={l.href}>{l.label}</a></li>)}
-            </ul>
-          </div>
+          <p class="related">
+            <span class="related-label">Related</span>
+            {links.map((l) => <a href={l.href}>{l.label}</a>)}
+          </p>
         )}
       </header>
       {learnSlug && <LearnPath slug={learnSlug} />}
@@ -81,74 +110,70 @@ const hasToc = headings.filter((h) => h.depth === 2).length >= 2;
 </BaseLayout>
 
 <style>
-  .article { --content-width: 1180px; padding-top: 40px; padding-bottom: 40px; }
-  .article.has-toc { display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 40px; transition: grid-template-columns 250ms var(--ease-out); }
-  :global(html[data-toc='collapsed']) .article.has-toc { grid-template-columns: 32px minmax(0, 1fr); }
-  article { min-width: 0; max-width: 1120px; }
-  /* Prose keeps a readable measure; diagrams, tables and grids use the full width. */
-  .prose :global(> :is(p, ul, ol, blockquote, h2, h3, h4, details:not(.fold), aside)) { max-width: 760px; }
+  /* Width follows the medium/wide switch (--page-max, --measure in global.css). */
+  .article { --content-width: var(--page-max); padding-top: 28px; padding-bottom: 40px; }
+  article { min-width: 0; }
+  /* Prose keeps a readable measure in medium; diagrams, tables and grids use the full width. */
+  .prose :global(> :is(p, ul, ol, blockquote, h2, h3, h4, details:not(.fold), aside)) { max-width: var(--measure); }
   /* A <Fold> spans the full width like tables and diagrams; its text keeps the measure. */
-  .prose :global(.fold-body > :is(p, ul, ol, blockquote, h2, h3, h4, details:not(.fold), aside)) { max-width: 760px; }
-  .toc-sticky { position: sticky; z-index: var(--z-toc); top: calc(var(--header-height) + 20px); transition: top 320ms var(--ease-soft); }
-  :global(html.header-hidden) .toc-sticky { top: 20px; }
-  .toc { max-height: calc(100vh - var(--header-height) - 100px); overflow: auto; font-size: 0.8125rem; }
-  .toc-title { margin-bottom: 8px; font-size: 0.75rem; letter-spacing: 1px; text-transform: uppercase; color: var(--color-muted); }
+  .prose :global(.fold-body > :is(p, ul, ol, blockquote, h2, h3, h4, details:not(.fold), aside)) { max-width: var(--measure); }
+  /* The contents list sits in the site Sidebar under "On this page". */
+  .toc { font-size: 0.875rem; padding: 0 2px 0 10px; }
   .toc ol { position: relative; border-left: 2px solid var(--color-gray-100); }
   /* Reading progress: a fill down the rail and a dot that slides between sections. */
-  .rail-fill { position: absolute; left: -2px; top: 0; width: 2px; height: var(--fill, 0px); background: var(--color-primary); border-radius: 2px; transition: height 120ms linear; }
+  .rail-fill { position: absolute; left: -2px; top: 0; width: 2px; height: var(--fill, 0px); background: var(--color-primary); border-radius: 0; transition: height 120ms linear; }
   .rail-dot { position: absolute; left: -6px; top: 0; width: 10px; height: 10px; border-radius: 999px; background: var(--color-primary); box-shadow: 0 0 0 4px color-mix(in srgb, var(--color-primary) 22%, transparent); transform: translateY(calc(var(--dot, 0px) - 5px)); transition: transform 120ms linear; opacity: var(--dot-on, 0); }
+  .toc ol:global(.is-jumping) :is(.rail-fill, .rail-dot) { transition-duration: 200ms; transition-timing-function: var(--ease-out); }
   .toc a { display: flex; align-items: center; margin-left: -2px; padding: 4px 0 4px 12px; border-left: 2px solid transparent; color: var(--color-gray-700); text-decoration: none; line-height: 1.35; }
   .toc .d3 a { padding-left: 24px; font-size: 0.78rem; }
   .toc a:hover { color: var(--color-primary); }
   .toc a[aria-current='true'] { color: var(--color-primary); font-weight: var(--font-weight-medium); }
   .toc a.is-past { color: var(--color-gray-800); }
-  .dash { display: none; }
 
-  /* Collapsed: a rail of dashes; hovering or focusing it shows the full list. */
-  :global(html[data-toc='collapsed']) .toc { position: relative; overflow: visible; }
-  :global(html[data-toc='collapsed']) .toc-title { display: none; }
-  :global(html[data-toc='collapsed']) .toc ol { border: 0; }
-  :global(html[data-toc='collapsed']) .toc :is(.rail-fill, .rail-dot) { display: none; }
-  :global(html[data-toc='collapsed']) .toc a { padding: 5px 0; border: 0; }
-  :global(html[data-toc='collapsed']) .toc .label { display: none; }
-  :global(html[data-toc='collapsed']) .dash { display: block; width: 18px; height: 2px; border-radius: 2px; background: var(--color-gray-300); transition: width 200ms, background 200ms; }
-  :global(html[data-toc='collapsed']) .d3 .dash { width: 11px; margin-left: 7px; }
-  :global(html[data-toc='collapsed']) a[aria-current='true'] .dash { width: 26px; background: var(--color-primary); }
-  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) ol {
-    position: absolute; top: -8px; left: -8px; z-index: 1;
-    width: 260px; max-height: 70vh; overflow: auto;
-    padding: 10px 12px;
-    background: var(--color-background); border-radius: var(--radius); box-shadow: var(--shadow-elevation-medium);
+  /* Collapsed-sidebar section rail (desktop): ticks at the left centre, panel on hover. */
+  .mini { display: none; position: fixed; left: 8px; top: 50%; transform: translateY(-50%); z-index: var(--z-toc); }
+  @media (min-width: 961px) { :global(html[data-sidebar='collapsed']) .mini { display: block; } }
+  .mini-ticks { display: flex; flex-direction: column; gap: 6px; padding: 10px 8px; }
+  /* Fixed width: the panel hangs off this column's edge, so it must not follow the ticks' widths. */
+  .mini-ticks { box-sizing: content-box; width: 20px; align-items: flex-start; }
+  .mini-ticks li { width: 14px; height: 2px; border-radius: 0; background: var(--color-gray-300); transition: width 160ms var(--ease-out), background 160ms; }
+  .mini-ticks li.d3 { width: 8px; }
+  .mini-ticks li.is-past { background: var(--color-gray-500); }
+  .mini-ticks li.is-cur { width: 20px; background: var(--color-primary); }
+  .mini-panel {
+    position: absolute; left: 100%; top: 50%; width: 290px; max-height: 72vh; overflow-y: auto; overscroll-behavior: contain;
+    padding: 8px; border: 1px solid var(--color-gray-100); border-radius: 0;
+    background: var(--color-background); box-shadow: var(--shadow-elevation-medium);
+    opacity: 0; visibility: hidden; transform: translate(-6px, -50%);
+    /* Closing waits 180ms, so slipping off the rail for a moment does not close and reopen it. */
+    transition: opacity 160ms ease 180ms, transform 200ms var(--ease-out) 180ms, visibility 0s linear 380ms;
   }
-  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) .label { display: inline; }
-  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) .dash { display: none; }
-  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) a { padding: 4px 0; }
-  :global(html[data-toc='collapsed']) .toc:is(:hover, :focus-within) .d3 a { padding-left: 12px; }
+  /* Keyboard focus opens it too; a mouse click's focus does not, so it closes when the pointer leaves. */
+  .mini:hover .mini-panel, .mini:has(:focus-visible) .mini-panel {
+    opacity: 1; visibility: visible; transform: translate(0, -50%);
+    transition: opacity 160ms ease, transform 200ms var(--ease-out), visibility 0s;
+  }
+  .mini-panel a { display: block; padding: 5px 10px; border-radius: 0; font-size: 0.85rem; line-height: 1.35; color: var(--color-text); text-decoration: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mini-panel .d3 a { padding-left: 22px; font-size: 0.8rem; color: var(--color-gray-700); }
+  .mini-panel a:hover { background: var(--color-cloud-100); }
+  .mini-panel a[aria-current='true'] { background: var(--color-info-background); color: var(--color-primary); font-weight: var(--font-weight-medium); }
+  @media (prefers-reduced-motion: reduce) { .mini-ticks li, .mini-panel { transition: none; } }
 
-  @media (max-width: 960px) {
-    .article.has-toc, :global(html[data-toc='collapsed']) .article.has-toc { display: block; }
-    /* The toggle is in the header; on narrow screens the list drops down below it. */
-    .toc-wrap { position: fixed; left: 12px; top: calc(var(--header-height) + 8px); z-index: var(--z-toc); }
-    .toc { display: none; }
-    :global(html[data-toc='open-mobile']) .toc { display: block; position: absolute; top: 0; left: 0; width: min(320px, 85vw); max-height: 60vh; padding: 12px; background: var(--color-background); border-radius: var(--radius); box-shadow: var(--shadow-elevation-medium); }
-  }
-  .head { max-width: 860px; margin-bottom: 32px; padding-bottom: 24px; border-bottom: 1px solid var(--color-gray-100); }
-  .eyebrow { font-size: 0.8125rem; letter-spacing: 1.5px; text-transform: uppercase; color: var(--color-secondary); }
-  h1 { margin-top: 6px; font-size: 2.25rem; font-weight: var(--font-weight-bold); line-height: 1.2; }
-  .subtitle { margin-top: 10px; font-size: 1.125rem; color: var(--color-gray-700); }
-  .head-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-top: 16px; }
-  .meta { margin-top: 10px; font-size: 0.9375rem; color: var(--color-gray-700); font-variant-numeric: tabular-nums; }
-  .links { display: flex; flex-wrap: wrap; gap: 8px; }
-  .links a { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 0.8125rem; text-decoration: none; color: var(--color-link); background: var(--color-cloud-100); }
-  .links a:hover { filter: brightness(0.97); text-decoration: underline; }
-  @media (max-width: 960px) {
-    .article.has-toc { display: block; }
-    .toc { display: none; }
-  }
+  /* Compact header: one small meta line (eyebrow · dates · read time), title, subtitle, related links. */
+  .head { margin-bottom: 22px; padding-bottom: 14px; border-bottom: 1px solid var(--color-gray-100); }
+  .meta { display: flex; flex-wrap: wrap; gap: 2px 0; font-size: 0.8125rem; color: var(--color-muted); font-variant-numeric: tabular-nums; }
+  .meta > span + span::before { content: '·'; margin: 0 7px; color: var(--color-gray-300); }
+  .eyebrow { letter-spacing: 1px; text-transform: uppercase; color: var(--color-secondary); font-weight: var(--font-weight-medium); }
+  h1 { margin-top: 4px; font-size: 1.875rem; font-weight: var(--font-weight-bold); line-height: 1.2; letter-spacing: -0.3px; }
+  .subtitle { margin-top: 6px; font-size: 0.975rem; line-height: 1.5; color: var(--color-gray-700); }
+  .related { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 18px; margin-top: 10px; font-size: 0.875rem; }
+  .related-label { margin-right: -6px; font-size: 0.75rem; letter-spacing: 0.8px; text-transform: uppercase; color: var(--color-muted); }
+  .related a { color: var(--color-primary); font-weight: var(--font-weight-medium); text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--color-primary) 35%, transparent); text-underline-offset: 3px; }
+  .related a:hover { text-decoration-color: currentColor; }
 </style>
 
 <script>
-  // Contents toggle (remembered), copy-link anchors on headings, scroll-spy.
+  // Copy-link anchors on headings, scroll-spy for the contents in the Sidebar.
   const root = document.documentElement;
   // A link to something inside a closed <details> (a <Fold>, a Learn track) opens it first,
   // so the browser can scroll to the target.
@@ -163,23 +188,9 @@ const hasToc = headings.filter((h) => h.depth === 2).length >= 2;
   if (location.hash) document.getElementById(decodeURIComponent(location.hash.slice(1)))?.scrollIntoView();
   addEventListener('hashchange', () => openTo(location.hash));
   document.addEventListener('click', (e) => {
-    const a = (e.target as Element).closest?.('a[href^="#"]');
+    const a = (e.target as Element).closest?.('a[href^="#"]:not(.fold-anchor)');
     if (a) openTo(a.getAttribute('href') ?? '');
   }, true);
-  const toggle = document.querySelector<HTMLButtonElement>('[data-toc-toggle]');
-  const narrow = matchMedia('(max-width: 960px)');
-  const sync = () => toggle?.setAttribute('aria-expanded', String(narrow.matches ? root.dataset.toc === 'open-mobile' : root.dataset.toc !== 'collapsed'));
-  toggle?.addEventListener('click', () => {
-    if (narrow.matches) root.dataset.toc = root.dataset.toc === 'open-mobile' ? '' : 'open-mobile';
-    else {
-      root.dataset.toc = root.dataset.toc === 'collapsed' ? '' : 'collapsed';
-      localStorage.setItem('toc', root.dataset.toc || 'open');
-    }
-    sync();
-  });
-  document.querySelectorAll('[data-toc]').forEach((a) => a.addEventListener('click', () => { if (root.dataset.toc === 'open-mobile') { root.dataset.toc = ''; sync(); } }));
-  sync();
-
   document.querySelectorAll<HTMLHeadingElement>('.prose :is(h2, h3)[id]').forEach((h) => {
     const a = document.createElement('a');
     a.className = 'heading-anchor';
@@ -193,12 +204,114 @@ const hasToc = headings.filter((h) => h.depth === 2).length >= 2;
     });
     h.prepend(a);
   });
+  // Folds: a copy-link icon after the summary text. The click copies the link and puts it in the address bar;
+  // it does not toggle the fold.
+  document.querySelectorAll<HTMLDetailsElement>('.prose details.fold[id]').forEach((d) => {
+    const s = d.querySelector(':scope > summary');
+    if (!s) return;
+    const a = document.createElement('a');
+    a.className = 'fold-anchor';
+    a.href = `#${d.id}`;
+    a.title = 'Copy link';
+    a.setAttribute('aria-label', `Copy link to "${s.textContent?.trim()}"`);
+    a.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/><path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/></svg>';
+    a.addEventListener('click', (e) => {
+      e.preventDefault(); // no toggle, no jump
+      const url = new URL(location.href);
+      url.hash = d.id;
+      history.replaceState(history.state, '', url.toString());
+      navigator.clipboard?.writeText(url.toString()).catch(() => {});
+      a.classList.add('is-copied');
+      a.title = 'Copied';
+      setTimeout(() => { a.classList.remove('is-copied'); a.title = 'Copy link'; }, 1500);
+    });
+    s.append(a);
+  });
   // Scroll-spy with a continuous rail: the fill and dot interpolate between
   // section links by how far the reading line is between their headings.
   const list = document.querySelector<HTMLElement>('[data-toc-list]');
   const items = [...document.querySelectorAll<HTMLAnchorElement>('[data-toc]')];
   const heads = items.map((a) => document.getElementById(a.dataset.toc!));
+  const tickEls = [...document.querySelectorAll<HTMLElement>('[data-mini-tick]')];
+  const tickRanges = tickEls.map((t) => [Number(t.dataset.from), Number(t.dataset.to)] as const);
+  const miniLinks = [...document.querySelectorAll<HTMLAnchorElement>('[data-mini-link]')];
+  const miniPanel = document.querySelector<HTMLElement>('[data-mini-panel]');
+  const sbScroll = document.querySelector<HTMLElement>('.sb-scroll');
+  // Keep an element in the middle of a scroll box, scrolling only that box (never the page).
+  const centerIn = (box: HTMLElement, el: HTMLElement, behavior: ScrollBehavior) => {
+    const b = box.getBoundingClientRect(), r = el.getBoundingClientRect();
+    if (!b.height || (r.top >= b.top + 48 && r.bottom <= b.bottom - 48 && behavior === 'smooth')) return;
+    box.scrollTo({ top: box.scrollTop + (r.top - b.top) - (b.height - r.height) / 2, behavior });
+  };
   let raf = 0;
+  let lastCur = -2;
+  // Clicking a section link smooth-scrolls past every section in between. Without a
+  // lock the indicators would flick through each one and the Sidebar list would
+  // restart its scroll at every step. So: jump straight to the target and hold it
+  // until the reader scrolls by themselves (wheel, touch, keys, scrollbar).
+  let lock = -1;
+  const slugs = items.map((a) => a.dataset.toc!);
+  const mark = (cur: number) => {
+    items.forEach((a, i) => { a.setAttribute('aria-current', String(i === cur)); a.classList.toggle('is-past', i < cur); });
+    tickEls.forEach((t, i) => {
+      const [from, to] = tickRanges[i];
+      t.classList.toggle('is-cur', cur >= from && cur <= to);
+      t.classList.toggle('is-past', to < cur);
+    });
+    miniLinks.forEach((a, i) => a.setAttribute('aria-current', String(i === cur)));
+    if (cur === lastCur) return;
+    // Follow the reader in the Sidebar's list, unless they are using the Sidebar right now.
+    const first = lastCur === -2;
+    lastCur = cur;
+    if (sbScroll && cur >= 0 && (first || !sbScroll.matches(':hover'))) centerIn(sbScroll, items[cur], first ? 'instant' : 'smooth');
+  };
+  // Section jumps: a fast 200ms ease-out scroll of our own instead of the page's CSS
+  // smooth scroll, which takes about a second across a long page.
+  let jump = 0;
+  const cancelJump = () => { cancelAnimationFrame(jump); jump = 0; };
+  const unlock = () => {
+    cancelJump();
+    if (lock < 0) return;
+    lock = -1;
+    list?.classList.remove('is-jumping');
+    raf ||= requestAnimationFrame(spy);
+  };
+  const jumpTo = (el: HTMLElement) => {
+    cancelJump();
+    const pad = parseFloat(getComputedStyle(root).scrollPaddingTop) || 0;
+    const from = scrollY;
+    const to = Math.max(0, Math.min(el.getBoundingClientRect().top + scrollY - pad, root.scrollHeight - innerHeight));
+    if (matchMedia('(prefers-reduced-motion: reduce)').matches || Math.abs(to - from) < 2) { scrollTo({ top: to, behavior: 'instant' }); return; }
+    const t0 = performance.now(), DUR = 200;
+    const step = (now: number) => {
+      const k = Math.min(1, (now - t0) / DUR);
+      scrollTo({ top: from + (to - from) * (1 - (1 - k) ** 3), behavior: 'instant' });
+      jump = k < 1 ? requestAnimationFrame(step) : 0;
+    };
+    jump = requestAnimationFrame(step);
+  };
+  document.addEventListener('click', (e) => {
+    if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    const a = (e.target as Element).closest?.<HTMLAnchorElement>('a[href^="#"]');
+    if (!a) return;
+    let id = a.hash.slice(1);
+    try { id = decodeURIComponent(id); } catch { /* keep as is */ }
+    const i = slugs.indexOf(id);
+    const el = heads[i];
+    if (i < 0 || !el) return;
+    e.preventDefault();
+    if (location.hash !== a.hash) history.pushState(history.state, '', a.hash);
+    lock = i;
+    list?.classList.add('is-jumping');
+    mark(i);
+    jumpTo(el);
+    spy();
+  });
+  for (const ev of ['wheel', 'touchmove'] as const) addEventListener(ev, unlock, { passive: true });
+  const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End', ' ']);
+  addEventListener('keydown', (e) => { if (SCROLL_KEYS.has(e.key)) unlock(); });
+  addEventListener('popstate', unlock);
+  addEventListener('pointerdown', (e) => { if (!(e.target as Element).closest?.('a[href^="#"]')) unlock(); });
   const spy = () => {
     raf = 0;
     if (!list || !items.length) return;
@@ -206,8 +319,15 @@ const hasToc = headings.filter((h) => h.depth === 2).length >= 2;
     const tops = heads.map((h) => (h ? h.getBoundingClientRect().top : Infinity));
     let cur = -1;
     tops.forEach((t, i) => { if (t <= line) cur = i; });
-    items.forEach((a, i) => { a.setAttribute('aria-current', String(i === cur)); a.classList.toggle('is-past', i < cur); });
     const y = (i: number) => items[i].offsetTop + items[i].offsetHeight / 2;
+    if (lock >= 0) {
+      // Rail dot glides once to the target (CSS .is-jumping) instead of tracking the scroll.
+      list.style.setProperty('--fill', `${y(lock)}px`);
+      list.style.setProperty('--dot', `${y(lock)}px`);
+      list.style.setProperty('--dot-on', '1');
+      return;
+    }
+    mark(cur);
     let pos = 0;
     if (cur >= 0) {
       const next = cur + 1 < items.length ? tops[cur + 1] : (document.querySelector('.prose')?.getBoundingClientRect().bottom ?? line);
@@ -220,5 +340,21 @@ const hasToc = headings.filter((h) => h.depth === 2).length >= 2;
   };
   addEventListener('scroll', () => { raf ||= requestAnimationFrame(spy); }, { passive: true });
   addEventListener('resize', spy);
+  // Opening the collapsed rail's panel shows the current section in its middle, but
+  // only when it opens from fully closed (still invisible, so the jump is not seen)
+  // and the row is not already in view. Re-entering an open panel never moves it.
+  const showCur = () => {
+    if (!miniPanel || getComputedStyle(miniPanel).visibility !== 'hidden') return;
+    const a = miniLinks.find((l) => l.getAttribute('aria-current') === 'true');
+    if (!a) return;
+    const b = miniPanel.getBoundingClientRect(), r = a.getBoundingClientRect();
+    if (r.top < b.top + 24 || r.bottom > b.bottom - 24) centerIn(miniPanel, a, 'instant');
+  };
+  miniPanel?.parentElement?.addEventListener('mouseenter', showCur);
+  // Keyboard only: a mouse click also focuses the link, and re-centring then would
+  // yank the list out from under the pointer.
+  miniPanel?.parentElement?.addEventListener('focusin', (e) => {
+    if (!miniPanel.parentElement!.matches(':hover') && !miniPanel.contains(e.relatedTarget as Node)) showCur();
+  });
   spy();
 </script>

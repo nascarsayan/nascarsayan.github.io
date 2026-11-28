@@ -1,6 +1,6 @@
 /**
  * In-process cache of laid-out scenes, keyed by the spec. The dev server renders a
- * page on every request, and a page can lay out twenty diagrams (columns
+ * page on every request, and a page like cs-6408 lays out twenty diagrams (columns
  * variants, label placement); with the cache only changed specs are laid out again.
  * Editing the layout code reloads this module, so the cache never outlives it.
  */

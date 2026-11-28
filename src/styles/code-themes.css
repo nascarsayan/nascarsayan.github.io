@@ -1,0 +1,41 @@
+/*
+ * Code themes (src/config/code-themes.mjs). Shiki writes the default light theme
+ * inline and every other theme as --shiki-<key>, --shiki-<key>-bg, ... on each
+ * block and token. The reader's choice per mode is html[data-code-light] /
+ * html[data-code-dark] (set before first paint by BaseLayout from /settings/).
+ *
+ * Default pair (GitHub): the panel keeps the site's --code-bg (prose.css).
+ * A picked theme also brings its own panel colour, so its token colours sit on
+ * the background they were designed for. Tokens never paint a background: the
+ * -bg variable is inherited from the block and would box every token.
+ */
+html[data-color-mode='dark'] .astro-code,
+html[data-color-mode='dark'] .astro-code span {
+  color: var(--shiki-dark) !important;
+  background-color: var(--shiki-dark-bg) !important;
+  font-style: var(--shiki-dark-font-style) !important;
+  font-weight: var(--shiki-dark-font-weight) !important;
+  text-decoration: var(--shiki-dark-text-decoration) !important;
+}
+
+/* Light mode, picked theme. */
+html[data-color-mode='light'][data-code-light='one'] .astro-code span { color: var(--shiki-l-one) !important; font-style: var(--shiki-l-one-font-style) !important; font-weight: var(--shiki-l-one-font-weight) !important; }
+html[data-color-mode='light'][data-code-light='one'] pre.astro-code { color: var(--shiki-l-one) !important; background-color: var(--shiki-l-one-bg) !important; }
+html[data-color-mode='light'][data-code-light='solarized'] .astro-code span { color: var(--shiki-l-solarized) !important; font-style: var(--shiki-l-solarized-font-style) !important; font-weight: var(--shiki-l-solarized-font-weight) !important; }
+html[data-color-mode='light'][data-code-light='solarized'] pre.astro-code { color: var(--shiki-l-solarized) !important; background-color: var(--shiki-l-solarized-bg) !important; }
+html[data-color-mode='light'][data-code-light='latte'] .astro-code span { color: var(--shiki-l-latte) !important; font-style: var(--shiki-l-latte-font-style) !important; font-weight: var(--shiki-l-latte-font-weight) !important; }
+html[data-color-mode='light'][data-code-light='latte'] pre.astro-code { color: var(--shiki-l-latte) !important; background-color: var(--shiki-l-latte-bg) !important; }
+
+/* Dark mode, picked theme. */
+html[data-color-mode='dark'][data-code-dark='one'] .astro-code span { color: var(--shiki-d-one, var(--shiki-dark)) !important; font-style: var(--shiki-d-one-font-style) !important; font-weight: var(--shiki-d-one-font-weight) !important; }
+html[data-color-mode='dark'][data-code-dark='one'] pre.astro-code { color: var(--shiki-d-one, var(--shiki-dark)) !important; background-color: var(--shiki-d-one-bg, var(--code-bg)) !important; }
+html[data-color-mode='dark'][data-code-dark='dracula'] .astro-code span { color: var(--shiki-d-dracula, var(--shiki-dark)) !important; font-style: var(--shiki-d-dracula-font-style) !important; font-weight: var(--shiki-d-dracula-font-weight) !important; }
+html[data-color-mode='dark'][data-code-dark='dracula'] pre.astro-code { color: var(--shiki-d-dracula, var(--shiki-dark)) !important; background-color: var(--shiki-d-dracula-bg, var(--code-bg)) !important; }
+html[data-color-mode='dark'][data-code-dark='nord'] .astro-code span { color: var(--shiki-d-nord, var(--shiki-dark)) !important; font-style: var(--shiki-d-nord-font-style) !important; font-weight: var(--shiki-d-nord-font-weight) !important; }
+html[data-color-mode='dark'][data-code-dark='nord'] pre.astro-code { color: var(--shiki-d-nord, var(--shiki-dark)) !important; background-color: var(--shiki-d-nord-bg, var(--code-bg)) !important; }
+html[data-color-mode='dark'][data-code-dark='tokyo'] .astro-code span { color: var(--shiki-d-tokyo, var(--shiki-dark)) !important; font-style: var(--shiki-d-tokyo-font-style) !important; font-weight: var(--shiki-d-tokyo-font-weight) !important; }
+html[data-color-mode='dark'][data-code-dark='tokyo'] pre.astro-code { color: var(--shiki-d-tokyo, var(--shiki-dark)) !important; background-color: var(--shiki-d-tokyo-bg, var(--code-bg)) !important; }
+
+/* Tokens of a picked theme: no background of their own. */
+html[data-code-light]:not([data-code-light='github'])[data-color-mode='light'] .astro-code span,
+html[data-code-dark]:not([data-code-dark='github'])[data-color-mode='dark'] .astro-code span { background-color: transparent !important; }

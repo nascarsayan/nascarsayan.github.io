@@ -35,7 +35,7 @@ Cluster platform at Cerebras, lately GPUs. Use AI effectively to constantly swit
 - Team agent skill for Argo conversions (+3k lines) and a guide to common AI conversion mistakes; drive Claude/Codex across tickets, PRs and CI with parallel agents and adversarial AI reviews.
 - 70+ merged PRs, ~370 commits, 100+ tickets, 70+ design docs and runbooks in 15 months.
 
-<Fold summary="More detail">
+<Fold id="fold-cerebras-detail" summary="More detail">
 
 - **Secrets:** packaged Akeyless as a platform app with conditional install; moved services from basic-auth secrets to injector sidecars; gateway and webhook replicas scale with cluster size; injector metrics, log persistence and rotation. Secret paths migrate when a cluster changes its service domain, and auth bindings survive blue-green upgrades. Scale tests at 1.5–2k pods surfaced slow gateway rollouts, which I took to the vendor.
 - **GitOps:** the control-plane service converted in a stacked series of PRs, installer steps moved into Helm hooks; the workload operator from kustomize to Helm + ApplicationSet; cert-manager chart; Kyverno policies replaced a homegrown webhook (net −2k lines); pinned Helm 3.11 → 3.18.
@@ -55,7 +55,7 @@ Cluster platform at Cerebras, lately GPUs. Use AI effectively to constantly swit
 - Core dev on the **k8s operator behind Azure Arc for VMware and SCVMM**, first commit to **GA (Nov 2023)**. Inventory sync 36 → 9 min; guest-agent install failures halved via SSH/WinRM fallbacks.
 - Onboarded 30+ customers (2,000+ VMs), success **65% → 92%**. Fixed vCenter session leak [upstream in CAPV](https://github.com/kubernetes-sigs/cluster-api-provider-vsphere/pull/2235); owned the [Azure CLI extensions](https://github.com/Azure/azure-cli-extensions/tree/main/src/connectedvmware) and onboarding scripts; mentored two interns.
 
-<Fold summary="More detail">
+<Fold id="fold-microsoft-detail" summary="More detail">
 
 - Moved the SCVMM operator to a separate gRPC service in .NET; generated PowerShell from Go structs via reflection so filtering happens at the edge (10x less network traffic, 30% less memory).
 - Load tests with pprof and Grafana dashboards for operator health; SSH and PowerShell-remoting fallbacks when VMware Tools fails to install the guest agent.
@@ -76,7 +76,7 @@ Single Rust CLI (~50k lines, 230+ commits) replacing my shell and Python scripts
 
 <Badge tone="primary">Rust</Badge> <Badge tone="primary">systemd</Badge> <Badge tone="primary">chat bot API</Badge> <Badge tone="primary">Claude Code hooks</Badge>
 
-<Fold summary="More detail">
+<Fold id="fold-valet-detail" summary="More detail">
 
 - `repos`: bare clone plus a worktree per branch; PR numbers work as branch names; idle worktrees fold away.
 - `ssh cluster`: fzf picker over every cluster, shared connections, my own zsh and tools on any node without touching root's dotfiles; only changed files upload.
@@ -94,7 +94,7 @@ Built in a week to explain clusters: typed specs, auto layout, animated walkthro
 
 <Badge tone="primary">Astro</Badge> <Badge tone="primary">TypeScript</Badge> <Badge tone="primary">Custom layouts + lint</Badge> <Badge tone="primary">Bun</Badge>
 
-<Fold summary="More detail">
+<Fold id="fold-site-detail" summary="More detail">
 
 - Diagrams are typed TypeScript specs. TALA gave the first layouts; our own column, sequence and nested layouts, components and validators took over, sized with real font metrics. The build fails on short or crossing arrows, overlapping labels, dangling references or diagrams that would need scrolling.
 - Step-through walkthroughs with play/next, packets colored by response (2xx, 4xx, 5xx, hang), speed control and narration.
@@ -109,7 +109,7 @@ VSCode extensions easing review of agent diffs and large core refactors, zero-de
 
 <Badge tone="primary">TypeScript</Badge> <Badge tone="primary">JavaScript</Badge> <Badge tone="primary">Rust</Badge>
 
-<Fold summary="More detail">
+<Fold id="fold-smaller-tools-detail" summary="More detail">
 
 - **idiff**: groups a refactor's diff into sections and exports review bundles pinned to commits. **worktree-diff**: review any git worktree in VSCode's multi-file diff and leave comments for agents.
 - **[Chrome launcher](https://github.com/nascarsayan/chrome-launcher)**: fuzzy search over tabs, history and bookmarks; `>pr`, `>ticket`, `>wiki` commands over a pre-built index; plain JS, no build step.

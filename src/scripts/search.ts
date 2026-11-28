@@ -1,8 +1,10 @@
 /** Client side of the header search (see Search.astro). */
+import { url } from '@/lib/base';
+
 interface Entry { u: string; t: string; s: string; x: string }
 
 let index: Promise<Entry[]> | undefined;
-const load = () => (index ??= fetch('/search.json').then((r) => (r.ok ? r.json() : [])).catch(() => []));
+const load = () => (index ??= fetch(url('/search.json')).then((r) => (r.ok ? r.json() : [])).catch(() => []));
 
 function score(e: Entry, terms: string[]): number {
   const t = e.t.toLowerCase(), s = e.s.toLowerCase(), x = e.x.toLowerCase();
@@ -82,7 +84,7 @@ export function initSearch() {
     for (const { e } of results) {
       const li = document.createElement('li');
       const a = document.createElement('a');
-      a.href = e.u;
+      a.href = url(e.u);
       // Standalone apps have no way back to the site: new tab.
       if (e.s === 'App') { a.target = '_blank'; a.rel = 'noopener'; }
       a.setAttribute('role', 'option');

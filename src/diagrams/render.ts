@@ -25,9 +25,9 @@ function nodeShape(nd: SceneNode): string {
     case 'pill':
       return `<rect class="dg-shape" x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" rx="${n(h / 2)}"/>`;
     case 'external':
-      return `<rect class="dg-shape dg-external" x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" rx="10"/>`;
+      return `<rect class="dg-shape dg-external" x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}"/>`;
     default:
-      return `<rect class="dg-shape" x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}" rx="10"/>`;
+      return `<rect class="dg-shape" x="${n(x)}" y="${n(y)}" width="${n(w)}" height="${n(h)}"/>`;
   }
 }
 
@@ -82,7 +82,7 @@ function node(nd: SceneNode, delays: Delays, open?: Set<string>): string {
 
 function group(g: SceneGroup, delays: Delays): string {
   const label = g.label ? lines(g.label, g.x + 14, g.y + 8, 'dg-group-label', 'start') : '';
-  return `<g class="dg-group tone-${g.tone}" style="${delayStyle(delays, g.id)}" data-el="${esc(g.id)}" data-kind="group"${g.parent ? ` data-parent="${esc(g.parent)}"` : ''}><rect class="dg-group-box" x="${n(g.x)}" y="${n(g.y)}" width="${n(g.w)}" height="${n(g.h)}" rx="14"/>${label}</g>`;
+  return `<g class="dg-group tone-${g.tone}" style="${delayStyle(delays, g.id)}" data-el="${esc(g.id)}" data-kind="group"${g.parent ? ` data-parent="${esc(g.parent)}"` : ''}><rect class="dg-group-box" x="${n(g.x)}" y="${n(g.y)}" width="${n(g.w)}" height="${n(g.h)}"/>${label}</g>`;
 }
 
 /** Radius of the half-circle where a horizontal wire hops over a vertical one. */
@@ -220,7 +220,7 @@ function edge(e: SceneEdge, delays: Delays, hops: number[][] = []): { line: stri
   // No packet in the markup: hundreds of always-running SMIL loops cost every frame.
   // The player adds one only to the edges a step lights (data-dur is its loop time).
   const label = e.label
-    ? `<rect class="dg-edge-label-bg" x="${n(e.label.x - e.label.w / 2)}" y="${n(e.label.y - e.label.h / 2)}" width="${n(e.label.w)}" height="${n(e.label.h)}" rx="6"/>` +
+    ? `<rect class="dg-edge-label-bg" x="${n(e.label.x - e.label.w / 2)}" y="${n(e.label.y - e.label.h / 2)}" width="${n(e.label.w)}" height="${n(e.label.h)}"/>` +
       lines(e.label.text, e.label.x, e.label.y - (e.label.text.lines.length * e.label.text.lineHeight) / 2, 'dg-edge-label')
     : '';
   const len = pts.slice(1).reduce((sum, p, i) => sum + Math.hypot(p[0] - pts[i][0], p[1] - pts[i][1]), 0) + 20;

@@ -46,7 +46,7 @@ const { title, caption, id } = Astro.props;
 </section>
 
 <style>
-  .wt { margin: 28px 0; padding: 16px 18px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; background: var(--color-background); }
+  .wt { margin: 28px 0; padding: 16px 18px 18px; border: 1px solid var(--color-gray-100); border-radius: 0; background: var(--color-background); }
   .wt:focus-visible { outline: 2px solid var(--color-primary); }
   .wt-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 16px; margin-bottom: 12px; }
   .wt-title { font-weight: var(--font-weight-bold); }
@@ -76,7 +76,7 @@ const { title, caption, id } = Astro.props;
   .wt.is-js:not(.is-all) { margin-bottom: 40px; }
   .wt.is-js:not(.is-all)::before, .wt.is-js:not(.is-all)::after {
     content: ''; position: absolute; z-index: -1; height: 14px;
-    border: 1px solid var(--color-gray-300); border-top: 0; border-radius: 0 0 14px 14px; background: var(--color-background);
+    border: 1px solid var(--color-gray-300); border-top: 0; border-radius: 0; background: var(--color-background);
   }
   .wt.is-js:not(.is-all)::before { left: 10px; right: 10px; bottom: -7px; }
   .wt.is-js:not(.is-all)::after { left: 22px; right: 22px; bottom: -13px; }

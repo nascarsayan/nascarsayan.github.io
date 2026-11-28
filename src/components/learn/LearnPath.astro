@@ -44,11 +44,11 @@ const tone = (t: string) => TRACKS.find((x) => x.id === t)?.tone ?? 'neutral';
 <style>
   .home { margin: 0 0 8px; font-size: 0.8125rem; }
   .home a { color: var(--color-link); }
-  .org { max-width: 860px; margin: -12px 0 28px; padding: 12px 16px; border-radius: var(--radius); background: var(--color-cloud-100); font-size: 0.875rem; }
+  .org { max-width: 860px; margin: -12px 0 28px; padding: 12px 16px; border-radius: 0; background: var(--color-cloud-100); font-size: 0.875rem; }
   .tier { display: flex; align-items: center; gap: 10px; }
   .k { flex: 0 0 82px; font-size: 0.72rem; letter-spacing: 1px; text-transform: uppercase; color: var(--color-muted); }
   .chips { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
-  .line { width: 2px; height: 10px; margin: 2px 0 2px 130px; background: var(--color-gray-300); border-radius: 2px; }
+  .line { width: 2px; height: 10px; margin: 2px 0 2px 130px; background: var(--color-gray-300); border-radius: 0; }
   .chip { display: inline-block; padding: 1px 10px; border-radius: 999px; text-decoration: none; color: var(--color-text); background: var(--color-info-100); border: 1px solid transparent; }
   a.chip:hover { text-decoration: underline; }
   .chip.hub { border-color: var(--color-success); }

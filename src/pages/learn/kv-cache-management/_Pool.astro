@@ -43,7 +43,7 @@ const colour: Record<string, string> = { A: '#6366f1', B: '#14b8a6', C: '#f97316
 <style>
   .pool { display: flex; flex-wrap: wrap; gap: 14px 22px; margin: 6px 0 10px; }
   .pool-grid { display: grid; grid-template-columns: repeat(4, 150px); gap: 8px; }
-  .blk { padding: 6px 7px; border-radius: 8px; border: 1px solid var(--color-gray-300); background: var(--color-background); font-size: 0.75rem; transition: opacity 150ms; }
+  .blk { padding: 6px 7px; border-radius: 0; border: 1px solid var(--color-gray-300); background: var(--color-background); font-size: 0.75rem; transition: opacity 150ms; }
   .blk.s-free { border-style: dashed; opacity: 0.55; }
   .blk.s-used { background: color-mix(in srgb, #3b82f6 10%, transparent); border-color: color-mix(in srgb, #3b82f6 45%, transparent); }
   .blk.s-cached { background: color-mix(in srgb, #eab308 14%, transparent); border-color: color-mix(in srgb, #eab308 60%, transparent); }
@@ -51,9 +51,9 @@ const colour: Record<string, string> = { A: '#6366f1', B: '#14b8a6', C: '#f97316
   .blk-head, .blk-foot { display: flex; justify-content: space-between; align-items: center; gap: 4px; }
   .blk-id { font-weight: 700; }
   .blk-own { display: inline-flex; gap: 2px; }
-  .own { display: inline-block; min-width: 16px; padding: 0 4px; border-radius: 4px; color: #fff; font-size: 0.6875rem; font-weight: 700; text-align: center; }
+  .own { display: inline-block; min-width: 16px; padding: 0 4px; border-radius: 0; color: #fff; font-size: 0.6875rem; font-weight: 700; text-align: center; }
   .blk-toks { display: grid; grid-template-columns: repeat(2, 1fr); gap: 2px; margin: 4px 0; }
-  .tok { padding: 1px 3px; border-radius: 3px; background: var(--color-gray-100); font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.6875rem; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
+  .tok { padding: 1px 3px; border-radius: 0; background: var(--color-gray-100); font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.6875rem; white-space: pre; overflow: hidden; text-overflow: ellipsis; }
   .tok.empty { color: var(--color-gray-500); text-align: center; background: transparent; border: 1px dotted var(--color-gray-300); }
   .blk-foot { color: var(--color-gray-700); font-variant-numeric: tabular-nums; }
   .hash { font-family: var(--font-mono, ui-monospace, monospace); font-size: 0.6875rem; color: var(--color-muted); }
@@ -61,7 +61,7 @@ const colour: Record<string, string> = { A: '#6366f1', B: '#14b8a6', C: '#f97316
   .pt-title { font-weight: 700; font-size: 0.8125rem; }
   .pt-none, .pt-free { color: var(--color-muted); font-size: 0.75rem; }
   .pt-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
-  .pt-cell { padding: 1px 6px; border-radius: 4px; background: var(--color-cloud-100); font-variant-numeric: tabular-nums; }
+  .pt-cell { padding: 1px 6px; border-radius: 0; background: var(--color-cloud-100); font-variant-numeric: tabular-nums; }
   .pt-cell small { color: var(--color-muted); margin-right: 2px; }
   .pt-n { color: var(--color-muted); font-size: 0.75rem; }
   @media (max-width: 720px) { .pool-grid { grid-template-columns: repeat(2, 150px); } }

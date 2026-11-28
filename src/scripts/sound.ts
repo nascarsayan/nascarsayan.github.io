@@ -4,9 +4,8 @@
  * Every voice runs through a shared chain that keeps things gentle:
  *   voice → master gain (quiet) → low-pass (rounds off harsh highs) → compressor → speakers
  * Voices use sine/triangle waves with a short attack ramp (no clicks) and
- * exponential decay. Sound starts muted on every page load; turning it on is a
- * click, which is what lets the browser play audio. State is mirrored on
- * <html data-sound>.
+ * exponential decay. Sound starts muted unless the reader enabled it in
+ * /settings/; state is mirrored on <html data-sound>.
  */
 export type SoundKind =
   | 'menuOpen' | 'menuClose'      // nav dropdowns, dialogs
@@ -30,6 +29,16 @@ const LOWPASS_HZ = 2600;    // lower = mellower
 
 let ctx: AudioContext | null = null;
 let master: GainNode | null = null;
+let volumeNode: GainNode | null = null;
+
+/** Reader volume, 0–100 (% of the browser's output). Default 50; /settings/ stores it as 'sound-volume'. */
+export const DEFAULT_VOLUME = 50;
+let volume = DEFAULT_VOLUME;
+export const getVolume = () => volume;
+export function setVolume(pct: number) {
+  volume = Math.max(0, Math.min(100, Math.round(pct)));
+  if (volumeNode && ctx) volumeNode.gain.setValueAtTime(volume / 100, ctx.currentTime);
+}
 const lastPlayed = new Map<string, number>();
 
 let enabled = false;
@@ -53,7 +62,10 @@ function out(): { ctx: AudioContext; dest: AudioNode } {
     const comp = ctx.createDynamicsCompressor();
     comp.threshold.value = -24;
     comp.ratio.value = 4;
-    master.connect(lp).connect(comp).connect(ctx.destination);
+    volumeNode = ctx.createGain();
+    volumeNode.gain.value = volume / 100;
+    volumeNode.connect(ctx.destination);
+    master.connect(lp).connect(comp).connect(volumeNode);
   }
   if (ctx.state === 'suspended') ctx.resume();
   return { ctx, dest: master! };
@@ -98,15 +110,12 @@ function rawSweep(from: number, to: number, dur: number, gain: number) {
   osc.frequency.exponentialRampToValueAtTime(to, t + dur);
   env.gain.setValueAtTime(gain, t);
   env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
-  osc.connect(env).connect(ctx.destination);
+  osc.connect(env).connect(volumeNode!);
   osc.start(t);
   osc.stop(t + dur);
 }
 
-/**
- * Damped bubble: a sine whose pitch glides up fast (what makes a bubble sound),
- * through its own low-pass so it stays round and quiet, plus a faint second blip.
- */
+/** Damped bubble: a sine whose pitch glides up fast, plus a faint second blip. */
 function bubble() {
   const { ctx, dest } = out();
   const lp = ctx.createBiquadFilter();
@@ -146,10 +155,7 @@ export function stopSound(kind: SoundKind) {
   setTimeout(() => bus.disconnect(), 60);
 }
 
-/**
- * Three quick pops, 120 ms apart, each gliding up and a little higher and
- * louder than the last. Stops early if the pointer leaves.
- */
+/** Three quick pops, stopped early if the pointer leaves. */
 function risingPops() {
   const { ctx, dest } = out();
   stopSound('risingPops');
@@ -268,12 +274,18 @@ let wired = false;
 export function initSoundClicks() {
   if (wired) return;
   wired = true;
-  document.documentElement.dataset.sound = 'off';
+  // Off unless the reader turned it on in /settings/ (localStorage 'sound' = 'on').
+  let on = false;
+  try { on = localStorage.getItem('sound') === 'on'; } catch { /* storage off */ }
+  setSoundEnabled(on);
+  let stored: string | null = null;
+  try { stored = localStorage.getItem('sound-volume'); } catch { /* storage off */ }
+  const n = stored === null ? NaN : Number(stored);
+  setVolume(Number.isFinite(n) ? n : DEFAULT_VOLUME);
   document.addEventListener('click', (e) => {
     const el = e.target instanceof Element ? e.target.closest<HTMLElement>('[data-sound-click]') : null;
     if (el) playSound(el.dataset.soundClick as SoundKind);
   });
-  // Hover sounds (data-sound-hover="bubble"): once per entry into the element, mouse only.
   document.addEventListener('pointerover', (e) => {
     if (e.pointerType !== 'mouse') return;
     const el = e.target instanceof Element ? e.target.closest<HTMLElement>('[data-sound-hover]') : null;

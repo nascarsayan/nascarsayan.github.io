@@ -12,7 +12,7 @@ const { title, tag, tone = 'neutral' } = Astro.props;
 </section>
 
 <style>
-  .card { padding: 14px 18px; border-radius: 0 var(--radius) var(--radius) 0; background: var(--t-bg); border-left: 3px solid var(--t-fg); }
+  .card { padding: 14px 18px; border-radius: 0; background: var(--t-bg); border: 1px solid color-mix(in srgb, var(--t-fg) 40%, transparent); }
   .tag { display: inline-block; margin-bottom: 4px; font-size: 0.75rem; letter-spacing: 0.5px; text-transform: uppercase; color: var(--t-fg); }
   h4 { margin: 0 0 6px; font-size: 1rem; }
   .body { font-size: 0.9375rem; color: var(--color-gray-800); }

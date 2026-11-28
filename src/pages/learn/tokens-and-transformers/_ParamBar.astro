@@ -26,14 +26,14 @@ const pct = (n: number) => `${((n / total) * 100).toFixed(3)}%`;
 </figure>
 
 <style>
-  .pb { margin: 20px 0; padding: 14px 18px; border: 1px solid var(--color-gray-100); border-radius: 14px; }
+  .pb { margin: 20px 0; padding: 14px 18px; border: 1px solid var(--color-gray-100); border-radius: 0; }
   .pb-title { margin-bottom: 8px; font-weight: var(--font-weight-bold); }
   .pb-row { display: grid; grid-template-columns: 190px 1fr; align-items: center; gap: 10px; margin: 6px 0; font-size: 0.875rem; font-variant-numeric: tabular-nums; }
-  .pb-bar { display: flex; height: 18px; border-radius: 4px; background: var(--color-gray-100); overflow: hidden; }
+  .pb-bar { display: flex; height: 18px; border-radius: 0; background: var(--color-gray-100); overflow: hidden; }
   .pb-bar span { display: block; height: 100%; }
   .pb-leg { display: flex; flex-wrap: wrap; gap: 4px 16px; margin: 8px 0 0; padding: 0; list-style: none; font-size: 0.8125rem; }
   .pb-leg li { margin: 0; }
   .pb-leg li::before { content: none; }
-  .pb-leg i { display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 2px; }
+  .pb-leg i { display: inline-block; width: 10px; height: 10px; margin-right: 5px; border-radius: 0; }
   .pb-note { margin-top: 6px; font-size: 0.75rem; color: var(--color-muted); }
 </style>

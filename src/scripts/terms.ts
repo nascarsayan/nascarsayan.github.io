@@ -9,6 +9,7 @@
  * whole words (not inside kube-vip or --vip).
  */
 import { GLOSSARY, type GlossaryEntry } from '@/config/glossary';
+import { url } from '@/lib/base';
 
 const SKIP = 'h1, h2, h3, h4, h5, h6, a, code, pre, kbd, figure, button, .sx-controls, .qt, .term, .cm-mark, .cm, script, style';
 const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -86,7 +87,7 @@ function show(t: HTMLElement) {
   links.className = 'term-card-links';
   for (const l of byId.get(t.dataset.term ?? '')?.links ?? []) {
     const a = document.createElement('a');
-    a.href = l.href;
+    a.href = url(l.href);
     a.target = '_blank';
     a.rel = 'noopener';
     a.textContent = l.label;
@@ -94,7 +95,7 @@ function show(t: HTMLElement) {
   }
   const more = document.createElement('a');
   more.className = 'term-card-more';
-  more.href = `/glossary/#${t.dataset.term}`;
+  more.href = url(`/glossary/#${t.dataset.term}`);
   more.target = '_blank';
   more.rel = 'noopener';
   more.textContent = 'All definitions ↗';

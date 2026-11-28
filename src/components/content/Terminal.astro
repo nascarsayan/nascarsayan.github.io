@@ -17,7 +17,7 @@ const { title, lines } = Astro.props;
 </figure>
 
 <style>
-  .tty { margin: 24px 0; border-radius: 12px; overflow: hidden; background: var(--code-bg); box-shadow: 0 0 0 1px var(--code-border), var(--shadow-elevation-medium); color: var(--code-fg); }
+  .tty { margin: 24px 0; border-radius: 0; overflow: hidden; background: var(--code-bg); box-shadow: 0 0 0 1px var(--code-border), var(--shadow-elevation-medium); color: var(--code-fg); }
   :global(html[data-color-mode='dark']) .tty { box-shadow: 0 0 0 1px rgb(69 77 84 / 0.6); }
   .bar { display: flex; align-items: center; gap: 6px; padding: 10px 12px; background: var(--code-bar); }
   .bar span { width: 11px; height: 11px; border-radius: 999px; background: rgb(255 95 86); }

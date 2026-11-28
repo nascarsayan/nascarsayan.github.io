@@ -51,17 +51,17 @@ html[data-color-mode='dark'] .dg .tone-lime { --f: rgb(43 53 51); --s: rgb(181 2
    the viewport height (no scrolling). --w / --h are the natural size in px. */
 .dg-frame {
   position: relative;
-  padding: 20px;
+  padding: 12px;
   border: 1px solid var(--color-gray-100);
-  border-radius: 14px;
+  border-radius: 0;
   background: var(--dg-bg);
 }
 .dg-fit {
   margin-inline: auto;
   aspect-ratio: var(--w) / var(--h);
-  width: min(100%, calc(var(--w) * 1px), calc((100vh - 180px) * var(--w) / var(--h)));
-  /* Readable floor: never below 0.8 scale (box labels >= 11px); wider ones scroll sideways in .dg-scroll. */
-  min-width: min(calc(var(--w) * 0.8px), calc(var(--w) * 1px));
+  /* Fills the column at any page width (medium or wide): wide drawings scale down instead of scrolling
+     sideways, small ones grow up to 1.25x. Expand (full window) shows the detail. */
+  width: min(100%, calc(var(--w) * 1.25px));
 }
 .dg-scroll { overflow-x: auto; overscroll-behavior-x: contain; }
 .dg-scene { display: block; width: 100%; height: 100%; overflow: visible; }
@@ -69,11 +69,11 @@ html[data-color-mode='dark'] .dg .tone-lime { --f: rgb(43 53 51); --s: rgb(181 2
 /* The figure's description: body-size text in the text colour (it carries meaning, not decoration). */
 .dg > figcaption { margin-top: 10px; font-size: 1rem; line-height: 1.55; color: var(--color-text); }
 /* Colour key (spec.legend): inside the frame, under the drawing, swatches drawn like the boxes. */
-.dg-legend { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 4px 16px 10px; padding: 10px 14px; border-radius: 10px; background: var(--color-gray-100); list-style: none; font-size: 0.95rem; line-height: 1.4; color: var(--color-text); }
+.dg-legend { display: flex; flex-wrap: wrap; gap: 8px 22px; margin: 4px 16px 10px; padding: 10px 14px; border-radius: 0; background: var(--color-gray-100); list-style: none; font-size: 0.95rem; line-height: 1.4; color: var(--color-text); }
 .dg-legend li { display: inline-flex; align-items: center; gap: 8px; margin: 0; padding: 0; }
 .dg-legend li::before, .dg-legend li::marker { content: none; }
-.dg-legend .dg-sw { flex: none; width: 20px; height: 16px; border-radius: 5px; background: var(--f, var(--color-background)); border: 2px solid var(--s, var(--color-gray-300)); }
-.dg:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 4px; border-radius: 14px; }
+.dg-legend .dg-sw { flex: none; width: 20px; height: 16px; border-radius: 0; background: var(--f, var(--color-background)); border: 2px solid var(--s, var(--color-gray-300)); }
+.dg:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 4px; border-radius: 0; }
 
 /* Drawing. */
 .dg-scene text { font-family: var(--font-family); }
@@ -320,9 +320,9 @@ html.js .dg:not(.is-in) :is(.dg-node, .dg-group, .dg-lifeline, .dg-edge, .dg-ela
 .dg-caption {
   margin-top: 12px;
   padding: 10px 14px;
-  border-left: 3px solid var(--color-primary);
+  border: 1px solid color-mix(in srgb, var(--color-primary) 30%, transparent);
   background: var(--color-cloud-100);
-  border-radius: 0 var(--radius) var(--radius) 0;
+  border-radius: 0;
   font-size: 0.9375rem;
   min-height: 2.6em;
 }
@@ -330,6 +330,13 @@ html[data-color-mode='dark'] .dg-caption { background: var(--color-card-bg); }
 .dg-caption .dg-step-title { margin-bottom: 2px; }
 .dg-caption > :last-child { margin-bottom: 0; }
 
+/* In an article, a diagram spans the whole page area (screen minus the sidebar), not just the text column:
+   --bleed is that width; the figure is centred on the column with equal negative margins. */
+.prose figure.dg:not(.is-expanded) {
+  --bleed: max(100%, calc(100vw - var(--shell-left, 0px) - 2 * var(--viewport-padding) - 16px));
+  width: var(--bleed);
+  margin-inline: calc((100% - var(--bleed)) / 2);
+}
 /* Expanded: the figure fills the window, still fitted. */
 .dg.is-expanded { position: fixed; inset: 0; z-index: var(--z-overlay); margin: 0; padding: 8px 10px; overflow: auto; background: var(--color-background); }
 .dg.is-expanded .dg-title { margin-bottom: 4px; padding-inline: 6px; }
@@ -344,9 +351,8 @@ html:has(.dg.is-expanded) { overflow: hidden; }
 .dg-card {
   position: absolute; z-index: 2;
   padding: 12px 14px 13px;
-  border: 1px solid color-mix(in srgb, var(--s, var(--color-gray-300)) 40%, transparent);
-  border-top: 3px solid var(--s, var(--color-primary));
-  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--s, var(--color-gray-300)) 60%, transparent);
+  border-radius: 0;
   background: var(--color-background);
   box-shadow: var(--shadow-elevation-medium);
   font-size: 0.84rem; line-height: 1.45;
@@ -368,7 +374,7 @@ html:has(.dg.is-expanded) { overflow: hidden; }
 .dg-card-info p + p, .dg-card-info p + ul, .dg-card-info ul + p { margin-top: 6px; }
 .dg-card-info ul { margin: 4px 0 0; padding-left: 18px; list-style: disc; }
 .dg-card-info li + li { margin-top: 2px; }
-.dg-card-info code { padding: 0 4px; border-radius: 4px; font-family: var(--font-mono); font-size: 0.92em; background: var(--color-gray-100); }
+.dg-card-info code { padding: 0 4px; border-radius: 0; font-family: var(--font-mono); font-size: 0.92em; background: var(--color-gray-100); }
 .dg-card-info a { color: var(--color-link); text-decoration: underline; text-decoration-color: var(--color-link-line); text-underline-offset: 2px; }
 /* A box held under the pointer for 2 s, drawn above everything. */
 
@@ -376,7 +382,7 @@ html:has(.dg.is-expanded) { overflow: hidden; }
 .dg-zoomwrap { position: relative; }
 /* No overscroll-behavior: contain here or on .dg-seqvp: a frame with nothing (left) to scroll
    must hand the wheel to the page. Ctrl/⌘ + wheel is the only wheel the diagram keeps (zoom). */
-.dg-viewport { max-height: min(76vh, 960px); overflow: auto; cursor: grab; border-radius: 10px; background: var(--color-background); }
+.dg-viewport { max-height: min(76vh, 960px); overflow: auto; cursor: grab; border-radius: 0; background: var(--color-background); }
 .dg-viewport.is-panning { cursor: grabbing; user-select: none; }
 .dg-viewport .dg-fit { width: calc(var(--w) * var(--z, 1) * 1px); min-width: 0; max-width: none; margin: 0 auto; }
 .dg.is-expanded .dg-viewport { max-height: calc(100vh - 170px); }
@@ -393,7 +399,7 @@ html:has(.dg.is-expanded) { overflow: hidden; }
 .dg-zoom-val { min-width: 46px; height: 30px; display: inline-grid; place-content: center; border-inline: 1px solid var(--color-gray-100); font-size: 0.875rem; font-weight: var(--font-weight-medium); font-variant-numeric: tabular-nums; color: var(--color-text); }
 
 /* Tall sequence diagrams: fixed-height frame, participant cards pinned (scripts/diagram-seq.ts). */
-.dg-seqvp { position: relative; max-height: min(72vh, 760px); overflow-y: auto; border-radius: 10px; }
+.dg-seqvp { position: relative; max-height: min(72vh, 760px); overflow-y: auto; border-radius: 0; }
 .dg-seqvp:focus-visible { outline: 2px solid var(--color-primary); }
 .dg-seqhead { position: sticky; top: 0; z-index: 2; margin: 0 auto; aspect-ratio: var(--w) / var(--hh); background: var(--dg-bg); box-shadow: 0 6px 8px -8px rgb(0 0 0 / 0.25); }
 .dg-seqhead-svg { display: block; width: 100%; height: 100%; }

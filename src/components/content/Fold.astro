@@ -1,49 +1,56 @@
 ---
 /**
- * A section of detail the reader can open: <details>, styled like the site's other
- * collapsible parts (Learn topic groups, walkthroughs).
+ * A section of detail the reader can open: <details> with a chevron and the summary text, no box; the body is indented
+ * under the text.
  *
  *   <Fold summary="Setup steps: test node, save state, …">…Markdown…</Fold>
  *
  * Closed by default (`open` to start open). Open, its summary sticks under the site
  * header while you read, so it can be collapsed from anywhere; collapsing scrolls back
- * to it. A link to anything inside opens it first (ArticleLayout).
+ * to it. A link to anything inside opens it first (ArticleLayout). Every fold is a link target: `id`, else
+ * `fold-<summary as a slug>`; the summary shows a copy-link icon on hover (ArticleLayout).
  */
-interface Props { summary: string; open?: boolean }
+interface Props { summary: string; open?: boolean; id?: string }
 const { summary, open = false } = Astro.props;
+// Link target: the given id, else one from the summary text (lowercase words joined by hyphens).
+const id = Astro.props.id ?? `fold-${summary.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 60)}`;
 ---
 
-<details class="fold" open={open}>
-  <summary><span class="chev" aria-hidden="true"></span><span class="t">{summary}</span><span class="hint" aria-hidden="true"></span></summary>
+<details class="fold" open={open} id={id}>
+  <summary><svg class="chev" viewBox="0 0 10 10" aria-hidden="true"><path d="M3.5 2 L6.5 5 L3.5 8" /></svg><span class="t">{summary}</span></summary>
   <div class="fold-body"><slot /></div>
 </details>
 
 <style>
-  .fold { margin: 16px 0 24px; border: 1px solid var(--color-gray-100); border-radius: 12px; background: var(--color-background); }
+  /* Spacing (checked by scripts/lint-layout.mjs): 4px between stacked folds; an open fold ends 12px below its
+     last line (the last child loses its own margin), so the gap after it never depends on what it holds. */
+  .fold { margin: 12px 0 20px; }
+  .fold + .fold { margin-top: -16px; }
   .fold > summary {
-    display: flex; align-items: center; gap: 12px; padding: 12px 16px;
-    list-style: none; cursor: pointer; user-select: none; border-radius: 12px;
-    transition: background 150ms;
+    font-weight: normal; border: 0;
+    display: flex; align-items: center; gap: 10px; padding: 6px 0;
+    list-style: none; cursor: pointer; user-select: none;
   }
   .fold > summary::-webkit-details-marker { display: none; }
-  .fold > summary:hover { background: var(--color-cloud-100); }
-  .fold > summary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; }
-  .chev { flex: none; width: 8px; height: 8px; border-right: 2px solid currentColor; border-bottom: 2px solid currentColor; transform: rotate(-45deg); transition: transform 150ms; color: var(--color-gray-700); }
-  .fold[open] > summary .chev { transform: rotate(45deg); }
-  .t { font-weight: var(--font-weight-bold); color: var(--color-text); }
-  .fold > summary:hover .t { color: var(--color-primary); }
-  .hint { margin-left: auto; font-size: 0.8125rem; color: var(--color-muted); white-space: nowrap; }
-  .hint::after { content: 'Show'; }
-  .fold[open] > summary .hint::after { content: 'Hide'; }
-  .fold[open] > summary {
-    position: sticky; top: var(--header-height); z-index: 3;
-    background: var(--color-background); border-bottom: 1px solid var(--color-gray-100); border-radius: 12px 12px 0 0;
-    transition: top 320ms var(--ease-soft), background 150ms;
+  .fold > summary:focus-visible { outline: 2px solid var(--color-primary); outline-offset: 2px; border-radius: 0; }
+  /* An SVG stroke: both arms render at the same width at any zoom, unlike a rotated CSS border. */
+  .chev {
+    flex: none; width: 10px; height: 10px; color: var(--color-muted);
+    fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round;
+    transition: transform 150ms, color 150ms;
   }
-  .fold[open] > summary:hover { background: var(--color-cloud-100); }
+  .fold[open] > summary .chev { transform: rotate(90deg); }
+  .t { font-weight: var(--font-weight-medium); color: var(--color-text); transition: color 150ms; }
+  .fold > summary:hover .t, .fold > summary:hover .chev { color: var(--color-primary); }
+  .fold[open] > summary {
+    position: sticky; top: var(--header-height); z-index: 3; background: var(--color-background);
+    transition: top 320ms var(--ease-soft);
+  }
   :global(html.header-hidden) .fold[open] > summary { top: 0; }
-  .fold-body { padding: 4px 20px 16px; }
-  .fold-body > :global(:first-child) { margin-top: 12px; }
+  .fold > .fold-body { margin: 0; padding: 0 0 12px 18px; }
+  .fold-body > :global(:first-child) { margin-top: 4px; }
+  .fold-body > :global(:nth-last-child(1 of :not(script, style, template, link))),
+  .fold-body > :global(:nth-last-child(1 of :not(script, style, template, link)) :last-child) { margin-bottom: 0; }
 </style>
 
 <script>

@@ -1,13 +1,16 @@
 ---
 import '@/styles/global.css';
 import '@/styles/motion.css';
+import '@/styles/code-themes.css';
+import '@/styles/accents.css';
 import Header from '@/components/header/Header.astro';
+import Sidebar from '@/components/header/Sidebar.astro';
 import Footer from '@/components/footer/Footer.astro';
 import { SITE } from '@/config/site';
 
-/** toc: the page has a contents rail; the header shows its toggle (left of the name). */
-interface Props { title?: string; description?: string; htmlClass?: string; toc?: boolean }
-const { title, description = SITE.description, htmlClass, toc = false } = Astro.props;
+/** Slot "sidebar": the page's own section list, shown under "On this page" in the Sidebar. */
+interface Props { title?: string; description?: string; htmlClass?: string }
+const { title, description = SITE.description, htmlClass } = Astro.props;
 const fullTitle = title && title !== SITE.title ? `${title} • ${SITE.title}` : SITE.title;
 ---
 
@@ -23,7 +26,7 @@ const fullTitle = title && title !== SITE.title ? `${title} • ${SITE.title}` :
     <meta property="og:description" content={description} />
     <!-- Theme: auto (follows the browser/OS, live), light or dark. Auto is the
          default; an explicit choice is kept in localStorage ('theme') and honoured
-         on every visit until the reader picks auto again (ThemeToggle).
+         on every visit until the reader picks auto again (/settings/).
          html[data-theme] is the choice, html[data-color-mode] what is shown. -->
     <script is:inline>
       (function () {
@@ -39,29 +42,44 @@ const fullTitle = title && title !== SITE.title ? `${title} • ${SITE.title}` :
         mq.addEventListener('change', function (e) {
           if (root.dataset.theme === 'auto') root.dataset.colorMode = e.matches ? 'dark' : 'light';
         });
-        root.dataset.sound = 'off'; // sound starts muted on every load
+        root.dataset.sound = localStorage.getItem('sound') === 'on' ? 'on' : 'off'; // off unless turned on in /settings/
         localStorage.removeItem('sound-enabled'); // older builds persisted it
-        // Contents start as a dash rail unless the reader opened them before.
-        if (localStorage.getItem('toc') !== 'open') root.dataset.toc = 'collapsed';
+        // The left sidebar starts open unless the reader closed it before (Sidebar).
+        localStorage.removeItem('toc'); // older builds' contents-rail key
+        if (localStorage.getItem('sidebar') === 'collapsed') root.dataset.sidebar = 'collapsed';
+        // Page width: medium unless the reader picked wide (WidthToggle).
+        if (localStorage.getItem('width') === 'wide') root.dataset.width = 'wide';
+        // Code themes per mode (/settings/, src/config/code-themes.mjs); unset = GitHub.
+        var cl = localStorage.getItem('code-light'), cd = localStorage.getItem('code-dark');
+        if (cl && /^[a-z]+$/.test(cl)) root.dataset.codeLight = cl;
+        if (cd && /^[a-z]+$/.test(cd)) root.dataset.codeDark = cd;
+        // Accent colour (/settings/, src/config/accents.ts); unset = slate.
+        var ac = localStorage.getItem('accent');
+        if (ac && /^[a-z]+$/.test(ac)) root.dataset.accent = ac;
       })();
     </script>
     <slot name="head" />
   </head>
   <body>
     <a class="skip-link" href="#main">Skip to content</a>
-    <div class="page">
-      <Header toc={toc} />
-      <slot name="hero" />
-      <main id="main" class="main">
-        <slot />
-      </main>
-      <Footer />
+    <Sidebar hasPage={Astro.slots.has('sidebar')}><slot name="sidebar" slot="page" /></Sidebar>
+    <div class="shell">
+      <div class="page">
+        <Header />
+        <slot name="hero" />
+        <main id="main" class="main">
+          <slot />
+        </main>
+        <Footer />
+      </div>
     </div>
     <script>
       import { initReveal } from '@/scripts/reveal';
       import { initSoundClicks } from '@/scripts/sound';
       import { initTerms } from '@/scripts/terms';
+      import { initCodeCopy } from '@/scripts/code-copy';
       initReveal();
+      initCodeCopy();
       initSoundClicks();
       initTerms();
       // Links off this site open in a new tab (links added later, e.g. term cards, set their own target).
@@ -82,7 +100,7 @@ const fullTitle = title && title !== SITE.title ? `${title} • ${SITE.title}` :
     z-index: var(--z-skip);
     padding: 8px 16px;
     background: var(--color-background);
-    border-radius: 4px;
+    border-radius: 0;
     transform: translateY(-200%);
   }
   .skip-link:focus { transform: none; }

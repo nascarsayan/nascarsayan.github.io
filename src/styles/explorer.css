@@ -8,7 +8,7 @@
   font-family: var(--font-family);
   font-size: 0.875rem;
   background: var(--color-cloud-100);
-  border-radius: var(--radius);
+  border-radius: 0;
 }
 .sx-row { display: grid; grid-template-columns: 110px 1fr; gap: 12px; align-items: center; }
 .sx-row[hidden] { display: none; }
